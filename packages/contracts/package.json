@@ -1,0 +1,8 @@
+{
+  "name": "@ses/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zod schemas defining the API contract, shared by client and server",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

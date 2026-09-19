@@ -1,0 +1,7 @@
+{
+  "name": "@ses/api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NestJS API (modular monolith) + BullMQ workers. Scaffolded in Roadmap T006.",
+  "scripts": {}
+}

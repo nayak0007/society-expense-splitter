@@ -1,0 +1,12 @@
+node_modules/
+pnpm-lock.yaml
+**/node_modules/**
+coverage/
+.turbo/
+expo-env.d.ts
+
+# Normative docs are source-of-truth prose — never reformat them.
+docs/PRD.md
+docs/Architecture.md
+docs/Roadmap.md
+docs/*.md

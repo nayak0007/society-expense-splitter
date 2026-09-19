@@ -1,0 +1,2 @@
+# Enforce Conventional Commits (SAD §18.9)
+pnpm exec commitlint --edit "$1"

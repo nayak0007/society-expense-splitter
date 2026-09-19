@@ -1,0 +1,2 @@
+# Runs lint-staged on staged files (eslint --fix + prettier)
+pnpm exec lint-staged

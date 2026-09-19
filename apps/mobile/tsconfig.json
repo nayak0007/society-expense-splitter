@@ -1,0 +1,14 @@
+{
+  "extends": "../../packages/config/tsconfig/react-native.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"],
+      "@ses/domain": ["../../packages/domain/src/index.ts"],
+      "@ses/contracts": ["../../packages/contracts/src/index.ts"],
+      "@ses/split-engine": ["../../packages/split-engine/src/index.ts"],
+      "@ses/db-schema": ["../../packages/db-schema/src/index.ts"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx", ".expo/types/**/*.ts", "expo-env.d.ts", "nativewind-env.d.ts"],
+  "exclude": ["node_modules"]
+}

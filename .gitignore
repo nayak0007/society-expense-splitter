@@ -1,0 +1,38 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# Turbo
+.turbo/
+
+# Builds & caches
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Environment — examples are committed, real values never are
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Tool caches
+.eslintcache
+jest-cache/
+
+# Freebuff / agent workspace metadata (local only)
+.freebuff/

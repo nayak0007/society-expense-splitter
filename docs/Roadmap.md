@@ -82,6 +82,7 @@
 ---
 
 #### T001 · Initialise the monorepo
+**Status** — ✅ Complete: workspace (apps/* + packages/*), root scripts, turbo pipeline (build/lint/typecheck/test/dev), .nvmrc, engines pin, LOCAL_SETUP.md stub. pnpm install + lockfile verified.
 **Objective** — Create the Turborepo + pnpm workspace skeleton with all app and package directories, root scripts and a working local setup guide.
 **Depends on** —
 **Create** `package.json`, `pnpm-workspace.yaml`, `turbo.json`, `.gitignore`, `.nvmrc`, `README.md`, `docs/guides/LOCAL_SETUP.md`, placeholder `package.json` in `apps/{mobile,api}` and `packages/{contracts,domain,split-engine,db-schema,config}`
@@ -92,6 +93,7 @@
 **Time** 60 min · **Difficulty** Easy
 
 #### T002 · Shared TypeScript configuration
+**Status** — ✅ Complete: presets (base/node/react-native/library) with strict + noUncheckedIndexedAccess + noImplicitOverride + exactOptionalPropertyTypes; aliases `@/*` and `@ses/*` in mobile (the `@shared/*` pattern was folded into `@ses/*` package aliases — a two-`*` pattern is invalid TS); `pnpm typecheck` green from root.
 **Objective** — Create `packages/config/tsconfig` presets (base, node, react-native, library) and wire every workspace to extend them with strict settings.
 **Depends on** T001
 **Create** `packages/config/tsconfig/{base,node,react-native,library}.json`, `packages/config/package.json`
@@ -102,6 +104,7 @@
 **Time** 45 min · **Difficulty** Easy
 
 #### T003 · Shared ESLint and Prettier presets
+**Status** — ✅ Complete: flat-config presets in packages/config (no-explicit-any error, no-console error with API allowlist, import/no-cycle, raw-hex ban in .tsx, cross-feature-import ban, react-hooks rules); `pnpm lint` + `format:check` green.
 **Objective** — Create shared lint configuration including the project's custom rules: no `any`, no raw hex colours in `.tsx`, no `console.log`, no literal strings in JSX, no barrel re-exports.
 **Depends on** T002
 **Create** `packages/config/eslint-preset/{base,node,react-native}.js`, `packages/config/prettier/index.js`, `.prettierignore`
@@ -112,6 +115,7 @@
 **Time** 60 min · **Difficulty** Medium
 
 #### T004 · Husky, lint-staged and commitlint
+**Status** — ✅ Complete: pre-commit (lint-staged: eslint --fix + prettier) and commit-msg (commitlint, SAD §18.9 types/scopes) verified — bad messages and unknown scopes rejected locally.
 **Objective** — Enforce formatting, linting and commit-message standards before code ever reaches CI.
 **Depends on** T003
 **Create** `.husky/{pre-commit,commit-msg}`, `commitlint.config.js`, `lint-staged.config.js`
@@ -122,6 +126,7 @@
 **Time** 45 min · **Difficulty** Easy
 
 #### T005 · Scaffold the Expo application
+**Status** — ✅ Complete: Expo Router (typed routes, four route groups as placeholders), NativeWind 4 + Tailwind 3 (metro/babel/tailwind/global.css), app.config.ts. Project initialization additionally wired React Query (NetInfo/AppState-backed online+focus managers), Zustand persisted over MMKV, React Hook Form + Zod resolver facade, and zod-validated env config. Verified: lint, typecheck, format, expo-doctor 21/21, and a full Metro android bundle compile.
 **Objective** — Create the Expo app with Expo Router, TypeScript, NativeWind and the four route groups as empty placeholders.
 **Depends on** T002, T003
 **Create** `apps/mobile/app/_layout.tsx`, `apps/mobile/app/index.tsx`, `apps/mobile/app/(auth)/_layout.tsx`, `apps/mobile/app/(setup)/_layout.tsx`, `apps/mobile/app/(app)/_layout.tsx`, `apps/mobile/app.config.ts`, `apps/mobile/babel.config.js`, `apps/mobile/metro.config.js`, `apps/mobile/tailwind.config.js`, `apps/mobile/global.css`
@@ -165,6 +170,7 @@
 **Time** 60 min · **Difficulty** Medium
 
 #### T009 · Mobile environment and EAS configuration
+**Status** — ✅ Complete (locally verifiable scope): app.config.ts env-driven, eas.json with development/preview/production channels, .env.example (only the four SAD §19.2 public vars), src/constants/config.ts validates public values with Zod at module load, scheme `societyexpense` registered. EAS projectId remains a placeholder until an EAS account/project exists.
 **Objective** — Configure `app.config.ts` with environment-driven values, EAS build profiles for three channels, and a clear public/secret boundary.
 **Depends on** T005
 **Create** `apps/mobile/eas.json`, `apps/mobile/src/constants/config.ts`, `apps/mobile/.env.example`

@@ -1,0 +1,31 @@
+{
+  "name": "society-expense-splitter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Monorepo for the Society Expense Splitter app (Expo mobile + NestJS API + shared packages)",
+  "packageManager": "pnpm@11.5.2",
+  "engines": {
+    "node": ">=24.16.0"
+  },
+  "scripts": {
+    "prepare": "husky",
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "echo 'no tests yet — Jest presets land with CI (Roadmap T014)' && exit 0",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,css,md,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,css,md,yml,yaml}\""
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^20.1.0",
+    "@eslint/js": "^9.39.2",
+    "eslint": "^9.39.2",
+    "globals": "^16.5.0",
+    "@commitlint/config-conventional": "^20.0.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.4",
+    "prettier": "^3.6.2",
+    "turbo": "^2.5.8"
+  }
+}

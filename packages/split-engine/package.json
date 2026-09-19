@@ -1,0 +1,8 @@
+{
+  "name": "@ses/split-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deterministic expense split engine (equal, percentage, shares, apartment-based, custom) with exact paise arithmetic. Shared by api and mobile.",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

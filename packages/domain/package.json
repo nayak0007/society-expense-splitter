@@ -1,0 +1,8 @@
+{
+  "name": "@ses/domain",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pure domain layer: entities, value objects, ports. Zero runtime dependencies. Shared by api and mobile.",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}
