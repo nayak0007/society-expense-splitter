@@ -7,7 +7,8 @@ import { useColorScheme } from 'nativewind';
 import { Linking } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import { handleAuthRedirectUrl } from '@/features/auth/api/auth.api';
+import { useSessionRestore } from '@/features/auth/hooks/useSessionRestore';
+import { handleAuthDeepLink } from '@/features/auth/services/auth-deep-link';
 import { useSocietyBootstrap } from '@/features/society/hooks/use-society-bootstrap';
 import { handleSocietyDeepLink } from '@/features/society/services/society-deep-link';
 import { createQueryClient } from '@/lib/api/query-client';
@@ -22,6 +23,10 @@ import { ThemeProvider } from '@/theme';
  */
 export function AppProviders({ children }: { children: ReactNode }) {
   const [queryClient] = useState(() => createQueryClient());
+
+  // Session restore + profile bootstrap. Mounted here, not in a screen, because
+  // the resolver needs a profile to have settled before it can route.
+  useSessionRestore();
 
   useEffect(() => {
     const teardown = setupReactQueryNetwork();
@@ -84,5 +89,7 @@ function SocietyBootstrap() {
 
 function handleIncomingUrl(url: string): void {
   if (handleSocietyDeepLink(url)) return;
-  void handleAuthRedirectUrl(url);
+  // Verifies the link, installs the session it carries, then routes by kind
+  // (signup confirmation → verify screen, recovery → new password).
+  void handleAuthDeepLink(url);
 }

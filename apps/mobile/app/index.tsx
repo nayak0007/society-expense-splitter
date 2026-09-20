@@ -1,40 +1,62 @@
 import { Redirect } from 'expo-router';
 
 import { SplashScreen } from '@/components/feedback/SplashScreen';
-import { selectSessionStatus, useAuthStore } from '@/stores/auth.store';
+import {
+  selectIsProfileComplete,
+  selectProfileStatus,
+  selectSessionStatus,
+  useAuthStore,
+} from '@/stores/auth.store';
 import { selectMemberships, selectSocietiesStatus, useSocietyStore } from '@/stores/society.store';
 
 /**
  * Route resolver — runs once per cold start and is the only place routing
  * decisions are made (SAD §5.2).
  *
- * Four states map to four route groups:
- *   restoring              → Splash
- *   no session             → (auth)
- *   no membership          → (setup)/society-choice
- *   only pending requests  → (setup)/join-pending
- *   otherwise              → (app)
+ * The six outcomes, in the order they are decided:
+ *   restoring                       → Splash
+ *   no session                      → (auth)
+ *   session, profile still loading  → Splash
+ *   session, profile incomplete     → (setup)/profile-setup
+ *   no usable membership            → (setup)/society-choice
+ *   only pending requests           → (setup)/join-pending
+ *   otherwise                       → (app)
  *
- * Memberships arrive from the bootstrap query in the provider tree, so this
- * component only reads state — it never fetches. A failed memberships fetch
- * deliberately falls through to `(setup)` rather than holding the splash
- * forever: the setup screens can retry, the splash cannot.
+ * Memberships and the profile arrive from the bootstrap hooks in the provider
+ * tree, so this component only reads state — it never fetches.
+ *
+ * IMPORTANT: a *failed* profile or memberships fetch deliberately falls through
+ * rather than holding the splash forever (a user offline with a valid session
+ * must still reach the app). Both are retried on foreground by their hooks.
  */
 export default function Index() {
   const status = useAuthStore(selectSessionStatus);
+  const profileStatus = useAuthStore(selectProfileStatus);
+  const profileComplete = useAuthStore(selectIsProfileComplete);
   const societiesStatus = useSocietyStore(selectSocietiesStatus);
   const memberships = useSocietyStore(selectMemberships);
 
-  const waitingForSession = status === 'restoring';
-  const waitingForSocieties =
-    status === 'authenticated' && societiesStatus !== 'ready' && societiesStatus !== 'error';
+  const restoringSession = status === 'restoring';
+  const loadingProfile =
+    status === 'authenticated' && profileStatus !== 'ready' && profileStatus !== 'error';
+  const loadingSocieties =
+    status === 'authenticated' &&
+    profileStatus === 'ready' &&
+    societiesStatus !== 'ready' &&
+    societiesStatus !== 'error';
 
-  if (waitingForSession || waitingForSocieties) {
+  if (restoringSession || loadingProfile || loadingSocieties) {
     return <SplashScreen />;
   }
 
   if (status === 'unauthenticated') {
     return <Redirect href="/(auth)/welcome" />;
+  }
+
+  // Only a *known* incomplete profile gates: an error must not trap the user in
+  // onboarding they cannot complete offline.
+  if (profileStatus === 'ready' && !profileComplete) {
+    return <Redirect href="/(setup)/profile-setup" />;
   }
 
   if (memberships.length === 0) {

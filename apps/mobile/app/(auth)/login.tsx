@@ -1,8 +1,9 @@
-import { router, Stack } from 'expo-router';
+import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { View } from 'react-native';
 
+import { PasswordField } from '@/components/forms/PasswordField';
 import { Button } from '@/components/ui/Button';
 import { Text } from '@/components/ui/Text';
 import { TextInput } from '@/components/ui/TextInput';
@@ -10,28 +11,40 @@ import { signInWithGoogle, signInWithPassword } from '@/features/auth/api/auth.a
 import { loginResolver, type LoginCredentials } from '@/features/auth/schemas/auth.schemas';
 
 /**
- * Login — email/password + Google (SAD §5.2). API errors map to inline MD3
- * supporting text; successful sign-in flips the session store, and the
- * (auth) group redirect (SAD §5.5) moves the user into the app.
+ * Login — email/password + Google (SAD §5.2).
+ *
+ * Two PRD §3.1 rules are visible here:
+ *  - failures read "Email or password is incorrect", never revealing whether the
+ *    email exists (the mapping is in `auth.api.ts`, applied to every failure);
+ *  - an unconfirmed email is not a dead end: the user is routed to the verify
+ *    screen with a resend, because that is the only thing they can actually do.
+ *
+ * Deep-link failures (expired confirmation or recovery link) arrive as
+ * `?linkError=` and render inline.
  */
 export default function Login() {
+  const params = useLocalSearchParams<{ linkError?: string; email?: string }>();
   const {
     control,
     handleSubmit,
     formState: { isSubmitting },
   } = useForm<LoginCredentials>({
     resolver: loginResolver,
-    defaultValues: { email: '', password: '' },
+    defaultValues: { email: params.email ?? '', password: '' },
   });
   const [googleLoading, setGoogleLoading] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(params.linkError ?? null);
 
   const onSubmit = handleSubmit(async (values) => {
     setAuthError(null);
     const result = await signInWithPassword(values.email, values.password);
-    if (!result.ok && result.error !== undefined) {
-      setAuthError(result.error);
+    if (result.ok) return;
+
+    if (result.code === 'email_not_confirmed') {
+      router.push({ pathname: '/(auth)/verify-email', params: { email: values.email } });
+      return;
     }
+    setAuthError(result.error ?? 'Could not sign in. Please try again.');
   });
 
   const onGoogle = async () => {
@@ -39,8 +52,8 @@ export default function Login() {
     setGoogleLoading(true);
     const result = await signInWithGoogle();
     setGoogleLoading(false);
-    if (!result.ok && result.error !== undefined) {
-      setAuthError(result.error);
+    if (!result.ok) {
+      setAuthError(result.error ?? 'Could not sign in with Google.');
     }
   };
 
@@ -51,49 +64,51 @@ export default function Login() {
         <Controller
           control={control}
           name="email"
-          render={({ field: { onChange, onBlur, value } }) => (
+          render={({ field }) => (
             <TextInput
               label="Email"
               autoCapitalize="none"
+              autoCorrect={false}
               autoComplete="email"
               keyboardType="email-address"
-              value={value}
-              onChangeText={onChange}
-              onBlur={onBlur}
+              value={field.value}
+              onChangeText={field.onChange}
+              onBlur={field.onBlur}
             />
           )}
         />
         <Controller
           control={control}
           name="password"
-          render={({ field: { onChange, onBlur, value } }) => (
-            <TextInput
+          render={({ field }) => (
+            <PasswordField
               label="Password"
-              secureTextEntry
-              autoComplete="password"
-              value={value}
-              onChangeText={onChange}
-              onBlur={onBlur}
+              value={field.value}
+              onChangeText={field.onChange}
+              onBlur={field.onBlur}
             />
           )}
         />
 
-        {authError !== null && (
+        {authError !== null ? (
           <Text variant="bodySmall" color="error">
             {authError}
           </Text>
-        )}
+        ) : null}
 
-        <Button variant="filled" onPress={onSubmit} loading={isSubmitting}>
+        <Button variant="filled" loading={isSubmitting} onPress={() => void onSubmit()}>
           Log in
         </Button>
 
-        <Button variant="outlined" onPress={onGoogle} loading={googleLoading}>
+        <Button variant="outlined" loading={googleLoading} onPress={() => void onGoogle()}>
           Continue with Google
         </Button>
 
         <Button variant="text" onPress={() => router.push('/(auth)/forgot-password')}>
           Forgot password?
+        </Button>
+        <Button variant="text" onPress={() => router.replace('/(auth)/register')}>
+          Create an account
         </Button>
       </View>
     </View>

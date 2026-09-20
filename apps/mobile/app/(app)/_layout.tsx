@@ -3,7 +3,12 @@ import { Redirect, Tabs } from 'expo-router';
 import type { ComponentProps } from 'react';
 
 import { useTheme } from '@/theme';
-import { selectSessionStatus, useAuthStore } from '@/stores/auth.store';
+import {
+  selectIsProfileComplete,
+  selectProfileStatus,
+  selectSessionStatus,
+  useAuthStore,
+} from '@/stores/auth.store';
 import { selectMemberships, selectSocietiesStatus, useSocietyStore } from '@/stores/society.store';
 
 type IoniconsName = ComponentProps<typeof Ionicons>['name'];
@@ -24,12 +29,21 @@ type TabScreenOptions = NonNullable<ComponentProps<typeof Tabs.Screen>['options'
  */
 export default function AppLayout() {
   const status = useAuthStore(selectSessionStatus);
+  const profileStatus = useAuthStore(selectProfileStatus);
+  const profileComplete = useAuthStore(selectIsProfileComplete);
   const societiesStatus = useSocietyStore(selectSocietiesStatus);
   const memberships = useSocietyStore(selectMemberships);
   const { colors } = useTheme();
 
   if (status !== 'authenticated') {
     return <Redirect href="/(auth)/login" />;
+  }
+
+  // Onboarding is not finished for a profile the database reports incomplete
+  // (SAD §5.2). A fetch *error* is not an incomplete profile, so it falls
+  // through — an offline user with a valid session still reaches the app.
+  if (profileStatus === 'ready' && !profileComplete) {
+    return <Redirect href="/(setup)/profile-setup" />;
   }
 
   if (societiesStatus === 'ready') {

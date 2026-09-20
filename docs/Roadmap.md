@@ -343,6 +343,7 @@
 > Every request is authenticated, contextualised, validated and enveloped consistently. **Verify:** a protected endpoint returns the correct envelope for success, 401, 422 and 500.
 
 #### T021 · Email registration and login
+**Status** — 🟡 Partial (Supabase-backed): sign-up and login run on Supabase Auth (`signUpWithPassword` / `signInWithPassword`) with the PRD password policy, neutral failure copy and terms consent in the shared contract, and the `handle_new_user` trigger creates the profile row from `raw_user_meta_data.full_name`. Supabase Auth is the identity provider of record (SAD §2.2), so password hashing is its responsibility rather than Argon2id in the API. The NestJS endpoint, the bundled top-1000 password list and the escalating lockout (15 min → 1 h → 24 h) remain — Supabase's own rate limits apply meanwhile.
 **Objective** — Implement email/password signup and login with Argon2id hashing, verification email dispatch and neutral error messages.
 **Depends on** T020
 **Create** `apps/api/src/modules/auth/{auth.module.ts,presentation/auth.controller.ts,application/use-cases/{register.use-case.ts,login.use-case.ts},infrastructure/user.repository.ts}`, `packages/contracts/src/auth.ts`
@@ -353,6 +354,7 @@
 **Time** 75 min · **Difficulty** Medium
 
 #### T022 · Password reset flow
+**Status** — 🟡 Partial (Supabase-backed): the client flow is complete — generic enumeration-safe confirmation, recovery deep links in both token-hash and fragment form, an explicit expired/already-used state instead of an unusable form, and a **global** sign-out after the update so every session is invalidated (PRD §3.1). Supabase owns the single-use token and its TTL; the outbox-style token table and `token_version` invalidation belong to the self-hosted API path (T026) and are not needed while Supabase Auth issues tokens.
 **Objective** — Implement forgot/reset password with single-use hashed tokens and global session invalidation on success.
 **Depends on** T021
 **Create** `apps/api/src/modules/auth/application/use-cases/{forgot-password.use-case.ts,reset-password.use-case.ts}`, `apps/api/src/infrastructure/database/migrations/0002_password_reset_tokens.sql`
@@ -406,6 +408,7 @@
 **Time** 90 min · **Difficulty** Hard
 
 #### T027 · GET /auth/me with memberships
+**Status** — 🟡 Partial (client side only): the app reads the profile from `public.profiles` (RLS-scoped, documented in `supabase/migrations/`) and memberships from the society repository, so routing has what it needs today. The endpoint itself — with computed permissions per society, the 60 s Redis cache and read-from-database membership resolution — lands with the API module.
 **Objective** — Return the current user, their memberships and their computed permissions per society in a single call.
 **Depends on** T026, T017
 **Create** `apps/api/src/modules/auth/application/use-cases/get-me.use-case.ts`, `apps/api/src/modules/auth/presentation/me.mapper.ts`
@@ -426,7 +429,7 @@
 **Time** 90 min · **Difficulty** Hard
 
 #### T029 · Mobile secure storage, auth store and session restore
-**Status** — 🟡 Partial (mobile): SecureStore adapter with 2 KB chunking + session restore via `onAuthStateChange` (8 s watchdog, no splash lock) and a real auth store; the MMKV session snapshot, `society.store` and cache-clearing logout land with the API client (T028).
+**Status** — 🟡 Partial (mobile): SecureStore adapter with 2 KB chunking; an MMKV session snapshot read synchronously for a first-frame render; background validation that signs out only on a *rejected* token (401/403) and never on a network failure; foreground revalidation that re-reads verification state; profile bootstrap on every session change. Cache-clearing logout and the API-client pieces land with T028.
 **Objective** — Persist tokens in SecureStore, session snapshot in MMKV, and restore synchronously on cold start to avoid a flash of the wrong screen.
 **Depends on** T028
 **Create** `apps/mobile/src/lib/storage/{secure.ts,mmkv.ts}`, `apps/mobile/src/stores/{auth.store.ts,society.store.ts}`, `apps/mobile/src/features/auth/hooks/useSessionRestore.ts`
@@ -437,7 +440,7 @@
 **Time** 75 min · **Difficulty** Medium
 
 #### T030 · Mobile welcome, login and signup screens
-**Status** — 🟡 Partial (mobile): Login screen complete (React Hook Form + Zod, loading/error/success states); signup remains a placeholder and shared contract schemas await `packages/contracts` (T021).
+**Status** — 🟡 Partial (mobile): welcome, login, sign-up and verify-email are complete (React Hook Form + Zod over the shared contract rules, `PasswordField` with a visibility toggle, terms consent at signup, 60 s resend cooldown, unverified-email routing, accessible labels). Component tests await the Jest wiring in T014.
 **Objective** — Build the email auth screens with React Hook Form, Zod resolvers from `packages/contracts`, and full state handling.
 **Depends on** T029, T021
 **Create** `apps/mobile/src/features/auth/screens/{WelcomeScreen,LoginScreen,SignupScreen}.tsx`, `apps/mobile/src/components/forms/{FormField,PasswordField}.tsx`
@@ -461,7 +464,7 @@
 **Time** 90 min · **Difficulty** Medium
 
 #### T032 · Mobile OAuth buttons and forgot-password screens
-**Status** — 🟡 Partial (mobile): Google sign-in via `expo-web-browser` + `societyexpense://auth/callback`, forgot/reset password screens with the generic account-enumeration-safe confirmation; Apple Sign-In and `expo-auth-session` client IDs not yet added.
+**Status** — 🟡 Partial (mobile): Google sign-in via `expo-web-browser` + `societyexpense://auth/callback`, and forgot/reset password screens with the generic confirmation, expired-link handling and the global sign-out a reset requires. Apple Sign-In (App Store 4.8) and the `expo-auth-session` client IDs remain.
 **Objective** — Add Google and Apple sign-in buttons and the forgot/reset password screens.
 **Depends on** T031, T025, T022
 **Create** `apps/mobile/src/features/auth/components/OAuthButtons.tsx`, `apps/mobile/src/features/auth/screens/{ForgotPasswordScreen,ResetPasswordScreen}.tsx`
@@ -472,7 +475,7 @@
 **Time** 75 min · **Difficulty** Medium
 
 #### T033 · Mobile route resolver and protected groups
-**Status** — 🟡 Partial (mobile): resolver + both group guards wired to the real session store; `pendingIntent` deep-link storage arrives with the full SAD §5.2 six-outcome matrix (needs `GET /auth/me`, T027).
+**Status** — 🟡 Partial (mobile): the resolver implements the SAD §5.2 matrix (restoring → splash · no session → (auth) · incomplete profile → `profile-setup` · no membership → choice · pending-only → `join-pending` · otherwise app); both protected groups redirect on an invalid session, and the `(auth)` group *exempts* the recovery and verification routes so they stay reachable on a live session. Storing a `pendingIntent` for deep links received while signed out remains.
 **Objective** — Implement the cold-start routing decision and the group-level authentication guard.
 **Depends on** T029, T027
 **Create** `apps/mobile/src/features/auth/components/AuthGate.tsx`, `apps/mobile/src/lib/deeplinks.ts`
