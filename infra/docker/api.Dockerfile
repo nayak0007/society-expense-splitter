@@ -38,7 +38,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 1 — install, build, deploy
 # ─────────────────────────────────────────────────────────────────────────────
-FROM node:24.16.0-alpine AS build
+FROM node:26.8.2-alpine AS build
 
 # `corepack` ships with Node 24 and reads `packageManager` from the root
 # package.json, so the pnpm version is pinned by the repository rather than by
@@ -75,7 +75,7 @@ RUN HUSKY=0 pnpm --filter @ses/api deploy --prod --legacy /app
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2 — runtime
 # ─────────────────────────────────────────────────────────────────────────────
-FROM node:24.16.0-alpine AS runtime
+FROM node:26.8.2-alpine AS runtime
 
 # The image sets NODE_ENV itself rather than inheriting it from the environment:
 # it changes library behaviour (`postgres` pool defaults, Nest's error verbosity)
