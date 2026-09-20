@@ -4,6 +4,7 @@ import type { ComponentProps } from 'react';
 
 import { useTheme } from '@/theme';
 import { selectSessionStatus, useAuthStore } from '@/stores/auth.store';
+import { selectMemberships, selectSocietiesStatus, useSocietyStore } from '@/stores/society.store';
 
 type IoniconsName = ComponentProps<typeof Ionicons>['name'];
 
@@ -16,15 +17,28 @@ type TabScreenOptions = NonNullable<ComponentProps<typeof Tabs.Screen>['options'
  * positions survive tab switches.
  *
  * GROUP-LEVEL GUARD (SAD §5.5, layer 1): redirects when the session is not
- * authenticated. This handles navigation, not security — the server stays
- * the only real enforcement layer.
+ * authenticated, and back to `(setup)` when the session has no usable
+ * membership — e.g. the user just left their last society (SAD §5.1
+ * "App → Setup: removed from last society"). This handles navigation, not
+ * security — the server stays the only real enforcement layer.
  */
 export default function AppLayout() {
   const status = useAuthStore(selectSessionStatus);
+  const societiesStatus = useSocietyStore(selectSocietiesStatus);
+  const memberships = useSocietyStore(selectMemberships);
   const { colors } = useTheme();
 
   if (status !== 'authenticated') {
     return <Redirect href="/(auth)/login" />;
+  }
+
+  if (societiesStatus === 'ready') {
+    if (memberships.length === 0) {
+      return <Redirect href="/(setup)/society-choice" />;
+    }
+    if (memberships.every((membership) => membership.status === 'pending')) {
+      return <Redirect href="/(setup)/join-pending" />;
+    }
   }
 
   const screenOptions = {
@@ -47,7 +61,12 @@ export default function AppLayout() {
       <Tabs.Screen name="expenses" options={tabScreen('Expenses', 'receipt', 'receipt-outline')} />
       <Tabs.Screen name="payments" options={tabScreen('Payments', 'wallet', 'wallet-outline')} />
       <Tabs.Screen name="community" options={tabScreen('Community', 'people', 'people-outline')} />
-      <Tabs.Screen name="more" options={tabScreen('More', 'settings', 'settings-outline')} />
+      {/* The More tab owns a nested stack (app/(app)/more/_layout.tsx), which
+          renders its own header — so the tab header is switched off here. */}
+      <Tabs.Screen
+        name="more"
+        options={{ ...tabScreen('More', 'settings', 'settings-outline'), headerShown: false }}
+      />
     </Tabs>
   );
 }

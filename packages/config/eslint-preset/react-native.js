@@ -31,6 +31,19 @@ module.exports = [
     },
   },
   {
+    // TypeScript sources: the core rules below misread TS-only syntax
+    // (type parameters, interface call signatures, `declare` blocks), which
+    // typescript-eslint documents as false positives. `tsc` already reports
+    // undefined variables, and the TS-aware rule understands the syntax.
+    name: "ses/react-native/typescript-core-rule-replacements",
+    files: ["**/*.ts", "**/*.tsx"],
+    rules: {
+      "no-undef": "off",
+      "no-unused-vars": "off",
+      "@typescript-eslint/no-unused-vars": "error",
+    },
+  },
+  {
     name: "ses/react-native/hex-ban-and-rn-rules",
     files: ["**/*.tsx"],
     plugins: {

@@ -590,6 +590,7 @@
 **Time** 90 min · **Difficulty** Hard
 
 #### T040 · Society CRUD and settings
+**Status** — 🟡 Partial (mobile): the client-side slice exists against a `SocietyRepository` port with a mock adapter — create with seeded `society_settings` and creator-as-Admin, update, delete, join-code regeneration, unique 6-char codes from the unambiguous alphabet, unique slugs, and cross-tenant access answered with `not_found` rather than `forbidden`. The NestJS module, the RLS-backed repository, seeded categories/charge heads and the public `GET /societies/lookup?code=` endpoint remain.
 **Objective** — Implement society creation with seeded defaults, retrieval, update, settings management and join-code regeneration.
 **Depends on** T038, T039
 **Create** `apps/api/src/modules/societies/{societies.module.ts,presentation/societies.controller.ts,application/use-cases/{create-society,get-society,update-society,update-settings,regenerate-join-code}.use-case.ts,infrastructure/society.repository.ts}`, `packages/contracts/src/societies.ts`
@@ -719,6 +720,7 @@
 **Time** 90 min · **Difficulty** Medium
 
 #### T052 · Mobile query layer and society store
+**Status** — 🟡 Partial (mobile): a persisted `society.store` (`memberships`, `activeSocietyId`, `pendingJoinCode`), a society-scoped key factory, the bootstrap query and the stale-time policy are in place, and switching societies re-scopes detail queries with no reload. Key prefixing by `activeSocietyId` across every remaining feature and the MMKV version buster arrive with the API client (T028); `can()` awaits the shared evaluator (T037).
 **Objective** — Configure TanStack Query with the society-scoped key factory, MMKV persistence and stale-time policy.
 **Depends on** T028, T051
 **Create** `apps/mobile/src/lib/api/query-keys.ts`, `apps/mobile/src/lib/api/query-client.ts`, `apps/mobile/src/lib/api/__tests__/query-keys.test.ts`
@@ -729,6 +731,7 @@
 **Time** 75 min · **Difficulty** Medium
 
 #### T053 · Mobile create-society wizard
+**Status** — 🟡 Partial (mobile): one screen covers steps 1 and 3 (society basics + financial defaults) with React Hook Form, a form schema and payload re-validation in the service layer. The resumable draft store, the structure step, the editable apartment preview and the invite/CSV step depend on T044 and T040.
 **Objective** — Build the four-step wizard with a resumable draft and the editable apartment preview grid.
 **Depends on** T052, T044, T040
 **Create** `apps/mobile/src/features/society/screens/{CreateBasicsScreen,CreateStructureScreen,ApartmentPreviewScreen,CreateFinancialsScreen,CreateInviteScreen}.tsx`, `apps/mobile/src/features/society/hooks/useCreateSociety.ts`, `apps/mobile/src/stores/draft.store.ts`
@@ -739,6 +742,7 @@
 **Time** 90 min · **Difficulty** Medium
 
 #### T054 · Mobile join flow and society switcher
+**Status** — 🟡 Partial (mobile): join by code with a society preview (name, city, member count), occupancy declaration, the `pending` result screen, deep-link prefill (`societyexpense://join?code=…`) and the multi-society switcher are implemented against the mock adapter. QR scanning, city+name search, flat selection from the real apartment list and approval polling await T043/T049.
 **Objective** — Build join by code, QR and search, the pending state, and the multi-society switcher.
 **Depends on** T053, T049
 **Create** `apps/mobile/src/features/society/screens/{JoinScreen,SocietyPreviewScreen,JoinPendingScreen}.tsx`, `apps/mobile/src/features/society/components/{QrScanner,SocietySwitcher}.tsx`

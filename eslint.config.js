@@ -17,19 +17,13 @@ module.exports = [
   // ── Zone 1: mobile app sources (mirrors apps/mobile/eslint.config.js) ──
   ...reactNativePreset,
   {
+    // Globals only — the core-rule replacements for TypeScript live in the
+    // shared preset (ses/react-native/typescript-core-rule-replacements), so
+    // the app-level config gets them too instead of drifting.
     files: ["**/*.ts", "**/*.tsx"],
     ignores: ["**/node_modules/**"],
     languageOptions: {
       globals: { ...globals.browser },
-    },
-    rules: {
-      // TypeScript already reports undefined variables at compile time;
-      // typescript-eslint recommends disabling no-undef for TS sources.
-      "no-undef": "off",
-      // Core no-unused-vars misfires on TS-only syntax (e.g. interface method
-      // params). The TS-aware rule below replaces it.
-      "no-unused-vars": "off",
-      "@typescript-eslint/no-unused-vars": "error",
     },
   },
   {

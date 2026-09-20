@@ -24,7 +24,7 @@ export interface TextInputProps extends RNTextInputProps {
   readonly label: string;
   readonly variant?: TextInputVariant;
   /** Supporting text below the field (MD3 helper or error message). */
-  readonly helperText?: string;
+  readonly helperText?: string | undefined;
   /** Error pairing: error border + error supporting text. */
   readonly error?: boolean;
 }

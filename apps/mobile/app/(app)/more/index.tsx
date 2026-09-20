@@ -29,6 +29,16 @@ export default function More() {
           Settings, members and reports will live here.
         </Text>
 
+        <Text variant="titleSmall">Society</Text>
+        <View className="gap-3">
+          <Button variant="tonal" onPress={() => router.push('/(app)/more/society')}>
+            Society profile
+          </Button>
+          <Button variant="outlined" onPress={() => router.push('/(modals)/society-switcher')}>
+            Switch society
+          </Button>
+        </View>
+
         <Text variant="titleSmall">Protected-route demo (SAD §5.5 layer 2)</Text>
         <Text variant="bodySmall" color="onSurfaceVariant">
           Route-level guard rendering PermissionDenied instead of the screen — no redirect, no

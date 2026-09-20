@@ -183,7 +183,14 @@ importers:
         specifier: ^8.48.1
         version: 8.70.0(eslint@9.39.5(jiti@2.6.1))(typescript@6.0.3)
 
-  packages/contracts: {}
+  packages/contracts:
+    dependencies:
+      '@ses/domain':
+        specifier: workspace:*
+        version: link:../domain
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
 
   packages/db-schema: {}
 
