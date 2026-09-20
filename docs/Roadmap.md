@@ -426,6 +426,7 @@
 **Time** 90 min · **Difficulty** Hard
 
 #### T029 · Mobile secure storage, auth store and session restore
+**Status** — 🟡 Partial (mobile): SecureStore adapter with 2 KB chunking + session restore via `onAuthStateChange` (8 s watchdog, no splash lock) and a real auth store; the MMKV session snapshot, `society.store` and cache-clearing logout land with the API client (T028).
 **Objective** — Persist tokens in SecureStore, session snapshot in MMKV, and restore synchronously on cold start to avoid a flash of the wrong screen.
 **Depends on** T028
 **Create** `apps/mobile/src/lib/storage/{secure.ts,mmkv.ts}`, `apps/mobile/src/stores/{auth.store.ts,society.store.ts}`, `apps/mobile/src/features/auth/hooks/useSessionRestore.ts`
@@ -436,6 +437,7 @@
 **Time** 75 min · **Difficulty** Medium
 
 #### T030 · Mobile welcome, login and signup screens
+**Status** — 🟡 Partial (mobile): Login screen complete (React Hook Form + Zod, loading/error/success states); signup remains a placeholder and shared contract schemas await `packages/contracts` (T021).
 **Objective** — Build the email auth screens with React Hook Form, Zod resolvers from `packages/contracts`, and full state handling.
 **Depends on** T029, T021
 **Create** `apps/mobile/src/features/auth/screens/{WelcomeScreen,LoginScreen,SignupScreen}.tsx`, `apps/mobile/src/components/forms/{FormField,PasswordField}.tsx`
@@ -459,6 +461,7 @@
 **Time** 90 min · **Difficulty** Medium
 
 #### T032 · Mobile OAuth buttons and forgot-password screens
+**Status** — 🟡 Partial (mobile): Google sign-in via `expo-web-browser` + `societyexpense://auth/callback`, forgot/reset password screens with the generic account-enumeration-safe confirmation; Apple Sign-In and `expo-auth-session` client IDs not yet added.
 **Objective** — Add Google and Apple sign-in buttons and the forgot/reset password screens.
 **Depends on** T031, T025, T022
 **Create** `apps/mobile/src/features/auth/components/OAuthButtons.tsx`, `apps/mobile/src/features/auth/screens/{ForgotPasswordScreen,ResetPasswordScreen}.tsx`
@@ -469,6 +472,7 @@
 **Time** 75 min · **Difficulty** Medium
 
 #### T033 · Mobile route resolver and protected groups
+**Status** — 🟡 Partial (mobile): resolver + both group guards wired to the real session store; `pendingIntent` deep-link storage arrives with the full SAD §5.2 six-outcome matrix (needs `GET /auth/me`, T027).
 **Objective** — Implement the cold-start routing decision and the group-level authentication guard.
 **Depends on** T029, T027
 **Create** `apps/mobile/src/features/auth/components/AuthGate.tsx`, `apps/mobile/src/lib/deeplinks.ts`

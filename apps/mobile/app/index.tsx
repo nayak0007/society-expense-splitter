@@ -5,17 +5,17 @@ import { selectSessionStatus, useAuthStore } from '@/stores/auth.store';
 
 /**
  * Route resolver — runs once per cold start and is the only place routing
- * decisions are made (SAD §5.2). Navigation-phase stub: the session store
- * has no backend, so restore() immediately resolves to unauthenticated and
- * every cold start lands on Welcome. Phase 2 swaps the store internals for
- * SecureStore → refresh → /auth/me; this file stays unchanged.
+ * decisions are made (SAD §5.2). The session store is fed by the Supabase
+ * bridge (src/lib/supabase/session-sync.ts): restore happens from the
+ * SecureStore-backed client, so a persisted session lands straight in the
+ * app group and a fresh install lands on Welcome.
  */
 export default function Index() {
   const status = useAuthStore(selectSessionStatus);
 
   if (status === 'restoring') {
-    // Restore is synchronous-stub for now; SplashScreen still renders on
-    // the first frame before the store settles.
+    // Session restore (SecureStore → Supabase) is in flight; the watchdog
+    // in session-sync bounds it at 8 s so splash never locks permanently.
     return <SplashScreen />;
   }
 

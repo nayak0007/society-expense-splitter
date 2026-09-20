@@ -5,17 +5,26 @@ import { View } from 'react-native';
 import { RequirePermission } from '@/components/layout/RequirePermission';
 import { Button } from '@/components/ui/Button';
 import { Text } from '@/components/ui/Text';
+import { logout } from '@/features/auth/api/auth.api';
+import { selectAuthUser, useAuthStore } from '@/stores/auth.store';
 
 /** More tab root — settings, members, reports land in later phases. */
 export default function More() {
   const router = useRouter();
+  const user = useAuthStore(selectAuthUser);
   const [isAuthorized, setIsAuthorized] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
 
   return (
     <View className="flex-1 bg-surface">
       <Stack.Screen options={{ headerShown: true, headerTitle: 'More' }} />
       <View className="gap-4 p-lg">
         <Text variant="headlineSmall">More</Text>
+        {user !== null && (
+          <Text variant="bodyMedium" color="onSurfaceVariant">
+            Signed in as {user.email ?? 'unknown'}
+          </Text>
+        )}
         <Text variant="bodyMedium" color="onSurfaceVariant">
           Settings, members and reports will live here.
         </Text>
@@ -39,8 +48,16 @@ export default function More() {
           </RequirePermission>
         </View>
 
-        <Button variant="outlined" onPress={() => router.replace('/(auth)/login')}>
-          Demo sign-out (back to Login)
+        <Button
+          variant="outlined"
+          loading={isLoggingOut}
+          onPress={async () => {
+            setIsLoggingOut(true);
+            await logout();
+            router.replace('/(auth)/login');
+          }}
+        >
+          Log out
         </Button>
       </View>
     </View>

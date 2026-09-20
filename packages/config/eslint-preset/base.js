@@ -4,7 +4,9 @@
  *  - @typescript-eslint/no-explicit-any (error) — `any` is banned, use unknown
  *  - no-console (error; API allows warn/error — see node.js)
  *  - import/no-cycle (error) — no import cycles
- *  - no-restricted-imports: cross-feature imports forbidden
+ *  - no-restricted-imports: cross-feature imports forbidden (applied per
+ *    preset to `src/features/**` files only — app route wrappers are the
+ *    composition layer and MUST import feature slices, SAD §4.2)
  */
 const js = require("@eslint/js");
 const tseslint = require("typescript-eslint");
@@ -36,18 +38,6 @@ module.exports = {
     eqeqeq: ["error", "smart"],
     "prefer-const": "error",
     "object-shorthand": ["error", "always"],
-    "no-restricted-imports": [
-      "error",
-      {
-        patterns: [
-          {
-            group: ["**/features/*/**"],
-            message:
-              "Cross-feature imports are forbidden. Shared code belongs in src/lib or packages/*.",
-          },
-        ],
-      },
-    ],
   },
   linterOptions: {
     reportUnusedDisableDirectives: true,

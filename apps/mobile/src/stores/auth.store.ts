@@ -1,35 +1,35 @@
 import { create } from 'zustand';
 
 /**
- * NAVIGATION-PHASE SESSION STUB — deliberately NOT authentication.
+ * Auth session state consumed by routing (SAD §5.1–§5.5).
  *
- * This store only carries the routing state the resolver (SAD §5.2) and the
- * (app) group guard (§5.5) read. There are no tokens, no API calls and no
- * credential handling here. Phase 2 (auth) replaces `signIn`/`signOut` with
- * `useSessionRestore` (SecureStore → refresh → /auth/me); the rest of the
- * app never notices because it only consumes `status`.
- *
- * Not persisted: a fake session must not survive an app restart.
+ * Fed exclusively by `src/lib/supabase/session-sync.ts` (the Supabase→store
+ * bridge). Holds no SDK objects and no tokens — the session itself persists
+ * inside the Supabase client's SecureStore storage, keeping credentials out
+ * of zustand/MMKV (SAD §13.5).
  */
 export type SessionStatus = 'restoring' | 'unauthenticated' | 'authenticated';
 
+export interface AuthUser {
+  readonly id: string;
+  readonly email: string | null;
+}
+
 interface AuthState {
   readonly status: SessionStatus;
-  /** Ends the cold-start restore; no session source exists yet, so the only
-   *  outcome is `unauthenticated`. Phase 2 makes this async and real. */
-  restore: () => void;
-  /** Navigation demo only — the login placeholder calls this. */
-  signIn: () => void;
-  /** Navigation demo only — the More tab calls this. */
-  signOut: () => void;
+  readonly user: AuthUser | null;
+  /** Single write path from the session bridge. */
+  applySession: (user: AuthUser | null) => void;
 }
 
 export const useAuthStore = create<AuthState>()((set) => ({
   status: 'restoring',
-  restore: () =>
-    set((state) => (state.status === 'restoring' ? { status: 'unauthenticated' } : state)),
-  signIn: () => set({ status: 'authenticated' }),
-  signOut: () => set({ status: 'unauthenticated' }),
+  user: null,
+  applySession: (user) =>
+    set(
+      user === null ? { status: 'unauthenticated', user: null } : { status: 'authenticated', user },
+    ),
 }));
 
 export const selectSessionStatus = (state: AuthState): SessionStatus => state.status;
+export const selectAuthUser = (state: AuthState): AuthUser | null => state.user;

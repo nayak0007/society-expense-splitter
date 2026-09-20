@@ -29,9 +29,6 @@ export default function Welcome() {
         <Link href="/(auth)/register" asChild>
           <Button variant="tonal">Create an account</Button>
         </Link>
-        <Text variant="bodySmall" color="outline" align="center">
-          Placeholder — auth lands in Phase 2.
-        </Text>
       </View>
     </View>
   );

@@ -13,6 +13,24 @@ module.exports = [
     name: "ses/react-native/base",
   },
   {
+    name: "ses/react-native/no-cross-feature-imports",
+    files: ["**/src/features/**"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/features/*/**"],
+              message:
+                "Cross-feature imports are forbidden. Shared code belongs in src/lib or packages/*.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     name: "ses/react-native/hex-ban-and-rn-rules",
     files: ["**/*.tsx"],
     plugins: {
