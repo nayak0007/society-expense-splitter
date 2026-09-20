@@ -1,0 +1,101 @@
+# Contract check — SAD §7.3, §16.2, Roadmap T010/T013.
+#
+# "The OpenAPI spec is committed at `docs/api/OPENAPI.yaml`; CI diffs every PR
+# against `main` and **fails on a breaking change** unless the PR carries the
+# `breaking-change-approved` label."
+#
+# Two separate guarantees, because they fail for different reasons:
+#
+#   DRIFT  — `docs/api/OPENAPI.yaml` does not match what the code generates. This
+#            is the one that rots silently: the spec stays plausible-looking while
+#            describing routes that have moved on, and client code generated from
+#            it compiles against a lie. Recovering the spec and diffing is exact.
+#   BREAK  — the spec changed in a way that breaks a shipped client. Detected by
+#            `scripts/codegen/openapi-breaking-diff.mjs`, whose rules and limits are
+#            documented in that file.
+name: Contract check
+
+on:
+  pull_request:
+    branches: [main]
+    # Only when the contract can actually have changed. Running this on a docs-only
+    # or mobile-only PR spends a runner to re-derive a document nobody touched, and
+    # a gate that fires when it cannot possibly fail is one people learn to skip.
+    paths:
+      - "docs/api/OPENAPI.yaml"
+      - "apps/api/src/**"
+      - "packages/contracts/src/**"
+      - "packages/domain/src/**"
+      - "scripts/codegen/**"
+      - ".github/workflows/contract-check.yml"
+
+concurrency:
+  group: contract-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TURBO_TELEMETRY_DISABLED: "1"
+
+jobs:
+  contract:
+    name: OpenAPI drift and breaking change
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # NO `env:` BLOCK, DELIBERATELY. Building the document runs the Zod environment
+    # schema, because `ConfigModule.forRoot({ validate })` runs while the module
+    # graph is constructed — so this job used to carry a hand-written set of dummy
+    # values. That was a maintenance trap: add a required variable to the schema and
+    # the job fails with a bare exit code and no explanation. (That it failed
+    # *silently* was itself the bug — `NestFactory.create` calls `process.exit(1)`
+    # from inside Nest's ExceptionsZone, so nothing in the entry file could catch
+    # it; see `apps/api/src/tools/export-openapi.ts` and `apps/api/src/config/tool-env.ts`.)
+    # The exporter now supplies placeholders for anything unset. It contacts no
+    # service, because every connection in the graph is lazy, so there is nothing
+    # here to keep in sync with the schema.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Rebuilds the document from the code and fails if the committed copy
+      # differs, so the PR must contain the regenerated file.
+      - name: Spec matches the code
+        run: pnpm contract:drift
+
+      # The base branch's spec has to be fetched explicitly: a PR checkout is a
+      # shallow merge commit, so `origin/main` is not present by default.
+      - name: Fetch the base spec
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          mkdir -p .contract-base
+          if git show "origin/${{ github.base_ref }}:docs/api/OPENAPI.yaml" > .contract-base/OPENAPI.yaml 2>/dev/null; then
+            echo "base spec fetched"
+          else
+            rm -f .contract-base/OPENAPI.yaml
+            echo "no base spec (first release of the document)"
+          fi
+
+      - name: Breaking-change diff
+        # Gated on the label rather than skipped, so the check still runs and still
+        # reports — an approved break is a decision that should be visible in the
+        # checks list, not an absent job.
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'breaking-change-approved') }}
+        run: |
+          node scripts/codegen/openapi-breaking-diff.mjs \
+            --base .contract-base/OPENAPI.yaml \
+            --head docs/api/OPENAPI.yaml
+
+      - name: Breaking change approved by label
+        if: ${{ contains(github.event.pull_request.labels.*.name, 'breaking-change-approved') }}
+        run: |
+          echo "::warning::This PR carries breaking-change-approved, so the contract break was not gated."
+          node scripts/codegen/openapi-breaking-diff.mjs \
+            --base .contract-base/OPENAPI.yaml \
+            --head docs/api/OPENAPI.yaml || true

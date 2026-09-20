@@ -1,3 +1,43 @@
 packages:
   - "apps/*"
   - "packages/*"
+
+# pnpm requires an explicit decision for every dependency that ships an
+# install-time build script, and leaves a placeholder that fails the install until
+# it is answered. An unset or placeholder entry makes `pnpm install` — and the
+# dependency-status check that guards every `pnpm <script>` — exit non-zero, which
+# breaks `pnpm typecheck` and CI rather than anything visible.
+#
+#   @parcel/watcher  — Jest's optional file watcher (`jest --watch` only). The
+#                      test pipeline passes without it.
+#   unrs-resolver    — ESLint's import resolver. Lint passes without it: the
+#                      platform binary ships as an optional dependency.
+#   @swc/core        — the TypeScript transform for `packages/domain`'s tests.
+#                      Allowed: a missing native binding is exactly the failure
+#                      this script exists to detect.
+#   @scarf/scarf     — telemetry, pulled in by swagger-ui-dist. Denied: its only
+#                      effect is to phone home from every install, and nothing in
+#                      the build or test pipeline reads what it reports.
+allowBuilds:
+  "@parcel/watcher": false
+  unrs-resolver: false
+  "@swc/core": true
+  "@scarf/scarf": false
+
+minimumReleaseAgeExclude:
+  - "@nestjs/terminus@12.1.0"
+  - dependency-cruiser@18.4.0
+
+# Install policy lives here because pnpm 11 does not read `.npmrc` at all — the
+# `public-hoist-pattern` entries and `strict-peer-dependencies=false` in that file
+# have no effect (check with `pnpm config list`).
+#
+# Why Babel specifically: pnpm never hoists a peer-provided package, and @babel/core
+# is a peer of every Babel plugin, so core and its internals (parser, types,
+# generator, traverse) stay out of the private hoist store. Metro then loads a plugin
+# that requires a sibling it never declared — react-native-worklets 0.10.1's
+# `require('@babel/generator')` — and the bundle dies with "Cannot find module
+# '@babel/generator'". npm and yarn hide this with a flat node_modules; this restores
+# the same visibility for the Babel set only.
+publicHoistPattern:
+  - "@babel/*"

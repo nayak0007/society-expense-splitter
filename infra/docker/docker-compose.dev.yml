@@ -1,0 +1,203 @@
+# Local development stack — Roadmap T007, SAD §4.5.
+#
+#   pnpm dev:infra          # Postgres, Redis, MinIO
+#   pnpm dev:infra:down
+#
+# Then run the app processes on the host (`pnpm --filter @ses/api dev`,
+# `pnpm --filter @ses/mobile dev`), which is the fast loop: `nest --watch` is
+# instant, whereas a bind-mounted container rebuild is not.
+#
+# The API and worker images are defined here too, but under the `api` profile, so
+# they are only built and started when asked for:
+#
+#   docker compose -f infra/docker/docker-compose.dev.yml --profile api up --build
+#
+# That profile exists to prove the Dockerfile builds on a real machine and to give
+# an end-to-end environment that mirrors production. It is not the default because
+# building a 91 MB deploy tree to edit a controller is a worse loop than running
+# the process directly.
+#
+# WHY THESE EXACT IMAGES: the versions are pinned to what production runs. A local
+# stack on a newer Postgres than staging tests a database nobody deploys to — and
+# `citext`/`pg_trgm` behaviour and planner changes are exactly the sort of
+# difference that surfaces as a passing test suite and a production incident.
+name: ses-dev
+
+services:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Postgres — the system of record (SAD §1.1)
+  # ───────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ses
+      # Deterministic collation: a database initialised with the host's locale can
+      # order `ORDER BY name` differently from staging, which silently changes
+      # pagination output.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Runs ONCE, when the data directory is empty. It creates the three
+      # extensions, the Supabase-compatible roles, and the `auth` schema shim the
+      # committed RLS policies call — without which every policy evaluates false
+      # and the API sees an empty database. Delete the volume to re-run it.
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      # `pg_isready` and not a real query: this gates dependency start-up, and a
+      # check that fails during recovery would turn a slow start into a crash loop.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ses"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Redis — cache, BullMQ queues, rate limits (SAD §4.3)
+  # ───────────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Two settings, both load-bearing:
+    #   appendonly  — BullMQ jobs must survive a restart; the default snapshotting
+    #                 loses whatever was written since the last save, which for a
+    #                 queue means silently dropped jobs.
+    #   maxmemory   — LRU eviction on a dev box beats an OOM kill. Note this is
+    #                 NOT production-safe for a queue, where eviction must be off;
+    #                 enqueued jobs are not evictable state.
+    command: >-
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # MinIO — local S3 for the storage adapter (SAD §14.2: R2 in production)
+  # ───────────────────────────────────────────────────────────────────────────
+  #
+  # Why MinIO and not Supabase Storage locally: the storage adapter interface is
+  # S3-compatible by design, so local development exercises the same code path that
+  # production uses against R2 — with zero egress cost and no network round trip.
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: ses_minio
+      MINIO_ROOT_PASSWORD: ses_minio_local
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # console — http://localhost:9001
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # One-shot: creates the bucket, then exits. A separate service rather than a
+  # script in the Makefile so `docker compose up` alone reaches a usable state.
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ses_minio
+      MINIO_ROOT_PASSWORD: ses_minio_local
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-ses-attachments}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing "local/$$STORAGE_BUCKET"
+        echo "bucket ready: $$STORAGE_BUCKET"
+    restart: "no"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # API — optional, behind the `api` profile
+  # ───────────────────────────────────────────────────────────────────────────
+  api:
+    profiles: ["api"]
+    build:
+      # The repository root, because the image installs the whole workspace and
+      # bundles the shared packages. `.dockerignore` keeps the context small.
+      context: ../..
+      dockerfile: infra/docker/api.Dockerfile
+      target: api
+    restart: unless-stopped
+    env_file:
+      # Real credentials and vendor keys. Never committed; `scripts/dev/setup.sh`
+      # copies it from `.env.example` on first run.
+      - ../../apps/api/.env
+    environment:
+      # Overrides the host-oriented values in `.env`, which point at localhost.
+      # Inside the network the services are addressed by name.
+      DATABASE_URL: postgresql://authenticator:authenticator@postgres:5432/ses
+      MIGRATION_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ses
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: development
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Worker — optional, behind the `api` profile
+  # ───────────────────────────────────────────────────────────────────────────
+  #
+  # The same image with a different entrypoint (see `api.Dockerfile`). BullMQ
+  # processors land in Phase 3; today this proves the second entrypoint builds and
+  # starts, and gives scheduled jobs a home to be added to.
+  worker:
+    profiles: ["api"]
+    build:
+      context: ../..
+      dockerfile: infra/docker/api.Dockerfile
+      target: worker
+    restart: unless-stopped
+    env_file:
+      - ../../apps/api/.env
+    environment:
+      DATABASE_URL: postgresql://authenticator:authenticator@postgres:5432/ses
+      MIGRATION_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ses
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: development
+      # SAD §14.4: the worker's statement timeout is deliberately far above the
+      # API's 10 s, because publishing a maintenance cycle for 2,000 flats is
+      # legitimately slow and must not be killed mid-transaction.
+      DB_STATEMENT_TIMEOUT_MS: "120000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:

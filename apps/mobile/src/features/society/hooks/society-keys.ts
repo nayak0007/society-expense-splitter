@@ -7,6 +7,8 @@
  */
 export const societyKeys = {
   all: ['society'] as const,
+  /** Presentation rows for the user's societies — what `useSocieties` reads. */
+  list: (userId: string | null) => ['society', 'list', userId] as const,
   memberships: (userId: string | null) => ['society', 'memberships', userId] as const,
   detail: (societyId: string | null, userId: string | null) =>
     ['society', 'detail', societyId, userId] as const,

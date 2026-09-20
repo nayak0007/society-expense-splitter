@@ -1,0 +1,139 @@
+# Core pull-request pipeline — SAD §16.2, Roadmap T013.
+#
+# WHY EVERY JOB INSTALLS ITS OWN DEPENDENCIES rather than passing a `setup`
+# artefact around: a `node_modules` artefact is hundreds of megabytes, is
+# platform-coupled, and reintroduces the failure the lockfile exists to prevent —
+# a later job running against a tree that is not the one CI validated. pnpm's
+# content-addressed store plus `actions/setup-node`'s cache makes a repeat install
+# a link operation of a few seconds, so the `setup` stage buys nothing here. The
+# expensive thing being cached is Turbo's task cache, which IS shared (see below).
+#
+# WHAT IS DELIBERATELY NOT HERE YET: `test-integration` (Testcontainers Postgres +
+# Redis) and `bundle-size` (expo-atlas). Both need infrastructure that does not
+# exist in this repository yet — the first needs the migration set and a container
+# runtime on the runner, the second needs a baseline figure to compare against.
+# Adding them as no-op jobs would show green without testing anything.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# A force-push to a PR should cancel the run it superseded, not race it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Telemetry off so a CI failure is never a network failure.
+  TURBO_TELEMETRY_DISABLED: "1"
+  # Turbo colours and progress bars are noise in a log view with no TTY.
+  TURBO_LOG_ORDER: grouped
+  CI: "true"
+
+jobs:
+  # ── Static analysis ────────────────────────────────────────────────────────
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.sha }}
+          restore-keys: turbo-${{ runner.os }}-
+      - run: pnpm typecheck
+
+  lint:
+    name: Lint, formatting and layer boundaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Per-workspace lint (each app owns its config).
+      - run: pnpm lint
+
+      # The root flat config, which is the only one that reaches `packages/*`
+      # sources — the per-workspace runs above do not.
+      - run: pnpm exec eslint .
+
+      # SAD §16.2 puts dependency-cruiser in the lint job on purpose: a layering
+      # violation is a lint finding that happens to need a resolved module graph.
+      - run: pnpm lint:arch
+
+      - name: Prettier
+        run: pnpm format:check
+
+  # ── Unit tests ─────────────────────────────────────────────────────────────
+  test-unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.sha }}
+          restore-keys: turbo-${{ runner.os }}-
+
+      # `pnpm test` is `turbo run test`, which is only meaningful if a workspace
+      # that defines no tests is distinguishable from one whose tests all failed.
+      # Turbo fails the run when a task fails, so that holds.
+      - run: pnpm test
+
+      # The API's e2e suite boots the real Nest application (no database — the
+      # readiness probe is asserted in its degraded state). It is separate from
+      # `pnpm test` because it has its own Jest config and a longer timeout.
+      - run: pnpm --filter @ses/api test:e2e
+
+  # ── Build ──────────────────────────────────────────────────────────────────
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.sha }}
+          restore-keys: turbo-${{ runner.os }}-
+
+      # SAD §16.2: "nest build + expo export (verifies the bundle compiles)".
+      # A typecheck does not prove Metro can bundle, and the API's rspack build
+      # is the only thing that exercises the ESM/decorator-metadata path that
+      # production actually runs.
+      - run: pnpm build

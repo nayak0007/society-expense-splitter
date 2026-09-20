@@ -135,6 +135,79 @@ export type SocietyJoinPreviewDto = z.infer<typeof societyJoinPreviewSchema>;
 
 export const membershipListSchema = z.array(membershipSchema);
 
+/**
+ * Switcher / list view of a membership (PRD §3.1 multi-society).
+ *
+ * Carries the role and membership status alongside the society, because that is
+ * what the switcher row renders and a second round trip would be pure latency.
+ */
+export const societySummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  city: z.string(),
+  type: societyTypeSchema,
+  role: membershipSchema.shape.role,
+  status: membershipSchema.shape.status,
+  memberCount: z.number().int(),
+});
+export type SocietySummaryDto = z.infer<typeof societySummarySchema>;
+
+export const societySummaryListSchema = z.array(societySummarySchema);
+
+/**
+ * What the caller may do in this society.
+ *
+ * Computed by the domain (`evaluateSocietyCapabilities`) and shipped in the
+ * response so the client does not re-derive permissions from a role string. A
+ * disabled button and a rejected request then always agree.
+ */
+export const societyCapabilitiesSchema = z.object({
+  canManage: z.boolean(),
+  canDelete: z.boolean(),
+  canRegenerateJoinCode: z.boolean(),
+  canViewJoinCode: z.boolean(),
+  canLeave: z.boolean(),
+});
+export type SocietyCapabilitiesDto = z.infer<typeof societyCapabilitiesSchema>;
+
+/** `GET /societies/:id` — everything one profile screen needs in one response. */
+export const societyProfileResponseSchema = z.object({
+  society: societySchema,
+  membership: membershipSchema,
+  capabilities: societyCapabilitiesSchema,
+});
+export type SocietyProfileResponseDto = z.infer<
+  typeof societyProfileResponseSchema
+>;
+
+/** `POST /societies/:id/join-code` — rotation returns the society, code included. */
+export const regenerateJoinCodeResponseSchema = z.object({
+  society: societySchema,
+});
+export type RegenerateJoinCodeResponseDto = z.infer<
+  typeof regenerateJoinCodeResponseSchema
+>;
+
+/** Settings-only patch (PRD §3.2 step 3 fields), never an empty object. */
+export const updateSocietySettingsSchema = societySettingsSchema
+  .partial()
+  .refine((patch) => Object.keys(patch).length > 0, {
+    message: "Nothing to update",
+  });
+export type UpdateSocietySettingsPayload = z.infer<
+  typeof updateSocietySettingsSchema
+>;
+
+/** Partial patch of the society itself (settings carry their own schema). */
+export const updateSocietyDetailsSchema = createSocietySchema.partial().omit({
+  billingDay: true,
+  dueDay: true,
+  approvalThresholdPaise: true,
+});
+export type UpdateSocietyDetailsPayload = z.infer<
+  typeof updateSocietyDetailsSchema
+>;
+
 /** Body of a WhatsApp/invite share — the client builds the message. */
 export const joinCodeShareSchema = z.object({
   societyName: z.string(),

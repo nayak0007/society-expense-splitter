@@ -1,0 +1,62 @@
+# Dependabot — PRD §"GitHub Actions: … Add Dependabot and an `npm audit` gate".
+#
+# WHY WEEKLY AND GROUPED RATHER THAN DAILY. This is a pnpm workspace whose lockfile
+# spans two apps and six packages; an ungrouped daily configuration opens a dozen
+# overlapping PRs that each invalidate the others' lockfile, and the practical
+# result is that nobody reviews any of them. Grouping by ecosystem keeps one PR per
+# week that a human can actually reason about.
+#
+# WHAT IS DELIBERATELY ABSENT. Expo and React Native are pinned deliberately
+# (Phase 1 risk register: "Expo SDK / React Native version churn breaks the
+# scaffold — pin exact versions, upgrade deliberately, never incidentally"). An
+# automated bump of those would walk straight into an untested native upgrade, so
+# they are excluded and upgraded by hand with a matching `expo-doctor` run. Once
+# the versions are pinned exactly rather than by range, Dependabot would skip them
+# anyway; the ignore list makes the intent explicit instead of incidental.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # Dev tooling moves together and is validated by the same CI run.
+      dev-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+      production-minor:
+        dependency-type: production
+        update-types: [minor, patch]
+    ignore:
+      # Native-side upgrades are a deliberate, tested activity — see above.
+      - dependency-name: expo
+      - dependency-name: expo-*
+      - dependency-name: react-native
+      - dependency-name: react-native-*
+      - dependency-name: "@react-native/*"
+      - dependency-name: react
+      # TypeScript major bumps have broken the shared Jest transform before
+      # (ts-jest does not support TS 6), so they are reviewed by hand.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # A pinned action version is also a security surface: the same SHA bump that
+      # fixes a CVE in one action usually lands in the others the same week.
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /infra/docker
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3

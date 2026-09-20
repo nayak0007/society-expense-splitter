@@ -113,6 +113,12 @@ export interface SocietyJoinPreview {
   readonly state: string;
   readonly type: SocietyType;
   readonly memberCount: number;
+  /**
+   * Expiry of the code that produced this preview, evaluated by the *domain*
+   * against an injected clock (`join-society.ts`) rather than by whichever
+   * adapter happens to remember to check. `null` = no expiry.
+   */
+  readonly joinCodeExpiresAt: string | null;
 }
 
 /** Create payload — the wizard's basics + financial-defaults steps (§3.2). */
@@ -133,12 +139,17 @@ export interface CreateSocietyInput {
 /**
  * Partial update — every field optional, empty patch rejected by contract.
  *
- * The explicit `| undefined` matters: with `exactOptionalPropertyTypes`, a
- * plain `Partial<>` would reject a patch whose keys are present-but-undefined,
- * which is exactly what the contract's `.partial()` schema produces.
+ * Two deliberate modifiers:
+ *  - the explicit `| undefined`, because with `exactOptionalPropertyTypes` a
+ *    plain `Partial<>` would reject a patch whose keys are present-but-undefined,
+ *    which is exactly what the contract's `.partial()` schema produces;
+ *  - `-readonly`, because a patch is *assembled* field by field by the update
+ *    use case (`patch.name = …`) one validated field at a time. The immutability
+ *    that matters is on the entity the repository returns and on the command it
+ *    receives — not on the builder the domain writes into.
  */
 export type UpdateSocietyInput = {
-  readonly [K in keyof CreateSocietyInput]?: CreateSocietyInput[K] | undefined;
+  -readonly [K in keyof CreateSocietyInput]?: CreateSocietyInput[K] | undefined;
 };
 
 export interface JoinSocietyInput {

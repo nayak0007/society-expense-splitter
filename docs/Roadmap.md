@@ -140,6 +140,7 @@
 > A developer can clone the repo, install, and run a blank Expo app with all quality gates active locally. **Verify:** clean-clone install succeeds; a bad commit message is rejected; the app renders on a physical device.
 
 #### T006 · Scaffold the NestJS API
+**Status** — ✅ Complete: NestJS 12 on the Fastify adapter, `/v1` global prefix, graceful shutdown, `GET /v1/health/live` (200) and `/v1/health/ready` (200 only when Postgres, Redis and migrations are ready — otherwise 503 with a per-component breakdown), Swagger UI at `/v1/docs`, and the SAD §7.10 error envelope on every unmatched route. Two deliberate departures: the build is **rspack**, because NestJS 12 is ESM-only and `nest build`'s webpack compiler rejects ESM projects outright; and the Dockerfile lives at `infra/docker/api.Dockerfile` to match SAD §4.5's own tree. Verified by `pnpm build` plus booting the process and exercising both probes, Swagger, the envelope and request-id correlation (inbound id honoured, otherwise generated).
 **Objective** — Create the NestJS application with the Fastify adapter, module skeleton, health endpoints and graceful shutdown.
 **Depends on** T002, T003
 **Create** `apps/api/src/main.ts`, `apps/api/src/app.module.ts`, `apps/api/src/modules/health/health.{module,controller}.ts`, `apps/api/nest-cli.json`, `apps/api/Dockerfile`
@@ -150,6 +151,7 @@
 **Time** 60 min · **Difficulty** Medium
 
 #### T007 · Local infrastructure with Docker Compose
+**Status** — ✅ Authored, ⚠️ unobserved: `infra/docker/docker-compose.dev.yml` (Postgres 15 + Redis 7 + MinIO with health checks, named volumes, and `api`/`worker` behind an optional `api` profile), `infra/docker/postgres/init.sql` (pgcrypto/citext/pg_trgm, Supabase-compatible roles and the `auth` shim the committed RLS policies call), `scripts/dev/setup.sh`, and root `dev:infra` / `dev:infra:down`. **The stack has never been started**: there is no Docker in the environment this was built in, so the file is reviewed rather than run, and the first `pnpm dev:infra` on a machine with Docker is the remaining verification.
 **Objective** — Provide a one-command local stack: Postgres 15, Redis and MinIO, with health checks and seeded buckets.
 **Depends on** T001
 **Create** `infra/docker/docker-compose.dev.yml`, `infra/docker/postgres/init.sql`, `scripts/dev/setup.sh`
@@ -160,6 +162,7 @@
 **Time** 60 min · **Difficulty** Easy
 
 #### T008 · API environment schema and validation
+**Status** — ✅ Complete: Zod schema that refuses to boot and reports **every** problem at once rather than the first; production/staging assertions (SENTRY_DSN required, an `rzp_test_` Razorpay key rejected, ENCRYPTION_KEY required, and `DATABASE_URL` / `MIGRATION_DATABASE_URL` forbidden from sharing a role); typed access through `ConfigService` with no `process.env` in feature code. Two additions beyond the SAD's literal list: vendor keys stay **optional until the adapter that consumes them ships**, so a missing Anthropic key cannot block a boot that never calls it; and blank values are treated as absent, without which copying `.env.example` failed with "Invalid URL" and "Too small: expected number to be >0" for variables the user had deliberately left empty.
 **Objective** — Define every environment variable as a Zod schema that refuses to boot on a missing or invalid value, including the production safety checks from the SAD.
 **Depends on** T006
 **Create** `apps/api/src/config/{configuration.ts,validation.schema.ts}`, `apps/api/.env.example`
@@ -181,6 +184,7 @@
 **Time** 45 min · **Difficulty** Easy
 
 #### T010 · Contracts package skeleton
+**Status** — ✅ Complete: `common/{envelope,errors,pagination}.ts` plus `primitives.ts`; `SuccessEnvelope`/`ErrorEnvelope` matching SAD §7.9–7.10, and `ErrorCode` **verified programmatically** to be exhaustive and order-identical to the SAD's 24-code catalogue. `CursorPage<T>` implements SAD §7.4 in full, including its asymmetry — default 20, max 100 (500 on `/sync/changes`), over-max **clamps silently** while below-min errors. `zod` is the only runtime dependency. The envelope and error schemas were the gap that T020's Zod pipe needed to report `VALIDATION_ERROR` at all.
 **Objective** — Create `packages/contracts` with the response envelope, error format, pagination and common primitives shared by client and server.
 **Depends on** T002
 **Create** `packages/contracts/src/common/{envelope.ts,errors.ts,pagination.ts,primitives.ts}`, `packages/contracts/src/index.ts`
@@ -194,6 +198,7 @@
 > API and mobile app both boot, local infrastructure runs, and the shared API contract exists. **Verify:** `pnpm dev` starts everything; `/v1/health/ready` is green; contracts import cleanly in both apps.
 
 #### T011 · Domain primitives — Result, branded IDs, Clock
+**Status** — 🟡 Partial: `shared/{result,clock,ids,errors,money}.ts` exist and are exercised by the Society domain (119 unit tests). `Result` carries `ok`/`err`/`isOk`/`isErr`/`mapResult`/`unwrapOr`/`allResults`; the error base is `DomainError<TCode>` with a stable machine code, subclassed per module; `Clock` ships `systemClock`, `fixedClock` and `steppingClock`. `Money` is deliberately only `Paise` + `rupeesToPaise`/`formatPaise` (T012 owns the arithmetic). Remaining: the full branded-id set (`ExpenseId`, `PaymentId`, `DueId`, `ApartmentId`) with `of()`/`generate()`, `SystemClock`/`FixedClock` naming as specified, and the type-level cross-assignment test.
 **Objective** — Create the foundational domain types every other module depends on: `Result`, branded identifiers, the `Clock` port and the domain error base class.
 **Depends on** T002
 **Create** `packages/domain/src/shared/{result.ts,ids.ts,clock.ts,errors.ts}`, `packages/domain/src/index.ts`
@@ -214,6 +219,7 @@
 **Time** 90 min · **Difficulty** Hard
 
 #### T013 · CI — install, typecheck, lint, build
+**Status** — ✅ Complete: `.github/workflows/ci.yml` (typecheck · lint + `eslint .` + `lint:arch` + `format:check` · unit + API e2e · build), `.github/CODEOWNERS`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/workflows/contract-check.yml` (regenerate-and-diff drift gate plus a breaking-change detector, bypassable only by the `breaking-change-approved` label), `.github/workflows/security.yml` (CodeQL, dependency audit, gitleaks) and `.github/dependabot.yml`. Deliberate omissions: **Snyk** is replaced by `pnpm audit --audit-level=high` because it needs a token this repository does not have and a job that silently no-ops without a secret is worse than an absent one; **`test-integration`** (Testcontainers) and **`bundle-size`** (expo-atlas) are absent because the infrastructure they need does not exist yet. Workflow files are not executable in this environment, so they are YAML-validated and reasoned rather than observed.
 **Objective** — Create the core CI workflow with Turbo remote caching, running on every pull request.
 **Depends on** T003, T006, T005
 **Create** `.github/workflows/ci.yml`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/CODEOWNERS`
@@ -224,6 +230,7 @@
 **Time** 60 min · **Difficulty** Medium
 
 #### T014 · CI — unit tests with per-path coverage thresholds
+**Status** — 🟡 Partial: the shared presets are now SWC (`packages/config/jest-preset/{base,node,react-native}.js`) — not a preference: `ts-jest` supports TypeScript 4.3–5.x and this workspace is on the 6 compiler, so a `ts-jest` config cannot run at all, and SWC is the only next-gen transform supporting the `legacyDecorator` + `decoratorMetadata` pair Nest's DI needs. `jest.config.js` exists for `@ses/domain` and `@ses/application`; `@ses/api` has unit and e2e configs, a harness that boots the real app through the same `bootstrap()` as production (so the adapter's `genReqId` cannot drift between test and runtime), and per-path thresholds enforced (use cases 90/85, global 80/70). 47 unit + 12 e2e passing. Two findings worth keeping: the pnpm-aware `transformIgnorePatterns` in the API config is load-bearing, because the usual `node_modules/(?!@nestjs/)` idiom silently fails against pnpm's `.pnpm/<pkg>/node_modules/<pkg>` layout and the Nest ESM error returns unchanged; and a test asserting an inbound `x-request-id` is echoed is what proved the header had to move from a Nest interceptor to an adapter hook, since global interceptors do not run for unmatched routes. **Remaining: per-path thresholds cannot be enforced on `packages/domain` yet** — measured today at 76% lines overall with `money.ts` at 19%, because that file is still the T012 placeholder, so a 100% money gate or a global 80% gate would fail for a reason unrelated to whatever change is in the PR. Also remaining: the CI coverage PR comment, and `packages/split-engine` (it does not exist yet).
 **Objective** — Add the test job with path-specific coverage gates so the financial core is held to 100% while application code is held to 80%.
 **Depends on** T013, T012
 **Create** `packages/config/jest-preset/{base.js,node.js,react-native.js}`, `.github/workflows/` test job addition
@@ -234,6 +241,7 @@
 **Time** 60 min · **Difficulty** Medium
 
 #### T015 · Enforce clean-architecture layer boundaries
+**Status** — ✅ Complete: `.dependency-cruiser.js` with rules for cycles, app↔app coupling, the domain/application/contracts framework bans, the API's own layer order, the Supabase adapter boundary and cross-feature imports; wired into CI (`pnpm lint:arch`) and to ADR-0001. **Every rule was proven by planting a violation and watching it fire**, which is how two defects surfaced that made four of the rules vacuous while still reporting a clean tree: an `exclude` pattern containing `node_modules` **removed** the vendor edges entirely (`doNotFollow` merely stops traversal; `exclude` deletes the edge, and `exclude` wins), and `dependencyTypes: ['npm']` alone does not match an *undeclared* framework import, which pnpm reports as `npm-no-pkg` — precisely the case these rules exist to catch. A third fix: type-only imports are excluded, because `import type { SupabaseClient }` is erased at compile time and cannot make the platform unswappable. Clean tree: 279 modules, 658 dependencies, 0 violations.
 **Objective** — Configure dependency-cruiser so a layering violation fails the build rather than relying on discipline.
 **Depends on** T013
 **Create** `.dependency-cruiser.js`, `docs/ARCHITECTURE_DECISIONS/ADR-0001-modular-monolith.md`
@@ -553,6 +561,7 @@
 ---
 
 #### T036 · Society structure schema
+**Status** — 🟡 Partial (Supabase path): `supabase/migrations/20260920130000_society_core.sql` creates `societies` (extended to the PRD §7 columns, CHECK-constrained), `society_settings` (seeded by the `seed_society()` trigger at society creation) and `members`, with the enum types, the join-code generator, and the triggers that mint slug/join-code, fill member identity, keep an Admin present, constrain a member's own status changes and stamp removals — idempotent, each with a `down` block. `buildings`, `wings` and `apartments` are deliberately **not** in it (they land with T044/T045), so the apartment-number uniqueness constraint has nothing to enforce yet. Remaining: those three tables plus their `packages/db-schema/src/postgres/*` definitions, and applying/rolling back the migration against a real database.
 **Objective** — Create the migration for `society_settings`, `buildings`, `wings`, `apartments` and extend `societies` to the full specification.
 **Depends on** T017
 **Create** `packages/db-schema/src/postgres/{society-settings.ts,buildings.ts,wings.ts,apartments.ts}`, migration `0004_society_structure.sql`
@@ -563,6 +572,7 @@
 **Time** 75 min · **Difficulty** Medium
 
 #### T037 · Permission evaluator
+**Status** — 🟡 Partial: the society-scoped half of the matrix exists as pure functions in `packages/domain/src/society/rules.ts` — `canManageSociety`, `canDeleteSociety`, `canLeaveSociety` (the sole-admin invariant, evaluated against every membership) and `evaluateSocietyCapabilities`, which returns the whole affordance set for one membership (including the pending-member case). Each is pinned by unit tests, and `findMembership` is actor-scoped after a test caught it returning another member's row (a privilege-escalation bug). Remaining: the general `can(role, action)` / `canOnResource` API over the full `Action` union in `packages/domain/src/member/`, with the parameterised role × action test.
 **Objective** — Implement the PRD role matrix as a pure, exhaustively tested function shared by client and server.
 **Depends on** T011
 **Create** `packages/domain/src/member/{permission-evaluator.ts,actions.ts}`, `packages/domain/src/member/__tests__/permission-evaluator.test.ts`
@@ -583,6 +593,7 @@
 **Time** 75 min · **Difficulty** Hard
 
 #### T039 · Row Level Security policies
+**Status** — 🟡 Partial: RLS is implemented for the society tenant tables in `supabase/migrations/20260920130100_society_rls.sql` — `ENABLE` + `FORCE` on `societies`, `society_settings` and `members`; `SECURITY DEFINER` predicates (`is_society_member`, `is_society_admin`) so that a policy on `members` which reads `members` does not recurse; select/insert/update policies only, with no delete policy anywhere (deleting a society is a soft delete); and column-level GRANTs so a client cannot write `slug`, `join_code`, `plan`, `deleted_at` or `role`. `anon` is revoked outright, and the RPC migration (`…130200_society_rpc.sql`) states per function whether it runs under RLS (invoker) or re-checks membership itself (definer). Remaining: the same treatment for the remaining tenant tables as they land (expenses, payments, dues), the security-role denial on financial tables, ADR-0006, and the automated isolation suite (T041).
 **Objective** — Enable and enforce RLS on every tenant table, with security-role members denied all financial tables.
 **Depends on** T036, T016
 **Create** migration `0005_rls_policies.sql`, `docs/ARCHITECTURE_DECISIONS/ADR-0006-rls-row-tenancy.md`
@@ -593,7 +604,7 @@
 **Time** 90 min · **Difficulty** Hard
 
 #### T040 · Society CRUD and settings
-**Status** — 🟡 Partial (mobile): the client-side slice exists against a `SocietyRepository` port with a mock adapter — create with seeded `society_settings` and creator-as-Admin, update, delete, join-code regeneration, unique 6-char codes from the unambiguous alphabet, unique slugs, and cross-tenant access answered with `not_found` rather than `forbidden`. The NestJS module, the RLS-backed repository, seeded categories/charge heads and the public `GET /societies/lookup?code=` endpoint remain.
+**Status** — 🟡 Partial (domain + mobile): the domain layer is complete — `Society`, `SocietyMembership`, `SocietySummary` and `SocietyJoinPreview` entities with the `society_settings` defaults, the join-code value object (normalise/validate/generate/deep link/share copy), the name/address/settings/join-request value objects, the pure rules, the `SocietyRepository` port (every method actor-scoped, non-members answered with `not_found`). The application layer is now its own package — `@ses/application` — holding one use case per operation (`createSociety`, `updateSociety`, `deleteSociety`, `regenerateJoinCode`, `joinSociety`, `leaveSociety`, `getSocietyProfile`, `listSocietySummaries`), each a pure `(deps, actor, command) → Result<T, SocietyError>` function with the repository port and the `Clock` injected: no framework, no React, no provider SDK, and `@ses/domain` as its only runtime dependency. The mobile app now calls these use cases rather than the repository directly, so the capability checks (`canManage`, `canDelete`), the sole-admin invariant and join-code expiry actually run on the client path; the service keeps only wire-shape validation, `Result` → throw and session side effects. 134 unit tests with a fake repository and a frozen clock — 82 in `@ses/domain`, 52 in `@ses/application`. The mobile slice is wired against that port with a mock adapter (create with seeded `society_settings` and creator-as-Admin, update, delete, join-code regeneration, unique 6-char codes, unique slugs); the mobile side has no automated tests yet. The Supabase-backed repository now exists: `supabase/migrations/20260920130{000,100,200}_*.sql` create the tenant tables, their RLS policies and the RPC surface (create/update/soft-delete/rotate/join-preview/snapshot, with create and update running `SECURITY INVOKER` so RLS still applies), and `apps/mobile/src/features/society/repository/society.repository.{supabase,rows}.ts` implement the port over it — Zod row schemas and domain⇄database enum translation at the boundary, Postgres error → `SocietyError` classification, and `not_found` rather than `forbidden` for a non-member — with the composition root defaulting to it and the mock kept as the test seam. Remaining: the NestJS module, seeded categories/charge heads and the public `GET /societies/lookup?code=` endpoint, plus end-to-end verification against a live Supabase project (none of this SQL has been executed yet).
 **Objective** — Implement society creation with seeded defaults, retrieval, update, settings management and join-code regeneration.
 **Depends on** T038, T039
 **Create** `apps/api/src/modules/societies/{societies.module.ts,presentation/societies.controller.ts,application/use-cases/{create-society,get-society,update-society,update-settings,regenerate-join-code}.use-case.ts,infrastructure/society.repository.ts}`, `packages/contracts/src/societies.ts`

@@ -1,0 +1,9 @@
+{
+  "extends": "../../packages/config/tsconfig/library.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["jest"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules"]
+}

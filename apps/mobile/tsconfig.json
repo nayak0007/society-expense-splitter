@@ -3,6 +3,7 @@
   "compilerOptions": {
     "paths": {
       "@/*": ["./src/*"],
+      "@ses/application": ["../../packages/application/src/index.ts"],
       "@ses/domain": ["../../packages/domain/src/index.ts"],
       "@ses/contracts": ["../../packages/contracts/src/index.ts"],
       "@ses/split-engine": ["../../packages/split-engine/src/index.ts"],

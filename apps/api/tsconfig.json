@@ -1,0 +1,43 @@
+{
+  "extends": "../../packages/config/tsconfig/node.json",
+  "compilerOptions": {
+    // ── Overrides of the shared Node preset, each required by NestJS ──
+    // `module`/`moduleResolution` are deliberately left at the preset's
+    // `preserve` + `bundler`. They are the accurate pair here: the API is ESM
+    // (NestJS 12 is ESM-only), and its module resolution is performed by rspack,
+    // not by Node — so TS should model a bundler rather than Node's stricter
+    // extension rules, which would demand a `.js` suffix on every relative import
+    // in a tree that is never executed unbundled. It also sidesteps two options
+    // TypeScript 6 deprecates: `moduleResolution: node10` and `baseUrl`.
+    //
+    // `verbatimModuleSyntax: false` is the load-bearing one. With it enabled a
+    // type-only import is erased, which strips the class reference out of the
+    // emitted `design:paramtypes` metadata. DI then resolves `Object` instead of
+    // the dependency and fails at runtime with a misleading "Nest can't resolve
+    // dependencies" error — the single most common way a strict monorepo preset
+    // breaks a Nest app, so it is set explicitly rather than inherited.
+    "verbatimModuleSyntax": false,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    // The bundler emits; `tsc` is only ever run as `--noEmit` (see the typecheck
+    // script). Declaring that here also stops TypeScript from enforcing a
+    // `rootDir` that would have to contain the workspace packages.
+    "noEmit": true,
+    // Workspace packages publish TypeScript source (`main: src/index.ts`), which is
+    // what lets Metro and tsc consume them with no build step and keeps the mobile
+    // app's zero-build dev loop intact. These paths are what let rspack resolve the
+    // same source into the API bundle, instead of leaving a runtime import that
+    // points at a .ts file. TypeScript 6 resolves them relative to this file.
+    "paths": {
+      "@/*": ["./src/*"],
+      "@ses/application": ["../../packages/application/src/index.ts"],
+      "@ses/contracts": ["../../packages/contracts/src/index.ts"],
+      "@ses/db-schema": ["../../packages/db-schema/src/index.ts"],
+      "@ses/domain": ["../../packages/domain/src/index.ts"],
+      "@ses/split-engine": ["../../packages/split-engine/src/index.ts"]
+    },
+    "types": ["node", "jest"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -30,6 +30,19 @@ export interface SocietyRepository {
   /** Memberships of `actor`, newest first — drives the switcher. */
   listMemberships(actor: UserId): Promise<readonly SocietyMembership[]>;
 
+  /**
+   * Every membership of one society, as seen by `actor`.
+   *
+   * Needed by the rules that are about the *society*, not about the caller:
+   * "a society can never be left without an active admin" requires knowing who
+   * else holds the admin role. A non-member receives `not_found` (never an empty
+   * array, which would confirm the society exists).
+   */
+  listSocietyMemberships(
+    societyId: SocietyId,
+    actor: UserId,
+  ): Promise<readonly SocietyMembership[]>;
+
   /** Full society for a member of it, `null` otherwise. */
   findById(id: SocietyId, actor: UserId): Promise<Society | null>;
 

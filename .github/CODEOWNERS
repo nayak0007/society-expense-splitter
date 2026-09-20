@@ -1,0 +1,38 @@
+# Review ownership — SAD §16.1.
+#
+# "CODEOWNERS review required for `packages/split-engine`, `packages/domain`,
+# migrations and CI config."
+#
+# WHY THESE PATHS AND NOT "everything": a CODEOWNERS file that claims the whole
+# repository is never actually enforced, because every PR trivially satisfies it
+# and reviewers learn to ignore the request. These four are the paths where a
+# quiet mistake is expensive — money arithmetic, the layer every other layer
+# depends on, the schema history, and the pipeline itself.
+#
+# A real team name replaces the placeholder below. Until then GitHub silently
+# ignores an owner that does not exist, which is a failure mode worth knowing
+# about rather than discovering during an incident.
+
+# The financial core: split arithmetic and the domain layer both carry the 100%
+# coverage gates from SAD §15.2, and a rounding change here is a money bug.
+/packages/split-engine/        @ses/core-team
+/packages/domain/              @ses/core-team
+
+# Schema history. A migration that has already been applied cannot be edited, only
+# superseded, so review has to happen before merge.
+/supabase/migrations/          @ses/core-team
+/apps/api/src/infrastructure/database/migrations/  @ses/core-team
+/apps/api/drizzle.config.ts    @ses/core-team
+
+# CI and the quality gates it enforces. Without this, a PR that weakens a gate can
+# approve itself.
+/.github/                      @ses/core-team
+/.dependency-cruiser.js        @ses/core-team
+/eslint.config.js              @ses/core-team
+/turbo.json                    @ses/core-team
+/package.json                  @ses/core-team
+/pnpm-lock.yaml                @ses/core-team
+
+# The API contract. A breaking change here reaches every shipped mobile build.
+/packages/contracts/           @ses/core-team @ses/mobile-team
+/docs/api/OPENAPI.yaml         @ses/core-team @ses/mobile-team

@@ -35,6 +35,29 @@ module.exports = {
     "no-console": "error",
     "import/no-cycle": "error",
 
+    /**
+     * Overrides the rule the `tseslint.configs.recommended` spread above turns on
+     * with its defaults, because those defaults disagreed with the compiler:
+     * TypeScript's `noUnusedParameters` ignores a parameter whose name starts
+     * with `_` (which is the only way to satisfy an interface with a signature
+     * you do not otherwise need), while the ESLint rule flagged
+     * `transform(value, _metadata)` as an error. Two tools disagreeing about one
+     * line trains people to reach for a disable comment; the compiler's
+     * convention is the one this codebase already follows.
+     *
+     * Declared here, once, rather than in each consumer — a later config that
+     * re-states the rule as a bare `"error"` string discards these options and
+     * silently brings the mismatch back.
+     */
+    "@typescript-eslint/no-unused-vars": [
+      "error",
+      {
+        argsIgnorePattern: "^_",
+        varsIgnorePattern: "^_",
+        caughtErrorsIgnorePattern: "^_",
+      },
+    ],
+
     eqeqeq: ["error", "smart"],
     "prefer-const": "error",
     "object-shorthand": ["error", "always"],

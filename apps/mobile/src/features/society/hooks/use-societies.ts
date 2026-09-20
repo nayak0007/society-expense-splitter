@@ -1,5 +1,5 @@
 import { isValidJoinCode, normalizeJoinCode } from '@ses/domain';
-import type { Society, SocietyJoinPreview, SocietyMembership } from '@ses/domain';
+import type { Society, SocietyJoinPreview, SocietyMembership, SocietySummary } from '@ses/domain';
 import { useQuery } from '@tanstack/react-query';
 
 import { selectAuthUser, useAuthStore } from '@/stores/auth.store';
@@ -9,14 +9,66 @@ import {
   useSocietyStore,
 } from '@/stores/society.store';
 
-import { loadSociety, previewJoin } from '../services/society.service';
+import { loadSociety, loadSocietySummaries, previewJoin } from '../services/society.service';
 
 import { societyKeys } from './society-keys';
 
 /**
  * Society read hooks (React Query). Queries never write to the store — the
  * bootstrap hook owns that mirror, so there is exactly one writer per value.
+ *
+ * THREE READ PATHS, and picking the wrong one is the usual mistake here:
+ *
+ *  - `useSocieties()`      the user's societies as *presentation rows*
+ *                          (`SocietySummary`): name, city, type, role, status,
+ *                          member count. Use it for anything that lists
+ *                          societies. It is backed by a query, so it is fresh,
+ *                          paginatable and refetchable.
+ *  - `useActiveSociety()`  the society the session is scoped to, plus the
+ *                          caller's membership. Use it on a screen that acts on
+ *                          "the current society" without a route param.
+ *  - `useSociety(id)`      one society by id, for screens and modals that take a
+ *                          route param.
+ *
+ * `useSocietyStore.memberships` is a *fourth* source and not a duplicate: it is
+ * the synchronous snapshot the router reads before a screen can render (SAD §5.2),
+ * fed by `useSocietyBootstrap`. Hooks never write it; the bootstrap owns it.
  */
+
+export interface SocietiesResult {
+  readonly societies: readonly SocietySummary[];
+  readonly isLoading: boolean;
+  readonly isRefreshing: boolean;
+  readonly error: unknown;
+  refetch: () => void;
+}
+
+/**
+ * Every society the signed-in user belongs to (PRD §3.1: "Multiple → Society
+ * Switcher"), as rows ready to render.
+ *
+ * Disabled until a user is known, so a signed-out render never fires a request
+ * with an empty actor — the port is actor-scoped and would answer `not_found`
+ * for every row anyway.
+ */
+export function useSocieties(): SocietiesResult {
+  const user = useAuthStore(selectAuthUser);
+  const userId = user?.id ?? null;
+
+  const query = useQuery({
+    queryKey: societyKeys.list(userId),
+    queryFn: () => loadSocietySummaries(userId ?? ''),
+    enabled: userId !== null,
+  });
+
+  return {
+    societies: query.data ?? [],
+    isLoading: query.isPending && userId !== null,
+    isRefreshing: query.isFetching && !query.isPending,
+    error: query.error,
+    refetch: query.refetch,
+  };
+}
 
 export interface ActiveSocietyResult {
   readonly society: Society | null;

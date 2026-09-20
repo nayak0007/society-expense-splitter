@@ -40,7 +40,9 @@ module.exports = [
     rules: {
       "no-undef": "off",
       "no-unused-vars": "off",
-      "@typescript-eslint/no-unused-vars": "error",
+      // `@typescript-eslint/no-unused-vars` is deliberately NOT restated here:
+      // base.js configures it with the `^_` ignore patterns, and a bare
+      // `"error"` at this level would discard them.
     },
   },
   {

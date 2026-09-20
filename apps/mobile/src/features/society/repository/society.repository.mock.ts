@@ -136,7 +136,22 @@ export class MockSocietyRepository implements SocietyRepository {
       state: record.state,
       type: record.type,
       memberCount: countActiveMembers(db, record.id),
+      // Expiry is reported, not judged: `join-society.ts` evaluates it against
+      // the domain clock so the rule has one implementation.
+      joinCodeExpiresAt: record.joinCodeExpiresAt,
     };
+  }
+
+  /**
+   * Memberships of one society, as seen by `actor`.
+   *
+   * A non-member gets `not_found` rather than an empty list: an empty array would
+   * confirm the society exists, which is exactly what PRD T041 forbids.
+   */
+  async listSocietyMemberships(id: string, actor: string): Promise<readonly SocietyMembership[]> {
+    const db = this.read();
+    this.requireMember(db, id, actor);
+    return db.memberships.filter((row) => row.societyId === id).map(toMembership);
   }
 
   async create(

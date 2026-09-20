@@ -1,3 +1,13 @@
+import {
+  createSociety as createSocietyUseCase,
+  deleteSociety as deleteSocietyUseCase,
+  joinSociety as joinSocietyUseCase,
+  leaveSociety as leaveSocietyUseCase,
+  listSocietySummaries as listSocietySummariesUseCase,
+  regenerateJoinCode as regenerateJoinCodeUseCase,
+  updateSociety as updateSocietyUseCase,
+} from '@ses/application';
+import type { SocietyDeps } from '@ses/application';
 import { createSocietySchema, joinSocietySchema, updateSocietySchema } from '@ses/contracts';
 import type {
   CreateSocietyPayload,
@@ -10,8 +20,15 @@ import {
   asUserId,
   isSocietyError,
   normalizeJoinCode,
+  systemClock,
 } from '@ses/domain';
-import type { Society, SocietyJoinPreview, SocietyMembership } from '@ses/domain';
+import type {
+  Result,
+  Society,
+  SocietyJoinPreview,
+  SocietyMembership,
+  SocietySummary,
+} from '@ses/domain';
 import type { ZodError } from 'zod';
 
 import { useSocietyStore } from '@/stores/society.store';
@@ -19,19 +36,53 @@ import { useSocietyStore } from '@/stores/society.store';
 import { getSocietyRepository } from '../repository/society.repository';
 
 /**
- * Society service = use cases (Clean Architecture: screens and hooks talk to
- * this layer only; only this layer talks to the repository and the store).
+ * Society service — the app's adapter over the application layer.
  *
- * Every function:
- *  1. validates its input against the shared contract (`packages/contracts`)
- *     — the same schema the API will apply, so a rule cannot drift;
- *  2. calls the repository through the port;
- *  3. applies the session side effects (active society, pending invite).
+ * Screens and hooks talk to this file; this file talks to `@ses/application`;
+ * `@ses/application` talks to the repository port. Three things belong here and
+ * nowhere else:
  *
- * Failures are thrown as `SocietyError` with a stable `code` and a
- * user-readable message, so hooks surface them directly and the API can later
- * map codes onto HTTP status.
+ *  1. **Wire-shape validation.** Every payload is parsed against the shared
+ *     contract (`packages/contracts`) before a use case sees it — the same schema
+ *     the API will apply, so a rule cannot drift between the two.
+ *  2. **`Result` → throw.** Use cases return `Result`, because a library must not
+ *     decide how a caller reports failure. The app's hooks are written against
+ *     thrown `SocietyError`s, so the conversion happens once, here.
+ *  3. **Session side effects.** Which society is active, and whether a pending
+ *     join code is still outstanding, are facts about *this device's session* —
+ *     not business rules, so they live above the application layer.
+ *
+ * Everything else — the capability checks, the sole-admin invariant, the join
+ * code's expiry, value-object validation — is deliberately NOT re-implemented
+ * here. It lives in the use cases, which the API will call too (see
+ * `packages/application/src/index.ts`).
+ *
+ * Failures surface as `SocietyError` with a stable `code` and a user-readable
+ * message, so hooks render them directly and the API can later map codes onto
+ * HTTP status.
  */
+
+/**
+ * The application layer's dependencies, resolved per call.
+ *
+ * `getSocietyRepository()` is a lazily-built composition root (importing this
+ * module must not construct a Supabase client) and `systemClock` is the app's
+ * real clock. Both are *injected* rather than imported by the use cases — which
+ * is what keeps `@ses/application` free of any dependency on this app, and lets
+ * the API supply its own clock and repositories.
+ */
+function societyDeps(): SocietyDeps {
+  return { repository: getSocietyRepository(), clock: systemClock };
+}
+
+/**
+ * `Result` → value, or throw. One place, so every caller of this service gets a
+ * `SocietyError` and no screen ever inspects `.ok`.
+ */
+function unwrap<TValue>(result: Result<TValue, SocietyError>): TValue {
+  if (!result.ok) throw result.error;
+  return result.value;
+}
 
 /** Memberships of the signed-in user — the resolver routes on this list. */
 export async function loadMemberships(actorId: string): Promise<readonly SocietyMembership[]> {
@@ -40,6 +91,22 @@ export async function loadMemberships(actorId: string): Promise<readonly Society
 
 export async function loadSociety(societyId: string, actorId: string): Promise<Society | null> {
   return getSocietyRepository().findById(asSocietyId(societyId), asUserId(actorId));
+}
+
+/**
+ * The signed-in user's societies as presentation rows — name, city, type, the
+ * caller's role and membership status, member count (PRD §3.1: the switcher).
+ *
+ * This runs the application layer's `listSocietySummaries` use case rather than
+ * reading the repository, because a summary is a *view*: it joins a membership row
+ * with the society it points at, and a society that cannot be read is skipped
+ * instead of failing the whole list (a removed society must not break the list).
+ *
+ * Distinct from `loadMemberships`, which returns the raw membership rows the
+ * router needs — see the note in the read hooks.
+ */
+export async function loadSocietySummaries(actorId: string): Promise<readonly SocietySummary[]> {
+  return unwrap(await listSocietySummariesUseCase(societyDeps(), asUserId(actorId)));
 }
 
 /**
@@ -54,9 +121,10 @@ export async function createSociety(
   if (!parsed.success) {
     throw new SocietyError('validation', firstIssueMessage(parsed.error));
   }
-  const { society } = await getSocietyRepository().create(parsed.data, asUserId(actorId));
-  useSocietyStore.getState().setActiveSocietyId(society.id);
-  return society;
+
+  const created = unwrap(await createSocietyUseCase(societyDeps(), asUserId(actorId), parsed.data));
+  addLocalMembership(created.membership);
+  return created.society;
 }
 
 export async function updateSociety(
@@ -68,16 +136,26 @@ export async function updateSociety(
   if (!parsed.success) {
     throw new SocietyError('validation', firstIssueMessage(parsed.error));
   }
-  return getSocietyRepository().update(asSocietyId(societyId), parsed.data, asUserId(actorId));
+
+  return unwrap(
+    await updateSocietyUseCase(
+      societyDeps(),
+      asUserId(actorId),
+      asSocietyId(societyId),
+      parsed.data,
+    ),
+  );
 }
 
 export async function regenerateJoinCode(actorId: string, societyId: string): Promise<Society> {
-  return getSocietyRepository().regenerateJoinCode(asSocietyId(societyId), asUserId(actorId));
+  return unwrap(
+    await regenerateJoinCodeUseCase(societyDeps(), asUserId(actorId), asSocietyId(societyId)),
+  );
 }
 
-/** Destroys the tenant. Admin-only; the repository enforces it. */
+/** Destroys the tenant. Admin-only; the use case enforces it. */
 export async function deleteSociety(actorId: string, societyId: string): Promise<void> {
-  await getSocietyRepository().remove(asSocietyId(societyId), asUserId(actorId));
+  unwrap(await deleteSocietyUseCase(societyDeps(), asUserId(actorId), asSocietyId(societyId)));
   dropLocalMembership(societyId);
 }
 
@@ -96,9 +174,9 @@ export async function joinSociety(
   if (!parsed.success) {
     throw new SocietyError('validation', firstIssueMessage(parsed.error));
   }
-  const membership = await getSocietyRepository().join(
-    { code: parsed.data.code, occupancyType: parsed.data.occupancyType },
-    asUserId(actorId),
+
+  const membership = unwrap(
+    await joinSocietyUseCase(societyDeps(), asUserId(actorId), parsed.data),
   );
 
   const store = useSocietyStore.getState();
@@ -110,9 +188,29 @@ export async function joinSociety(
   return membership;
 }
 
+/** Leaves a society, or withdraws a pending request. */
 export async function leaveSociety(actorId: string, societyId: string): Promise<void> {
-  await getSocietyRepository().leave(asSocietyId(societyId), asUserId(actorId));
+  unwrap(await leaveSocietyUseCase(societyDeps(), asUserId(actorId), asSocietyId(societyId)));
   dropLocalMembership(societyId);
+}
+
+/**
+ * Records a membership in the in-memory session immediately. The routing guard
+ * (`(app)/_layout.tsx`) reads this list synchronously, so without it a screen that
+ * navigates straight after a write is bounced back to onboarding: the redirect
+ * happens on the next frame, while the memberships query is still refetching.
+ *
+ * Symmetric with `dropLocalMembership` below, and the same argument applies — the
+ * store is the routing snapshot, and a write we just performed is a fact we do not
+ * need the network to confirm. The refetch then reconciles with the server.
+ */
+function addLocalMembership(membership: SocietyMembership): void {
+  const store = useSocietyStore.getState();
+  const others = store.memberships.filter((row) => row.societyId !== membership.societyId);
+  // Active society first: `applyMemberships` preserves a still-valid active id
+  // instead of falling back, so the society just created stays selected.
+  store.setActiveSocietyId(membership.societyId);
+  store.applyMemberships([...others, membership]);
 }
 
 /**

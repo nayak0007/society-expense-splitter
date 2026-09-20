@@ -1,0 +1,24 @@
+{
+  "name": "@ses/application",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Application layer: use cases. Framework-free, depends only on @ses/domain ports and the injected Clock. Shared by api and mobile.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "dependencies": {
+    "@ses/domain": "workspace:*"
+  },
+  "devDependencies": {
+    "@ses/config": "workspace:*",
+    "@swc/core": "^1.16.2",
+    "@swc/jest": "^0.2.39",
+    "@types/jest": "^30.0.0",
+    "jest": "^30.5.2",
+    "typescript": "~6.0.3"
+  }
+}
