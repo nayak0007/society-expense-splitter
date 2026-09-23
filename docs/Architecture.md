@@ -277,6 +277,7 @@ Two, both stated up front so an implementing agent does not get conflicting inst
 |---|---|---|
 | `react-native-paper` (MD3 components) | **NativeWind v4 + an in-house MD3 token system**, `react-native-paper` removed entirely | NativeWind is now in the mandated stack. Mixing a styled-component library with a utility CSS engine produces two competing theming systems, doubled bundle weight and constant style-precedence bugs. We keep Material Design 3 as the *design language* (tokens, type scale, elevation, shape) and implement it as Tailwind theme tokens. Do **not** install `react-native-paper`. |
 | `victory-native` for charts | **`react-native-gifted-charts`** primary, `react-native-svg` for custom viz | Lighter, no Skia dependency, better low-end Android performance. Skia stays available if a specific chart demands it. |
+| Drizzle ORM owns the schema and its migrations (§4.5, T016/T017) | **The ordered SQL in `supabase/migrations/` is the schema's single source of truth, applied by one project-owned runner in every environment** (ADR-0008) | The Drizzle path produced tooling that reported success while applying nothing; the SQL history had never been executed by automation. Drizzle stays as the runtime query executor. The tenancy predicate (raw SQL against Supabase-provided roles) and tested-`down` documentation are not expressible as ORM metadata. The first end-to-end execution found a real privilege bug in the reviewed SQL — the class of failure this consolidation makes loud. |
 
 Everything else in the PRD's stack section stands.
 

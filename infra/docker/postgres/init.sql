@@ -1,38 +1,23 @@
 -- ═════════════════════════════════════════════════════════════════════════════
--- Local Postgres bootstrap — Roadmap T007
+-- Local Postgres bootstrap — Roadmap T007 (infrastructure only)
 -- ═════════════════════════════════════════════════════════════════════════════
 --
 -- Runs ONCE, on an empty data directory, as the `postgres` superuser.
 --
--- ## Why this file is not just `CREATE EXTENSION`
+-- ## ADR-0008 note: this file is no longer load-bearing for the schema
 --
--- T007 asks for `pgcrypto`, `citext` and `pg_trgm`, and it would be tempting to
--- stop there. But the migrations in `supabase/migrations/` are written for
--- Supabase, and they depend on three things that a stock Postgres image does not
--- have:
+-- Everything the migration history used to depend on this file for — the
+-- extensions, the Supabase role model, the `auth` schema and shim, the default
+-- privileges — is now stated by the history's own first migration
+-- (`supabase/migrations/20260919120000_bootstrap.sql`), applied by the project
+-- runner in every environment. A fresh database on any host needs only an empty
+-- database and `pnpm db:migrate`.
 --
---   1. `auth.uid()` — called by 24 policy expressions.
---   2. `auth.users` — the table `public.profiles.id` references, with triggers on
---      INSERT and UPDATE.
---   3. The roles `anon` and `authenticated` — every policy is `TO authenticated`,
---      and the RLS migrations `REVOKE ... FROM anon`, which fails outright if the
---      role does not exist.
---
--- Without them, `pnpm db:migrate` fails on the first statement — or worse, in a
--- version of the schema where the grants succeed and the policies silently match
--- nothing, which presents as "the API returns empty lists".
---
--- ## This is a shim, and it is local-only
---
--- It reproduces Supabase's *interface*, not its implementation. Supabase's
--- `auth.uid()` reads the `request.jwt.claims` GUC that PostgREST sets per request;
--- this one reads the same GUC — which is precisely why the API's Unit of Work sets
--- it (see `apps/api/src/infrastructure/database/unit-of-work.ts`). That identity
--- bridge is therefore exercised locally against the same mechanism production
--- uses, rather than against a local-only shortcut.
---
--- Nothing here is applied to the hosted project: Supabase creates `auth.users` and
--- these roles itself. This file only ever runs inside the compose container.
+-- This file keeps running in the compose container because Docker must create
+-- the login role and password before any client can connect, and because a
+-- pre-shimmed local database keeps first `db:migrate` output clean. It must
+-- stay consistent with the bootstrap migration — the bootstrap is authoritative
+-- if they ever disagree.
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Extensions (T007)
@@ -226,9 +211,15 @@ AS $$
 DECLARE
   new_id uuid;
 BEGIN
+  -- The cast must be spelled `::public.citext`: with `search_path=''` (the
+  -- hardening above) an unqualified `::citext` fails with `type "citext" does
+  -- not exist` — pg_catalog is implicit but `public` is not, and citext
+  -- installs into `public` here. Assignment to the citext column alone is not
+  -- enough: the cast happens before the assignment. (Found by actually calling
+  -- this function; it errored on first use.)
   INSERT INTO auth.users (email, raw_user_meta_data, email_confirmed_at)
   VALUES (
-    user_email::citext,
+    user_email::public.citext,
     jsonb_strip_nulls(jsonb_build_object('full_name', full_name)),
     CASE WHEN confirmed THEN now() ELSE NULL END
   )

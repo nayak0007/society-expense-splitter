@@ -75,7 +75,25 @@ async function main(): Promise<void> {
   // image in Docker. See `common/paths.ts` for the full reasoning.
   const outputPath = join(findRepoRoot(), "docs", "api", "OPENAPI.yaml");
   mkdirSync(dirname(outputPath), { recursive: true });
-  writeFileSync(outputPath, stringify(document), "utf8");
+
+  // FORMATTED WITH THE REPO'S OWN PRETTIER, not written as `yaml.stringify`
+  // produced it. The two disagree about line width — `stringify` leaves a long
+  // `description` on one line where Prettier continues it on the next — so a raw
+  // write makes `pnpm openapi` produce a file that fails `pnpm format:check`, and
+  // makes `contract:drift` (`openapi` then `git diff --exit-code`) report drift on
+  // a tree that is byte-identical to a correctly generated one. Formatting here
+  // means the generator owns its output's exact bytes, and the guard against
+  // hand-editing the spec — which is the whole reason it is committed — stays
+  // intact instead of being switched off with a `.prettierignore` entry.
+  //
+  // A dynamic import so Prettier lands in its own chunk: this bootstrap is only
+  // reachable from the `openapi` tool, and the API process must not carry a
+  // formatter it never calls.
+  const { format } = await import("prettier");
+  const contents = await format(stringify(document), {
+    filepath: outputPath,
+  });
+  writeFileSync(outputPath, contents, "utf8");
 
   console.log(`OpenAPI document written to ${outputPath}`);
 

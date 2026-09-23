@@ -1,3 +1,5 @@
+import { REQUEST_ACTOR_KEY, type VerifiedActor } from "../auth/actor";
+
 /**
  * Narrow accessors for the two places this codebase has to touch the HTTP
  * objects generically.
@@ -37,6 +39,60 @@ export function readRequestHeader(
     name.toLowerCase()
   ];
   return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+/**
+ * Extracts the bearer token from the `Authorization` header, or `undefined`.
+ *
+ * The scheme match is case-insensitive because RFC 7235 makes it so, and real
+ * clients (`fetch`, `axios`, `supabase-js`) differ in how they spell it. A
+ * malformed value yields `undefined` rather than a partial token: the guard's
+ * answer for "no token" and "a token that cannot be parsed" is the same 401, and
+ * a half-parsed token would only reach the verifier to fail there.
+ */
+export function readBearerToken(request: unknown): string | undefined {
+  const header = readRequestHeader(request, "authorization");
+  if (header === undefined) return undefined;
+
+  const match = /^Bearer[ ]+(.+)$/i.exec(header.trim());
+  const token = match?.[1]?.trim();
+  return token === undefined || token === "" ? undefined : token;
+}
+
+/**
+ * The actor `SupabaseAuthGuard` verified, if this request passed it.
+ *
+ * Stored on the request object (the guard runs before the async context exists,
+ * so it has nowhere else to put it), then read back by `@Ctx()` and the request
+ * context interceptor. Read defensively: a request that never reached the guard
+ * — a `@Public()` route, a unit test calling a handler directly — simply has no
+ * actor, and this must not throw inside request handling.
+ */
+export function readRequestActor(request: unknown): VerifiedActor | undefined {
+  if (typeof request !== "object" || request === null) {
+    return undefined;
+  }
+  const actor: unknown = (request as Record<string, unknown>)[
+    REQUEST_ACTOR_KEY
+  ];
+  if (typeof actor !== "object" || actor === null) {
+    return undefined;
+  }
+  const userId: unknown = (actor as { userId?: unknown }).userId;
+  return typeof userId === "string" && userId !== ""
+    ? (actor as VerifiedActor)
+    : undefined;
+}
+
+/** Attaches the verified actor to the request for the rest of the pipeline. */
+export function writeRequestActor(
+  request: unknown,
+  actor: VerifiedActor,
+): void {
+  if (typeof request !== "object" || request === null) {
+    return;
+  }
+  (request as Record<string, unknown>)[REQUEST_ACTOR_KEY] = actor;
 }
 
 /**

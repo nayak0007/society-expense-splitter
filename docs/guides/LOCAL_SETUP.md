@@ -70,15 +70,12 @@ explicitly), but the token-hash form is the recommended one.
 ### 3. Migrations
 
 ```bash
-npx supabase login
-npx supabase link --project-ref <ref>
-npx supabase db push            # apply supabase/migrations/*.sql
-npx supabase db push --dry-run  # to preview first
+pnpm db:migrate                 # apply supabase/migrations/*.sql via the project runner
+pnpm db:status                  # verify what the project has applied
 ```
 
-Without the CLI, paste each file from `supabase/migrations/` into the SQL editor
-in filename order — they are idempotent. See `supabase/README.md` for why auth
-SQL is applied by Supabase rather than Drizzle.
+The same runner is used in CI and in the deploy pipeline (ADR-0008) — see
+`supabase/README.md` for the naming, immutability and manual-fallback rules.
 
 ### 4. Verify
 
@@ -138,12 +135,14 @@ pnpm dev:infra:down  # stop; add -v by hand to also wipe the named volumes
 | Redis 7              | 6379                      |                                                                                  |
 | MinIO                | 9000 (S3), 9001 (console) | console login `ses_minio` / `ses_minio_local`                                    |
 
-`init.sql` creates the three extensions, the Supabase-compatible roles
-(`authenticator`, `authenticated`, `anon`) and the `auth` schema shim that the
-committed RLS policies call. **Without it every policy evaluates false and the API
-appears to work while seeing an empty database.** If you started the stack before
-that file existed, the init script will not re-run — delete the volume and bring
-it up again.
+`init.sql` creates the database and roles bootstrap. The schema itself —
+extensions, the Supabase-compatible roles, the `auth` shim and every table and
+policy — now comes from the migration history's own bootstrap file
+(`20260919120000_bootstrap.sql`), applied by `pnpm db:migrate` (ADR-0008). A
+stale local volume is therefore no longer load-bearing: even if `init.sql` did
+not run, `pnpm db:migrate` prepares the whole surface. If you started the stack
+before that file existed, delete the volume and bring it up again anyway so the
+container matches the documented shape.
 
 ### 2. Configure and run the API
 
@@ -186,13 +185,30 @@ Interactive docs: <http://localhost:3000/v1/docs>.
 ### 4. Database
 
 ```bash
-pnpm db:migrate   # apply migrations (uses MIGRATION_DATABASE_URL)
-pnpm db:reset     # drop and re-apply — local only
+pnpm db:migrate   # apply the schema history (uses MIGRATION_DATABASE_URL)
+pnpm db:status    # applied vs pending, straight from the ledger
+pnpm db:check     # exit 1 unless the database matches HEAD
+pnpm db:migrate:new <slug>   # scaffold the next migration file
+pnpm db:reset     # drop + re-apply — dev only, refuses in staging/production
 ```
 
-The API's own schema lives in `apps/api/drizzle.config.ts`; the Supabase-side auth
-and RLS SQL is applied by Supabase (see the section above), which is why there are
-two migration histories.
+There is exactly **one** migration history — `supabase/migrations/`, applied by
+the project runner (ADR-0008) in local, CI and production alike. Its first file
+(`20260919120000_bootstrap.sql`) creates the extensions, the Supabase-compatible
+roles and the `auth` shim the RLS policies call, so a fresh Postgres needs no
+manual preparation beyond an empty database. Applied migrations are immutable
+(checksum-enforced) — fix forward with a new file, never edit an applied one.
+
+To prove your local database is correctly wired, run the RLS canary:
+
+```bash
+psql "$MIGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/db/rls-canary.sql
+# → "RLS canary passed: auth.uid() resolves, member sees own society, stranger sees none…"
+```
+
+This is the same assertion CI runs in its `test-db` job. A wrong GUC name or a
+broken policy fails here loudly instead of as an app that "works" but sees an
+empty database.
 
 ### 5. The contract
 

@@ -113,6 +113,81 @@ jobs:
       # `pnpm test` because it has its own Jest config and a longer timeout.
       - run: pnpm --filter @ses/api test:e2e
 
+  # ── Database (ADR-0008) ────────────────────────────────────────────────────
+  # The first execution of the schema history by automation. Every job above
+  # validates TypeScript; this one validates SQL — until it existed, the
+  # committed migrations were design claims rather than verified facts.
+  #
+  # Uses the same mechanism as every other environment: the project runner.
+  # A bootstrap shim (the `auth` schema, the Supabase roles) makes the history
+  # self-sufficient on a stock Postgres image, applied by the runner itself as
+  # the history's first migration — so CI runs the identical code path a
+  # developer's `pnpm db:migrate` runs.
+  test-db:
+    name: Database · apply + verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ses
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ses"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      MIGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/ses
+      DATABASE_URL: postgresql://authenticator:authenticator@127.0.0.1:5432/ses
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # 1. The runner applies the full history — bootstrap shim included.
+      #    `dist/` is built by the db:migrate script itself.
+      - name: Apply the schema history
+        run: pnpm --filter @ses/api db:migrate
+
+      # 2. CI gate: the database must now exactly match HEAD. Catches a file
+      #    added but never applied, a ledger/name mismatch, anything that
+      #    would otherwise only surface at deploy time.
+      - name: Verify the database matches HEAD
+        run: pnpm --filter @ses/api db:check
+
+      # 3. Idempotence: re-running must be a no-op. The runner's ledger makes
+      #    this trivially true; asserting it also closes a future regression
+      #    where a migration stops being recorded correctly.
+      - name: Re-apply is a no-op
+        run: pnpm --filter @ses/api db:migrate
+
+      # 4. The RLS canary — ADR-0007's identity bridge, finally observed by
+      #    automation. The committed canary (scripts/db/rls-canary.sql) mints
+      #    two users through the shim, makes one a member via the real
+      #    society_create RPC, then asserts member-sees-one/stranger-sees-none
+      #    through the SET ROLE + GUC preamble the UnitOfWork issues on every
+      #    request. A wrong GUC name fails to a SILENTLY EMPTY result set, not
+      #    an error — that silent failure mode is what this step exists to
+      #    catch. Piped into the service container, where psql lives.
+      - name: RLS canary (member sees own, stranger sees none)
+        run: |
+          CID=$(docker ps --filter "ancestor=postgres:18-alpine" --format '{{.ID}}' | head -1)
+          docker exec -i "$CID" psql "postgresql://postgres:postgres@127.0.0.1:5432/ses" \
+            -v ON_ERROR_STOP=1 -q < scripts/db/rls-canary.sql
+          echo "RLS canary passed."
+
   # ── Build ──────────────────────────────────────────────────────────────────
   build:
     name: Build

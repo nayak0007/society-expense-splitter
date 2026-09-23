@@ -21,3 +21,4 @@ export * from "./join-society";
 export * from "./leave-society";
 export * from "./get-society-profile";
 export * from "./list-society-summaries";
+export * from "./lookup-join-code";

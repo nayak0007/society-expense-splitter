@@ -6,6 +6,7 @@ import {
   type HealthCheckResult,
 } from "@nestjs/terminus";
 
+import { Public } from "../../common/decorators/public.decorator";
 import { MigrationsIndicator } from "./indicators/migrations.indicator";
 import { PostgresIndicator } from "./indicators/postgres.indicator";
 import { RedisIndicator } from "./indicators/redis.indicator";
@@ -23,9 +24,16 @@ import { RedisIndicator } from "./indicators/redis.indicator";
  * **Responses are terminus-native (`{ status, info, error, details }`), not the
  * API's `{ data, meta }` envelope.** Orchestrators read the status code, and
  * wrapping a library's diagnostic body would discard the detail an operator
- * needs at 3am. The exception filter makes the same exception for these paths.
+ * needs at 3am. The exception filter and the envelope interceptor both make the
+ * same exception for these paths, through the one shared `isHealthProbeUrl`.
+ *
+ * `@Public()` because the global auth guard would otherwise require a session
+ * for a probe — and an orchestrator has none. This is the decorator's reason for
+ * existing: the route is unprotected, but by declaration rather than by the
+ * guard not having been registered yet.
  */
 @ApiTags("health")
+@Public()
 @Controller("health")
 export class HealthController {
   constructor(

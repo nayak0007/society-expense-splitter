@@ -20,6 +20,7 @@ import {
 } from "../errors/app-error";
 import { RequestContext } from "../context/request-context";
 import { readRequestId } from "../http/http-access";
+import { isHealthProbeUrl } from "../http/probe-paths";
 
 /**
  * Renders every failure as the SAD §7.10 error envelope.
@@ -59,7 +60,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
       RequestContext.requestId() ?? readRequestId(request) ?? randomUUID();
     const { status, payload } = resolve(exception);
 
-    if (isHealthProbe(httpAdapter.getRequestUrl(request))) {
+    if (isHealthProbeUrl(httpAdapter.getRequestUrl(request))) {
       // Re-emit the original body so probe diagnostics survive.
       const original =
         exception instanceof HttpException
@@ -85,10 +86,6 @@ export class ApiExceptionFilter implements ExceptionFilter {
       status,
     );
   }
-}
-
-function isHealthProbe(url: string): boolean {
-  return url.startsWith("/v1/health") || url.startsWith("/health");
 }
 
 /**

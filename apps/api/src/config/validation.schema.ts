@@ -22,9 +22,17 @@ import { z } from "zod";
  *    credentials at runtime, which silently disables every policy.
  *
  * Zod is v4 in this workspace (the SAD says v3): `z.url()` replaces the
- * deprecated `z.string().url()`, and cross-field rules are plain assertions in
- * `validateEnv` rather than `.superRefine`, so every problem can be reported in
- * one message instead of the first one Zod reaches.
+ * deprecated `z.string().url()`.
+ *
+ * HOW FAILURES ARE REPORTED, precisely, because the two stages differ. Field
+ * errors are collected by one `safeParse`, so a boot lists every bad field
+ * together rather than one per redeploy. The cross-field rules in
+ * `collectAssertions` then run on the *parsed* object, so they are skipped
+ * entirely when any field error exists — a single bad `PORT` therefore masks a
+ * missing `SENTRY_DSN`, and the next deploy reveals it. Accepted knowingly: the
+ * cross-field rules read typed values (a URL's role, the `NODE_ENV` enum), so
+ * running them on unvalidated input would mean re-deriving that typing by hand
+ * for a case the operator is already fixing.
  */
 
 /**
@@ -49,13 +57,22 @@ export const envSchema = z.object({
   // ── Data tier (SAD §19.2) ────────────────────────────────────────────────
   /** Runtime connection: role-scoped, subject to RLS. */
   DATABASE_URL: z.url(),
-  /** Owner connection for DDL only. Used by drizzle-kit and scripts/db/*. */
+  /** Owner connection for DDL only. Used by `db:*` scripts (ADR-0008). */
   MIGRATION_DATABASE_URL: z.url(),
   REDIS_URL: z.url(),
   /** SAD §14.4: `statement_timeout` for API connections. Workers use 120s. */
   DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   /** Connection pool ceiling. Sizing for MVP is 2 × API at 1 vCPU (SAD §1.6). */
   DB_POOL_MAX: z.coerce.number().int().positive().default(10),
+  /**
+   * Overrides where the migration history lives. Empty in every normal
+   * checkout — the runner resolves `supabase/migrations` from the working
+   * directory upward — and set in the container image, which ships the SQL at
+   * `/app/migrations` (`infra/docker/api.Dockerfile`). Read by the readiness
+   * probe via `AppConfig`, so the probe looks in the same directory the
+   * deploy-time migrate step applied.
+   */
+  MIGRATIONS_DIR: z.string().min(1).optional(),
 
   // ── Supabase (identity + storage) ────────────────────────────────────────
   SUPABASE_URL: z.url(),

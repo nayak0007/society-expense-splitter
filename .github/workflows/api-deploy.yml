@@ -1,0 +1,222 @@
+# Deploy pipeline for the API and worker — ADR-0008's production leg.
+#
+# ## Why the migrations run from THIS pipeline, against the owner connection
+#
+# SAD §16.4's deploy sequence is: migrate → deploy → verify. Before ADR-0008
+# that step was a silent no-op (`pnpm db:migrate` exited 0 having applied
+# nothing) and the readiness probe could not catch it. This workflow makes the
+# sequence real and deterministic:
+#
+#   1. Build the image. The image ships the exact SQL history it was built
+#      from (`MIGRATIONS_DIR=/app/migrations`, see `infra/docker/api.Dockerfile`),
+#      so "the schema matches the code" holds by construction, not by hoping
+#      two checkouts agree.
+#   2. Migrate FIRST, from that same image, against the owner connection
+#      (`MIGRATION_DATABASE_URL`). Expanding the schema before the new code
+#      rolls out is the expand phase of SAD §8.8; the readiness probe (which
+#      now compares the `ses_meta` ledger against the shipped files) gates
+#      traffic until it reports current.
+#   3. Then roll the API and worker.
+#
+# ## Secrets expected (repository environments)
+#
+#   REGISTRY_USERNAME / REGISTRY_PASSWORD   push access for the image registry
+#   DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY   the target VM
+#   MIGRATION_DATABASE_URL   OWNER connection (staging + production secrets)
+#   DATABASE_URL             runtime connection, `authenticator` role
+#   REDIS_URL, SUPABASE_URL, SUPABASE_JWT_ISSUER, SUPABASE_SERVICE_ROLE_KEY,
+#   SENTRY_DSN, ENCRYPTION_KEY   the validated runtime surface (SAD §19.2)
+#
+# Nothing here writes secrets into the image; they enter as runtime `--env`
+# only, and the migration connection is never logged.
+#
+# The image build/test leg mirrors `contract-check.yml`'s docker job; the
+# migrate leg is new and is the piece ADR-0008 adds.
+name: api-deploy
+
+on:
+  # Tags mark deployable builds; environment promotion is a manual approval
+  # inside the workflow (GitHub Environments), not a separate push.
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [staging, production]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository }}/api
+
+jobs:
+  # ── Build and smoke-test the image ────────────────────────────────────────
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - id: meta
+        name: Compute the image tag
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      # The Dockerfile's pnpm store cache mount needs nothing extra; BuildKit
+      # is the default on current runners.
+      - name: Build (api + migrate targets)
+        run: |
+          docker build \
+            -f infra/docker/api.Dockerfile \
+            --target api \
+            -t "$REGISTRY_IMAGE:${{ steps.meta.outputs.tag }}" \
+            .
+          docker build \
+            -f infra/docker/api.Dockerfile \
+            --target migrate \
+            -t "$REGISTRY_IMAGE:${{ steps.meta.outputs.tag }}-migrate" \
+            .
+
+      # Smoke: the image boots, the process answers, and the migration entry
+      # reaches the CLI (it must fail fast on a missing MIGRATION_DATABASE_URL
+      # rather than hang).
+      - name: Smoke-test the api target
+        run: |
+          docker run -d --name smoke -p 3000:3000 \
+            -e DATABASE_URL="postgresql://placeholder:placeholder@127.0.0.1:5432/placeholder" \
+            -e MIGRATION_DATABASE_URL="postgresql://placeholder:placeholder@127.0.0.1:5432/placeholder" \
+            -e REDIS_URL="redis://127.0.0.1:6379" \
+            -e SUPABASE_URL="https://placeholder.supabase.co" \
+            -e SUPABASE_JWT_ISSUER="https://placeholder.supabase.co/auth/v1" \
+            -e SUPABASE_SERVICE_ROLE_KEY="placeholder-service-role-key-for-route-introspection" \
+            "$REGISTRY_IMAGE:${{ steps.meta.outputs.tag }}"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/v1/health/live >/dev/null 2>&1; then
+              echo "live probe answered"; docker rm -f smoke; exit 0
+            fi
+            sleep 2
+          done
+          echo "api image did not become live"; docker logs smoke; docker rm -f smoke; exit 1
+
+      - name: Smoke-test the migrate target (fails fast without a URL)
+        run: |
+          if docker run --rm "$REGISTRY_IMAGE:${{ steps.meta.outputs.tag }}-migrate" 2>err.log; then
+            echo "migrate target must refuse to run without MIGRATION_DATABASE_URL"
+            exit 1
+          fi
+          grep -q "MIGRATION_DATABASE_URL" err.log || { cat err.log; exit 1; }
+
+      - name: Push both images
+        run: |
+          echo "$REGISTRY_PASSWORD" | docker login ghcr.io \
+            -u "$REGISTRY_USERNAME" --password-stdin
+          docker push "$REGISTRY_IMAGE:${{ steps.meta.outputs.tag }}"
+          docker push "$REGISTRY_IMAGE:${{ steps.meta.outputs.tag }}-migrate"
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+
+  # ── Migrate (staging) ─────────────────────────────────────────────────────
+  migrate-staging:
+    name: Migrate staging database
+    runs-on: ubuntu-latest
+    needs: build
+    environment: staging
+    timeout-minutes: 10
+    steps:
+      - name: Apply pending migrations from the tagged image
+        run: |
+          docker pull "$REGISTRY_IMAGE:${{ needs.build.outputs.tag }}-migrate"
+          docker run --rm \
+            -e MIGRATION_DATABASE_URL="$MIGRATION_DATABASE_URL" \
+            "$REGISTRY_IMAGE:${{ needs.build.outputs.tag }}-migrate"
+        env:
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+  # ── Deploy (staging) ──────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy staging (api + worker)
+    runs-on: ubuntu-latest
+    needs: [build, migrate-staging]
+    environment: staging
+    timeout-minutes: 15
+    steps:
+      - name: Roll the containers over SSH
+        run: |
+          install -m 600 -D /dev/null ~/.ssh/id_ed25519
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          ssh -o StrictHostKeyChecking=accept-new "$DEPLOY_USER@$DEPLOY_HOST" \
+            "REGISTRY_IMAGE=$REGISTRY_IMAGE TAG=${{ needs.build.outputs.tag }} \
+             DATABASE_URL='$DATABASE_URL' REDIS_URL='$REDIS_URL' \
+             SUPABASE_URL='$SUPABASE_URL' SUPABASE_JWT_ISSUER='$SUPABASE_JWT_ISSUER' \
+             SUPABASE_SERVICE_ROLE_KEY='$SUPABASE_SERVICE_ROLE_KEY' \
+             SENTRY_DSN='$SENTRY_DSN' ENCRYPTION_KEY='$ENCRYPTION_KEY' \
+             bash -s" < infra/docker/deploy-remote.sh
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_JWT_ISSUER: ${{ secrets.SUPABASE_JWT_ISSUER }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+
+  # ── Production: migrate → deploy, gated on a manual approval ──────────────
+  migrate-production:
+    name: Migrate production database
+    needs: deploy-staging
+    environment: production # GitHub Environment protection rules = the approval gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Apply pending migrations from the tagged image
+        run: |
+          docker pull "$REGISTRY_IMAGE:${{ needs.build.outputs.tag }}-migrate"
+          docker run --rm \
+            -e MIGRATION_DATABASE_URL="$MIGRATION_DATABASE_URL" \
+            "$REGISTRY_IMAGE:${{ needs.build.outputs.tag }}-migrate"
+        env:
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+
+  deploy-production:
+    name: Deploy production (api + worker)
+    needs: [build, migrate-production]
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Roll the containers over SSH
+        run: |
+          install -m 600 -D /dev/null ~/.ssh/id_ed25519
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          ssh -o StrictHostKeyChecking=accept-new "$DEPLOY_USER@$DEPLOY_HOST" \
+            "REGISTRY_IMAGE=$REGISTRY_IMAGE TAG=${{ needs.build.outputs.tag }} \
+             DATABASE_URL='$DATABASE_URL' REDIS_URL='$REDIS_URL' \
+             SUPABASE_URL='$SUPABASE_URL' SUPABASE_JWT_ISSUER='$SUPABASE_JWT_ISSUER' \
+             SUPABASE_SERVICE_ROLE_KEY='$SUPABASE_SERVICE_ROLE_KEY' \
+             SENTRY_DSN='$SENTRY_DSN' ENCRYPTION_KEY='$ENCRYPTION_KEY' \
+             bash -s" < infra/docker/deploy-remote.sh
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_JWT_ISSUER: ${{ secrets.SUPABASE_JWT_ISSUER }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}

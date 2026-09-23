@@ -57,6 +57,18 @@ export class AppConfig {
     return this.config.getOrThrow<number>("DB_POOL_MAX");
   }
 
+  /**
+   * Overrides where the migration history lives. `undefined` in every normal
+   * checkout (the runner resolves `supabase/migrations` from the working
+   * directory upward); set in the container image, which ships the SQL at
+   * `/app/migrations`. The readiness probe must read the same directory the
+   * deploy-time migrate step applied, so it goes through this accessor rather
+   * than recomputing a path.
+   */
+  get migrationsDir(): string | undefined {
+    return this.config.get<string>("MIGRATIONS_DIR");
+  }
+
   get databaseStatementTimeoutMs(): number {
     return this.config.getOrThrow<number>("DB_STATEMENT_TIMEOUT_MS");
   }

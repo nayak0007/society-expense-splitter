@@ -1,0 +1,34 @@
+-- 20260923162920_society_gen_join_code_grant.sql
+--
+-- Grant EXECUTE on gen_join_code() back to authenticated.
+--
+-- WHY: 20260920130100_society_rls.sql revokes every privilege on
+-- gen_join_code() from PUBLIC, anon and authenticated, with the comment
+-- "Server-side only: minting codes is not a client operation". That revoke
+-- broke the create path it was protecting: `society_create` inserts into
+-- `societies`, whose BEFORE INSERT trigger `prepare_society()` (a SECURITY
+-- INVOKER function) calls `public.gen_join_code()` **as the invoking user** —
+-- so the INSERT fails with `permission denied for function gen_join_code` for
+-- exactly the client the RPC exists to serve.
+--
+-- Found by the RLS canary (scripts/db/rls-canary.sql) on a database built by
+-- the migration runner — the first time this history was ever executed
+-- end to end. On hosted Supabase the failure would be identical; the mobile
+-- create flow has never run against a real database.
+--
+-- The revoke's stated intent is to stop clients calling gen_join_code()
+-- DIRECTLY to burn CPU in the uniqueness loop. That intent survives: the
+-- function stays revoked from PUBLIC and anon. The trigger's internal call is
+-- a legitimate use — the mint happens as a side effect of the create
+-- operation the client is already authorised to perform, through the RPC
+-- whose ownership the API layer enforces.
+--
+-- Alternative rejected: making `prepare_society()` SECURITY DEFINER. That
+-- would elevate the whole trigger (slug derivation, trimming) to owner
+-- privileges to fix one call, and definer triggers on a tenant table are a
+-- bigger privilege surface than one EXECUTE grant.
+--
+-- Down (run by hand):
+--   REVOKE ALL ON FUNCTION public.gen_join_code() FROM authenticated;
+
+GRANT EXECUTE ON FUNCTION public.gen_join_code() TO authenticated;

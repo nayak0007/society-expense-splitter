@@ -27,7 +27,22 @@ const pincodeSchema = z
   .trim()
   .regex(/^[1-9][0-9]{5}$/, "Enter a 6-digit PIN code");
 
-export const createSocietySchema = z.object({
+/**
+ * Request bodies are **strict**; response schemas are not.
+ *
+ * SAD §7.8 stage 1 requires it: an unknown field is a `400`, because silently
+ * dropping it is how a client comes to believe it set something it did not. A
+ * typo (`billingdate`, `pincode ` with a space) is a bug on the caller's side,
+ * and the only useful moment to say so is the request that carried it.
+ *
+ * The asymmetry with the response schemas is deliberate and is the same rule
+ * seen from both ends: **strict inbound, lenient outbound.** A server that adds
+ * a field must not break an older client that has not been rebuilt, while a
+ * client that sends a field the server does not know about must be told rather
+ * than have its intent quietly discarded. Applying strictness in both directions
+ * would turn every additive server-side change into a breaking one.
+ */
+export const createSocietySchema = z.strictObject({
   name: z.string().trim().min(3, "Name must be at least 3 characters").max(160),
   type: z.enum(SOCIETY_TYPES),
   registrationNumber: z.string().trim().max(64).optional(),
@@ -50,15 +65,35 @@ export const createSocietySchema = z.object({
 });
 export type CreateSocietyPayload = z.infer<typeof createSocietySchema>;
 
-/** Update = create with every field optional, but never an empty patch. */
+/**
+ * Update = create with every field optional, never an empty patch, **plus** the
+ * settings the create wizard never asked for.
+ *
+ * The `.extend` is not decoration. The application layer's `UpdateSocietyCommand`
+ * accepts `graceDays`, `billVacantFlats`, `allowPartialPayments`,
+ * `defaulterListPublic`, `financialYearStartMonth` and `timezone`, and the
+ * endpoint's own documentation promises it patches "the society and/or its
+ * settings atomically" — a schema without them would make every one of those
+ * fields unsettable over HTTP while the request still returned `200`, which is
+ * the worst possible outcome: the caller is told the change succeeded and the
+ * only evidence otherwise is a field that quietly kept its old value.
+ */
 export const updateSocietySchema = createSocietySchema
   .partial()
+  .extend({
+    graceDays: z.number().int().min(0).max(90).optional(),
+    billVacantFlats: z.boolean().optional(),
+    allowPartialPayments: z.boolean().optional(),
+    defaulterListPublic: z.boolean().optional(),
+    financialYearStartMonth: z.number().int().min(1).max(12).optional(),
+    timezone: z.string().min(1).max(64).optional(),
+  })
   .refine((patch) => Object.keys(patch).length > 0, {
     message: "Nothing to update",
   });
 export type UpdateSocietyPayload = z.infer<typeof updateSocietySchema>;
 
-export const joinSocietySchema = z.object({
+export const joinSocietySchema = z.strictObject({
   code: joinCodeSchema,
   occupancyType: z.enum(OCCUPANCY_TYPES),
 });
@@ -170,6 +205,18 @@ export const societyCapabilitiesSchema = z.object({
 });
 export type SocietyCapabilitiesDto = z.infer<typeof societyCapabilitiesSchema>;
 
+/**
+ * `GET /societies/lookup?code=` — the public join-code preview.
+ *
+ * Names its member for the same reason every other response here does: `data` is
+ * a resource envelope, so a field can be added later without breaking a client
+ * that destructures it.
+ */
+export const joinPreviewResponseSchema = z.object({
+  preview: societyJoinPreviewSchema,
+});
+export type JoinPreviewResponseDto = z.infer<typeof joinPreviewResponseSchema>;
+
 /** `GET /societies/:id` — everything one profile screen needs in one response. */
 export const societyProfileResponseSchema = z.object({
   society: societySchema,
@@ -180,13 +227,49 @@ export type SocietyProfileResponseDto = z.infer<
   typeof societyProfileResponseSchema
 >;
 
-/** `POST /societies/:id/join-code` — rotation returns the society, code included. */
-export const regenerateJoinCodeResponseSchema = z.object({
+/**
+ * `POST /societies` — the created society and the creator's Admin membership.
+ *
+ * Both are returned because the caller needs both immediately: it navigates
+ * into the society it just created, and it has to know its own role there. The
+ * API can state it exactly, whereas the client would have to re-derive it.
+ */
+export const createdSocietyResponseSchema = z.object({
+  society: societySchema,
+  membership: membershipSchema,
+});
+export type CreatedSocietyResponseDto = z.infer<
+  typeof createdSocietyResponseSchema
+>;
+
+/**
+ * `POST /societies/join` — the membership that join produced.
+ *
+ * Wrapped in a named member rather than returned bare, so `data` is a resource
+ * envelope everywhere in this module and adding a field later is not a breaking
+ * change (SAD §7.9).
+ */
+export const membershipResponseSchema = z.object({
+  membership: membershipSchema,
+});
+export type MembershipResponseDto = z.infer<typeof membershipResponseSchema>;
+
+/**
+ * The shape shared by every endpoint that returns only the society — an edit
+ * (`PATCH /societies/:id`) and a join-code rotation, whose new code is part of
+ * the society row.
+ */
+export const societyResponseSchema = z.object({
   society: societySchema,
 });
-export type RegenerateJoinCodeResponseDto = z.infer<
-  typeof regenerateJoinCodeResponseSchema
->;
+export type SocietyResponseDto = z.infer<typeof societyResponseSchema>;
+
+/**
+ * Rotation's response. An alias rather than a second declaration: one shape,
+ * one definition, and the name says which endpoint it documents.
+ */
+export const regenerateJoinCodeResponseSchema = societyResponseSchema;
+export type RegenerateJoinCodeResponseDto = SocietyResponseDto;
 
 /** Settings-only patch (PRD §3.2 step 3 fields), never an empty object. */
 export const updateSocietySettingsSchema = societySettingsSchema

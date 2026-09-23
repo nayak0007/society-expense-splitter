@@ -32,9 +32,10 @@ module.exports = {
 
   // See jest.config.cjs for why this pattern is shaped the way it is: NestJS 12
   // is ESM, Jest executes CommonJS, and pnpm's store layout defeats the usual
-  // `node_modules/(?!@nestjs/)` idiom.
+  // `node_modules/(?!@nestjs/)` idiom. `jose` is ESM-only in v6 and the society
+  // suite signs real tokens for the same reason the auth suite does.
   transformIgnorePatterns: [
-    "node_modules/(?!(@nestjs|\\.pnpm/[^/]+/node_modules/@nestjs)/)",
+    "node_modules/(?!(@nestjs|jose|\\.pnpm/[^/]+/node_modules/(@nestjs|jose))/)",
   ],
 
   testTimeout: 30_000,

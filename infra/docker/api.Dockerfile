@@ -105,6 +105,14 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 
+# The migration history ships with the image (ADR-0008): the deploy pipeline's
+# migrate-before-deploy step must apply exactly the SQL this build was built
+# from, so the schema can never be newer than the code — or vice versa. The
+# variable is set here rather than in the workflow so the image is
+# self-describing: anyone running it by hand gets the same behaviour.
+ENV MIGRATIONS_DIR=/app/migrations
+COPY --from=build /repo/supabase/migrations ./migrations
+
 # Never root. A container process that escapes the application now has no
 # privileges in the image, and this is what lets an orchestrator enforce
 # `runAsNonRoot` (SAD §13.4 hardening).
@@ -122,6 +130,20 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
 
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "dist/main.js"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3.5 — the migrate entrypoint (ADR-0008)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Same image, one job: apply the history it ships. The deploy workflow runs
+# `docker run --rm <image> migrate` immediately before rolling the new API
+# version, so the schema is never older than the code that assumes it. Running
+# the migrations through this image rather than a CI job is what makes the
+# statement true — the SQL applied is the SQL bundled here, byte for byte.
+FROM runtime AS migrate
+
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "dist/migrate.js", "apply"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 4 — the worker entrypoint

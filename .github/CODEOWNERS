@@ -22,7 +22,7 @@
 # superseded, so review has to happen before merge.
 /supabase/migrations/          @ses/core-team
 /apps/api/src/infrastructure/database/migrations/  @ses/core-team
-/apps/api/drizzle.config.ts    @ses/core-team
+/scripts/db/                   @ses/core-team
 
 # CI and the quality gates it enforces. Without this, a PR that weakens a gate can
 # approve itself.

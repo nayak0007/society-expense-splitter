@@ -39,9 +39,14 @@ module.exports = {
    * back unchanged. The second alternative is what actually matches pnpm's real
    * layout; `postgres` and every other CommonJS dependency still match the pattern
    * and are skipped, which matters because SWC cannot parse all of their sources.
+   *
+   * `jose` is here for the same reason as `@nestjs`: v6 ships ESM only, and the
+   * auth tests exercise real signature verification rather than a mocked
+   * library — mocking it would leave the algorithm-confusion and key-rotation
+   * paths untested, which are the two the verifier exists to close.
    */
   transformIgnorePatterns: [
-    "node_modules/(?!(@nestjs|\\.pnpm/[^/]+/node_modules/@nestjs)/)",
+    "node_modules/(?!(@nestjs|jose|\\.pnpm/[^/]+/node_modules/(@nestjs|jose))/)",
   ],
 
   /**

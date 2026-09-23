@@ -21,6 +21,9 @@
     "contract:drift": "pnpm openapi && git diff --exit-code -- docs/api/OPENAPI.yaml",
     "contract:breaking": "node scripts/codegen/openapi-breaking-diff.mjs",
     "db:migrate": "pnpm --filter @ses/api db:migrate",
+    "db:status": "pnpm --filter @ses/api db:status",
+    "db:check": "pnpm --filter @ses/api db:check",
+    "db:migrate:new": "pnpm --filter @ses/api db:migrate:new",
     "db:reset": "pnpm --filter @ses/api db:reset",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,css,md,yml,yaml}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,css,md,yml,yaml}\""

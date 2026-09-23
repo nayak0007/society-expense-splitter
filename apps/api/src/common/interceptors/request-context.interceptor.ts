@@ -9,7 +9,11 @@ import {
 import type { Observable } from "rxjs";
 
 import { RequestContext } from "../context/request-context";
-import { readRequestId, readRequestHeader } from "../http/http-access";
+import {
+  readRequestActor,
+  readRequestId,
+  readRequestHeader,
+} from "../http/http-access";
 
 /**
  * Binds `RequestContext` for the rest of the request.
@@ -25,6 +29,11 @@ import { readRequestId, readRequestHeader } from "../http/http-access";
  * `X-Request-Id` response header — that belongs to the adapter's `onRequest`
  * hook in `bootstrap.ts`, because an interceptor is only bound to matched routes
  * and would therefore miss 404s. See the comment there.
+ *
+ * The actor is *copied* from the request, not resolved here: guards run before
+ * interceptors, so `SupabaseAuthGuard` has already written the verified actor
+ * onto the request by this point. Copying rather than re-reading the token keeps
+ * one verification per request and one source of truth for who the caller is.
  */
 @Injectable()
 export class RequestContextInterceptor implements NestInterceptor {
@@ -40,6 +49,9 @@ export class RequestContextInterceptor implements NestInterceptor {
       readRequestHeader(request, "x-request-id") ??
       randomUUID();
 
-    return RequestContext.run({ requestId }, () => next.handle());
+    return RequestContext.run(
+      { requestId, userId: readRequestActor(request)?.userId },
+      () => next.handle(),
+    );
   }
 }

@@ -315,6 +315,1656 @@ paths:
                       additionalProperties: true
       summary: Readiness — Postgres, Redis and migration state
       tags: *a7
+  /v1/societies:
+    post:
+      description: Creates the society, its settings and the creator's Admin
+        membership in one transaction. The slug and join code are generated
+        server-side.
+      operationId: SocietiesController_create
+      parameters: []
+      responses:
+        "201":
+          description: The created society and the creator's membership.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      society:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          name:
+                            type: string
+                          slug:
+                            type: string
+                          type:
+                            type: string
+                            enum:
+                              - apartment
+                              - villa
+                              - rowhouse
+                              - shared_flat
+                              - other
+                          registrationNumber:
+                            nullable: true
+                            type: string
+                          addressLine1:
+                            nullable: true
+                            type: string
+                          addressLine2:
+                            nullable: true
+                            type: string
+                          city:
+                            type: string
+                          state:
+                            type: string
+                          pincode:
+                            nullable: true
+                            type: string
+                          country:
+                            type: string
+                            enum:
+                              - IN
+                          currency:
+                            type: string
+                            enum:
+                              - INR
+                          timezone:
+                            type: string
+                          joinCode:
+                            type: string
+                          joinCodeExpiresAt:
+                            nullable: true
+                            type: string
+                          plan:
+                            type: string
+                            enum:
+                              - free
+                              - pro
+                              - enterprise
+                          createdBy:
+                            type: string
+                          createdAt:
+                            type: string
+                          updatedAt:
+                            type: string
+                          deletedAt:
+                            nullable: true
+                            type: string
+                          settings:
+                            type: object
+                            properties:
+                              billingDay:
+                                type: integer
+                              dueDay:
+                                type: integer
+                              graceDays:
+                                type: integer
+                              approvalThresholdPaise:
+                                type: integer
+                              billVacantFlats:
+                                type: boolean
+                              allowPartialPayments:
+                                type: boolean
+                              defaulterListPublic:
+                                type: boolean
+                              financialYearStartMonth:
+                                type: integer
+                              timezone:
+                                type: string
+                              currency:
+                                type: string
+                                enum:
+                                  - INR
+                            required:
+                              - billingDay
+                              - dueDay
+                              - graceDays
+                              - approvalThresholdPaise
+                              - billVacantFlats
+                              - allowPartialPayments
+                              - defaulterListPublic
+                              - financialYearStartMonth
+                              - timezone
+                              - currency
+                            additionalProperties: false
+                          memberCount:
+                            type: integer
+                        required:
+                          - id
+                          - name
+                          - slug
+                          - type
+                          - registrationNumber
+                          - addressLine1
+                          - addressLine2
+                          - city
+                          - state
+                          - pincode
+                          - country
+                          - currency
+                          - timezone
+                          - joinCode
+                          - joinCodeExpiresAt
+                          - plan
+                          - createdBy
+                          - createdAt
+                          - updatedAt
+                          - deletedAt
+                          - settings
+                          - memberCount
+                        additionalProperties: false
+                      membership:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          societyId:
+                            type: string
+                          userId:
+                            type: string
+                          role:
+                            type: string
+                            enum:
+                              - admin
+                              - treasurer
+                              - committee_member
+                              - resident
+                              - tenant
+                              - guest
+                          status:
+                            type: string
+                            enum:
+                              - pending
+                              - active
+                              - removed
+                          occupancyType:
+                            type: string
+                            enum:
+                              - owner
+                              - tenant
+                              - family_member
+                          joinedAt:
+                            nullable: true
+                            type: string
+                        required:
+                          - id
+                          - societyId
+                          - userId
+                          - role
+                          - status
+                          - occupancyType
+                          - joinedAt
+                        additionalProperties: false
+                    required:
+                      - society
+                      - membership
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400": &a8
+          description: Malformed payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "401": &a9
+          description: No session, an invalid token, or an expired one.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "403": &a10
+          description: A member without the role this operation needs.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "404": &a11
+          description:
+            No such society — or one the caller is not a member of, which this
+            API deliberately does not distinguish (PRD T041).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "409": &a12
+          description:
+            The change conflicts with the current state, such as a sole Admin
+            trying to leave.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "422": &a13
+          description: Well-formed payload whose values are invalid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "429": &a14
+          description: Rate limited.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+      security: &a15
+        - supabase-jwt: []
+      summary: Create a society
+      tags: &a16
+        - societies
+    get:
+      description: Every society the caller belongs to, with their own role and
+        membership status — what the society switcher renders.
+      operationId: SocietiesController_list
+      parameters: []
+      responses:
+        "200":
+          description: The caller's societies, newest membership first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+                        city:
+                          type: string
+                        type:
+                          type: string
+                          enum:
+                            - apartment
+                            - villa
+                            - rowhouse
+                            - shared_flat
+                            - other
+                        role:
+                          type: string
+                          enum:
+                            - admin
+                            - treasurer
+                            - committee_member
+                            - resident
+                            - tenant
+                            - guest
+                        status:
+                          type: string
+                          enum:
+                            - pending
+                            - active
+                            - removed
+                        memberCount:
+                          type: integer
+                      required:
+                        - id
+                        - name
+                        - city
+                        - type
+                        - role
+                        - status
+                        - memberCount
+                      additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400": *a8
+        "401": *a9
+        "403": *a10
+        "404": *a11
+        "409": *a12
+        "422": *a13
+        "429": *a14
+      security: *a15
+      summary: List the caller's societies
+      tags: *a16
+  /v1/societies/lookup:
+    get:
+      description:
+        Resolves a join code to the society's public details. Returns name,
+        city, state, type and member count only, and cannot be used to enumerate
+        codes.
+      operationId: SocietiesController_lookup
+      parameters:
+        - name: code
+          required: true
+          in: query
+          description: The 6-character join code, case-insensitive.
+          schema: {}
+      responses:
+        "200":
+          description: The society the code belongs to.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      preview:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          name:
+                            type: string
+                          city:
+                            type: string
+                          state:
+                            type: string
+                          type:
+                            type: string
+                            enum:
+                              - apartment
+                              - villa
+                              - rowhouse
+                              - shared_flat
+                              - other
+                          memberCount:
+                            type: integer
+                        required:
+                          - id
+                          - name
+                          - city
+                          - state
+                          - type
+                          - memberCount
+                        additionalProperties: false
+                    required:
+                      - preview
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400": *a8
+        "401": *a9
+        "403": *a10
+        "404": *a11
+        "409": *a12
+        "422": *a13
+        "429": *a14
+      security: *a15
+      summary: Preview a join code (public)
+      tags: *a16
+  /v1/societies/join:
+    post:
+      description:
+        "Resolves the code, checks expiry against the server clock and
+        records a membership. Never auto-approved: the membership comes back
+        `pending` until an Admin approves it (PRD §3.2)."
+      operationId: SocietiesController_join
+      parameters: []
+      responses:
+        "201":
+          description: The membership that was created, or asked again.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      membership:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          societyId:
+                            type: string
+                          userId:
+                            type: string
+                          role:
+                            type: string
+                            enum:
+                              - admin
+                              - treasurer
+                              - committee_member
+                              - resident
+                              - tenant
+                              - guest
+                          status:
+                            type: string
+                            enum:
+                              - pending
+                              - active
+                              - removed
+                          occupancyType:
+                            type: string
+                            enum:
+                              - owner
+                              - tenant
+                              - family_member
+                          joinedAt:
+                            nullable: true
+                            type: string
+                        required:
+                          - id
+                          - societyId
+                          - userId
+                          - role
+                          - status
+                          - occupancyType
+                          - joinedAt
+                        additionalProperties: false
+                    required:
+                      - membership
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400": *a8
+        "401": *a9
+        "403": *a10
+        "404": *a11
+        "409": *a12
+        "422": *a13
+        "429": *a14
+      security: *a15
+      summary: Join a society with a code
+      tags: *a16
+  /v1/societies/{societyId}:
+    get:
+      description:
+        The society, the caller's membership and the capabilities derived
+        from them, so a screen never has to re-derive permissions from a role
+        string.
+      operationId: SocietiesController_profile
+      parameters:
+        - name: societyId
+          required: true
+          in: path
+          description: Society UUID.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The society, the caller's membership and capabilities.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      society:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          name:
+                            type: string
+                          slug:
+                            type: string
+                          type:
+                            type: string
+                            enum:
+                              - apartment
+                              - villa
+                              - rowhouse
+                              - shared_flat
+                              - other
+                          registrationNumber:
+                            nullable: true
+                            type: string
+                          addressLine1:
+                            nullable: true
+                            type: string
+                          addressLine2:
+                            nullable: true
+                            type: string
+                          city:
+                            type: string
+                          state:
+                            type: string
+                          pincode:
+                            nullable: true
+                            type: string
+                          country:
+                            type: string
+                            enum:
+                              - IN
+                          currency:
+                            type: string
+                            enum:
+                              - INR
+                          timezone:
+                            type: string
+                          joinCode:
+                            type: string
+                          joinCodeExpiresAt:
+                            nullable: true
+                            type: string
+                          plan:
+                            type: string
+                            enum:
+                              - free
+                              - pro
+                              - enterprise
+                          createdBy:
+                            type: string
+                          createdAt:
+                            type: string
+                          updatedAt:
+                            type: string
+                          deletedAt:
+                            nullable: true
+                            type: string
+                          settings:
+                            type: object
+                            properties:
+                              billingDay:
+                                type: integer
+                              dueDay:
+                                type: integer
+                              graceDays:
+                                type: integer
+                              approvalThresholdPaise:
+                                type: integer
+                              billVacantFlats:
+                                type: boolean
+                              allowPartialPayments:
+                                type: boolean
+                              defaulterListPublic:
+                                type: boolean
+                              financialYearStartMonth:
+                                type: integer
+                              timezone:
+                                type: string
+                              currency:
+                                type: string
+                                enum:
+                                  - INR
+                            required:
+                              - billingDay
+                              - dueDay
+                              - graceDays
+                              - approvalThresholdPaise
+                              - billVacantFlats
+                              - allowPartialPayments
+                              - defaulterListPublic
+                              - financialYearStartMonth
+                              - timezone
+                              - currency
+                            additionalProperties: false
+                          memberCount:
+                            type: integer
+                        required:
+                          - id
+                          - name
+                          - slug
+                          - type
+                          - registrationNumber
+                          - addressLine1
+                          - addressLine2
+                          - city
+                          - state
+                          - pincode
+                          - country
+                          - currency
+                          - timezone
+                          - joinCode
+                          - joinCodeExpiresAt
+                          - plan
+                          - createdBy
+                          - createdAt
+                          - updatedAt
+                          - deletedAt
+                          - settings
+                          - memberCount
+                        additionalProperties: false
+                      membership:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          societyId:
+                            type: string
+                          userId:
+                            type: string
+                          role:
+                            type: string
+                            enum:
+                              - admin
+                              - treasurer
+                              - committee_member
+                              - resident
+                              - tenant
+                              - guest
+                          status:
+                            type: string
+                            enum:
+                              - pending
+                              - active
+                              - removed
+                          occupancyType:
+                            type: string
+                            enum:
+                              - owner
+                              - tenant
+                              - family_member
+                          joinedAt:
+                            nullable: true
+                            type: string
+                        required:
+                          - id
+                          - societyId
+                          - userId
+                          - role
+                          - status
+                          - occupancyType
+                          - joinedAt
+                        additionalProperties: false
+                      capabilities:
+                        type: object
+                        properties:
+                          canManage:
+                            type: boolean
+                          canDelete:
+                            type: boolean
+                          canRegenerateJoinCode:
+                            type: boolean
+                          canViewJoinCode:
+                            type: boolean
+                          canLeave:
+                            type: boolean
+                        required:
+                          - canManage
+                          - canDelete
+                          - canRegenerateJoinCode
+                          - canViewJoinCode
+                          - canLeave
+                        additionalProperties: false
+                    required:
+                      - society
+                      - membership
+                      - capabilities
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400": *a8
+        "401": *a9
+        "403": *a10
+        "404": *a11
+        "409": *a12
+        "422": *a13
+        "429": *a14
+      security: *a15
+      summary: View a society profile
+      tags: *a16
+    patch:
+      description:
+        Patches the society and/or its settings atomically. Admin-only. A
+        field that is absent is left unchanged; one sent as an empty string is
+        cleared.
+      operationId: SocietiesController_update
+      parameters:
+        - name: societyId
+          required: true
+          in: path
+          description: Society UUID.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The updated society.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      society:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          name:
+                            type: string
+                          slug:
+                            type: string
+                          type:
+                            type: string
+                            enum:
+                              - apartment
+                              - villa
+                              - rowhouse
+                              - shared_flat
+                              - other
+                          registrationNumber:
+                            nullable: true
+                            type: string
+                          addressLine1:
+                            nullable: true
+                            type: string
+                          addressLine2:
+                            nullable: true
+                            type: string
+                          city:
+                            type: string
+                          state:
+                            type: string
+                          pincode:
+                            nullable: true
+                            type: string
+                          country:
+                            type: string
+                            enum:
+                              - IN
+                          currency:
+                            type: string
+                            enum:
+                              - INR
+                          timezone:
+                            type: string
+                          joinCode:
+                            type: string
+                          joinCodeExpiresAt:
+                            nullable: true
+                            type: string
+                          plan:
+                            type: string
+                            enum:
+                              - free
+                              - pro
+                              - enterprise
+                          createdBy:
+                            type: string
+                          createdAt:
+                            type: string
+                          updatedAt:
+                            type: string
+                          deletedAt:
+                            nullable: true
+                            type: string
+                          settings:
+                            type: object
+                            properties:
+                              billingDay:
+                                type: integer
+                              dueDay:
+                                type: integer
+                              graceDays:
+                                type: integer
+                              approvalThresholdPaise:
+                                type: integer
+                              billVacantFlats:
+                                type: boolean
+                              allowPartialPayments:
+                                type: boolean
+                              defaulterListPublic:
+                                type: boolean
+                              financialYearStartMonth:
+                                type: integer
+                              timezone:
+                                type: string
+                              currency:
+                                type: string
+                                enum:
+                                  - INR
+                            required:
+                              - billingDay
+                              - dueDay
+                              - graceDays
+                              - approvalThresholdPaise
+                              - billVacantFlats
+                              - allowPartialPayments
+                              - defaulterListPublic
+                              - financialYearStartMonth
+                              - timezone
+                              - currency
+                            additionalProperties: false
+                          memberCount:
+                            type: integer
+                        required:
+                          - id
+                          - name
+                          - slug
+                          - type
+                          - registrationNumber
+                          - addressLine1
+                          - addressLine2
+                          - city
+                          - state
+                          - pincode
+                          - country
+                          - currency
+                          - timezone
+                          - joinCode
+                          - joinCodeExpiresAt
+                          - plan
+                          - createdBy
+                          - createdAt
+                          - updatedAt
+                          - deletedAt
+                          - settings
+                          - memberCount
+                        additionalProperties: false
+                    required:
+                      - society
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400": *a8
+        "401": *a9
+        "403": *a10
+        "404": *a11
+        "409": *a12
+        "422": *a13
+        "429": *a14
+      security: *a15
+      summary: Edit a society
+      tags: *a16
+    delete:
+      description:
+        "Admin-only soft delete: the row is kept so financial history keeps
+        its owner, it disappears from every read path and its join code stops
+        resolving. Every membership is marked removed in the same transaction."
+      operationId: SocietiesController_remove
+      parameters:
+        - name: societyId
+          required: true
+          in: path
+          description: Society UUID.
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted.
+        "400": *a8
+        "401": *a9
+        "403": *a10
+        "404": *a11
+        "409": *a12
+        "422": *a13
+        "429": *a14
+      security: *a15
+      summary: Delete a society
+      tags: *a16
+  /v1/societies/{societyId}/join-code:
+    post:
+      description:
+        Admin-only. The new code is minted server-side and invalidates the
+        previous one immediately, so a leaked code is contained by one action.
+      operationId: SocietiesController_regenerateJoinCode
+      parameters:
+        - name: societyId
+          required: true
+          in: path
+          description: Society UUID.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The society, with its new join code.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      society:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          name:
+                            type: string
+                          slug:
+                            type: string
+                          type:
+                            type: string
+                            enum:
+                              - apartment
+                              - villa
+                              - rowhouse
+                              - shared_flat
+                              - other
+                          registrationNumber:
+                            nullable: true
+                            type: string
+                          addressLine1:
+                            nullable: true
+                            type: string
+                          addressLine2:
+                            nullable: true
+                            type: string
+                          city:
+                            type: string
+                          state:
+                            type: string
+                          pincode:
+                            nullable: true
+                            type: string
+                          country:
+                            type: string
+                            enum:
+                              - IN
+                          currency:
+                            type: string
+                            enum:
+                              - INR
+                          timezone:
+                            type: string
+                          joinCode:
+                            type: string
+                          joinCodeExpiresAt:
+                            nullable: true
+                            type: string
+                          plan:
+                            type: string
+                            enum:
+                              - free
+                              - pro
+                              - enterprise
+                          createdBy:
+                            type: string
+                          createdAt:
+                            type: string
+                          updatedAt:
+                            type: string
+                          deletedAt:
+                            nullable: true
+                            type: string
+                          settings:
+                            type: object
+                            properties:
+                              billingDay:
+                                type: integer
+                              dueDay:
+                                type: integer
+                              graceDays:
+                                type: integer
+                              approvalThresholdPaise:
+                                type: integer
+                              billVacantFlats:
+                                type: boolean
+                              allowPartialPayments:
+                                type: boolean
+                              defaulterListPublic:
+                                type: boolean
+                              financialYearStartMonth:
+                                type: integer
+                              timezone:
+                                type: string
+                              currency:
+                                type: string
+                                enum:
+                                  - INR
+                            required:
+                              - billingDay
+                              - dueDay
+                              - graceDays
+                              - approvalThresholdPaise
+                              - billVacantFlats
+                              - allowPartialPayments
+                              - defaulterListPublic
+                              - financialYearStartMonth
+                              - timezone
+                              - currency
+                            additionalProperties: false
+                          memberCount:
+                            type: integer
+                        required:
+                          - id
+                          - name
+                          - slug
+                          - type
+                          - registrationNumber
+                          - addressLine1
+                          - addressLine2
+                          - city
+                          - state
+                          - pincode
+                          - country
+                          - currency
+                          - timezone
+                          - joinCode
+                          - joinCodeExpiresAt
+                          - plan
+                          - createdBy
+                          - createdAt
+                          - updatedAt
+                          - deletedAt
+                          - settings
+                          - memberCount
+                        additionalProperties: false
+                    required:
+                      - society
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400": *a8
+        "401": *a9
+        "403": *a10
+        "404": *a11
+        "409": *a12
+        "422": *a13
+        "429": *a14
+      security: *a15
+      summary: Regenerate the join code
+      tags: *a16
+  /v1/societies/{societyId}/leave:
+    post:
+      description: Leaves, or withdraws a pending request. Refused with
+        `SOCIETY_ADMIN_REQUIRED` if the caller is the only active Admin — a
+        society can never be left without one.
+      operationId: SocietiesController_leave
+      parameters:
+        - name: societyId
+          required: true
+          in: path
+          description: Society UUID.
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Left. The caller's membership is now `removed`.
+        "400": *a8
+        "401": *a9
+        "403": *a10
+        "404": *a11
+        "409": *a12
+        "422": *a13
+        "429": *a14
+      security: *a15
+      summary: Leave a society
+      tags: *a16
 info:
   title: Society Expense Splitter API
   description: "The SES API. Money is always integer paise in a `*Paise` field;

@@ -1,12 +1,16 @@
 import { Test } from "@nestjs/testing";
 import type { NestFastifyApplication } from "@nestjs/platform-fastify";
 import type { HealthIndicatorResult } from "@nestjs/terminus";
+import type { JWTVerifyGetKey } from "jose";
+import type { SocietyRepository } from "@ses/domain";
 
 import { AppModule } from "../../src/app.module";
 import { createAdapter, GLOBAL_PREFIX } from "../../src/bootstrap";
+import { SUPABASE_JWKS } from "../../src/common/auth/supabase-jwt";
 import { MigrationsIndicator } from "../../src/modules/health/indicators/migrations.indicator";
 import { PostgresIndicator } from "../../src/modules/health/indicators/postgres.indicator";
 import { RedisIndicator } from "../../src/modules/health/indicators/redis.indicator";
+import { SOCIETY_REPOSITORY } from "../../src/modules/societies/application/society.tokens";
 
 /**
  * Boots the **real** `AppModule` for integration tests.
@@ -35,6 +39,27 @@ export type TestAppOptions = {
   postgres?: DependencyState;
   redis?: DependencyState;
   migrations?: DependencyState;
+  /**
+   * Substitutes the key set the auth guard verifies against.
+   *
+   * Needed because the real one fetches Supabase's JWKS over the network: a
+   * suite that signed real tokens against a remote project could not run offline
+   * and would verify Supabase's uptime rather than our guard. Omitting it leaves
+   * the real provider in place, which is what the health suite wants — no token
+   * is ever presented there.
+   *
+   * `SUPABASE_JWKS` is not exported from `AuthModule`, and overriding by token
+   * does not need it to be: Nest resolves overrides against the module graph.
+   */
+  jwks?: JWTVerifyGetKey;
+  /**
+   * Substitutes the society repository — the tenancy and storage boundary.
+   *
+   * Everything above it runs for real (see the module docstring), so a suite
+   * using this still exercises the guard, the pipes, the use cases and the
+   * mappers. Without it, every society route would need a live database.
+   */
+  repository?: SocietyRepository;
 };
 
 /** A stand-in indicator whose only job is to report the status the test asked for. */
@@ -54,7 +79,7 @@ function fakeIndicator(
 export async function createTestApp(
   options: TestAppOptions = {},
 ): Promise<NestFastifyApplication> {
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+  const builder = Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(PostgresIndicator)
     .useValue(fakeIndicator("postgres", options.postgres ?? "up"))
     .overrideProvider(RedisIndicator)
@@ -64,8 +89,16 @@ export async function createTestApp(
       fakeIndicator("migrations", options.migrations ?? "up", {
         detail: "test fixture",
       }),
-    )
-    .compile();
+    );
+
+  if (options.jwks !== undefined) {
+    builder.overrideProvider(SUPABASE_JWKS).useValue(options.jwks);
+  }
+  if (options.repository !== undefined) {
+    builder.overrideProvider(SOCIETY_REPOSITORY).useValue(options.repository);
+  }
+
+  const moduleRef = await builder.compile();
 
   const app =
     moduleRef.createNestApplication<NestFastifyApplication>(createAdapter());
