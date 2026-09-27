@@ -4,9 +4,8 @@ import type { ExpoConfig } from 'expo/config';
  * Typed, validated app config. Replaces the static app.json so environment-
  * driven values resolve per channel (Roadmap T009).
  *
- * Naming per docs: name "Society Expense Splitter", slug
- * `society-expense-splitter`, deep-link scheme `societyexpense`
- * (PRD §3.2: societyexpense://join?code=XXXXXX).
+ * Naming per docs: name "Resident 360", slug `resident-360`, deep-link scheme
+ * `resident360` (PRD §3.2: resident360://join?code=XXXXXX).
  */
 
 const trims = (v: string | undefined): string | undefined =>
@@ -33,9 +32,9 @@ const EXPO_PUBLIC_VARS = {
 } as const;
 
 const appConfig: ExpoConfig = {
-  name: 'Society Expense Splitter',
-  slug: 'society-expense-splitter',
-  scheme: 'societyexpense',
+  name: 'Resident 360',
+  slug: 'resident-360',
+  scheme: 'resident360',
   version: '1.0.0',
   orientation: 'portrait',
   icon: './assets/icon.png',
@@ -45,10 +44,10 @@ const appConfig: ExpoConfig = {
   // screen/splash design phase lands (SDK 57 removed the top-level splash key).
   ios: {
     supportsTablet: true,
-    bundleIdentifier: 'com.societyexpensesplitter.app',
+    bundleIdentifier: 'com.resident360.app',
   },
   android: {
-    package: 'com.societyexpensesplitter.app',
+    package: 'com.resident360.app',
     adaptiveIcon: {
       foregroundImage: './assets/android-icon-foreground.png',
       backgroundImage: './assets/android-icon-background.png',

@@ -9,7 +9,7 @@ import { TextInput } from '@/components/ui/TextInput';
 import { SOCIETY_TYPE_LABELS } from '../labels';
 import type { SocietyFormValues } from '../schemas/society.schemas';
 
-import { ChoiceChips } from './ChoiceChips';
+import { ChoiceChips } from '@/components/forms/ChoiceChips';
 
 /**
  * Shared society form body — used by both the create wizard's basics step and

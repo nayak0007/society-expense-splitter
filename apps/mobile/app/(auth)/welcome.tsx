@@ -16,7 +16,7 @@ export default function Welcome() {
           </Text>
         </View>
         <Text variant="headlineMedium" align="center">
-          Society Expense Splitter
+          Resident 360
         </Text>
         <Text variant="bodyMedium" color="onSurfaceVariant" align="center">
           Transparent society finances — set up in 20 minutes.

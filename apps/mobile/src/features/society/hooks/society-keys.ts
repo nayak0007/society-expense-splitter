@@ -13,4 +13,13 @@ export const societyKeys = {
   detail: (societyId: string | null, userId: string | null) =>
     ['society', 'detail', societyId, userId] as const,
   joinPreview: (code: string) => ['society', 'join-preview', code] as const,
+  /**
+   * The flats a code offers (T049), keyed by the code **and** the search term.
+   *
+   * Both belong in the key: two codes are two societies' flat lists, and two terms are two
+   * pages of one society's. The caller is not part of it — the options are the same for every
+   * holder of the code — but the query is only enabled with a session, so a signed-out render
+   * caches nothing.
+   */
+  joinOptions: (code: string, query: string) => ['society', 'join-options', code, query] as const,
 };

@@ -11,7 +11,7 @@ import { selectPendingJoinCode, useSocietyStore } from '@/stores/society.store';
  * (Create Society / Join Society)").
  *
  * The resolver sends a signed-in user here when they belong to no society.
- * If a `societyexpense://join?code=…` link started the session, the code is
+ * If a `resident360://join?code=…` link started the session, the code is
  * already in the store and is offered here rather than silently discarded.
  */
 export default function SocietyChoice() {

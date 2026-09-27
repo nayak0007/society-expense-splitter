@@ -27,7 +27,7 @@ interface SocietyState {
   readonly memberships: readonly SocietyMembership[];
   readonly status: SocietyLoadStatus;
   readonly activeSocietyId: SocietyId | null;
-  /** Set by the `societyexpense://join?code=…` deep link (PRD §3.2). */
+  /** Set by the `resident360://join?code=…` deep link (PRD §3.2). */
   readonly pendingJoinCode: string | null;
   /** Single write path from the memberships query. */
   applyMemberships: (memberships: readonly SocietyMembership[]) => void;

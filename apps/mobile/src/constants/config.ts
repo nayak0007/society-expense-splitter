@@ -61,7 +61,7 @@ if (!parsed.success) {
 }
 
 export const config = {
-  /** Base URL of the SES API, e.g. https://api.societyexpensesplitter.com/v1 */
+  /** Base URL of the Resident 360 API, e.g. https://api.resident360.com/v1 */
   apiUrl: parsed.data.EXPO_PUBLIC_API_URL,
   /** Supabase project URL (public — RLS is the security boundary). */
   supabaseUrl: parsed.data.EXPO_PUBLIC_SUPABASE_URL,

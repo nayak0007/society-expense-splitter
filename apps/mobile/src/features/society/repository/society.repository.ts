@@ -1,39 +1,40 @@
 import type { SocietyRepository } from '@ses/domain';
 
-import { SupabaseSocietyRepository } from './society.repository.supabase';
+import { ApiSocietyRepository } from './society.repository.api';
 
 /**
  * Feature composition root: the single place that decides which
  * `SocietyRepository` implementation the app uses.
  *
- * **Supabase is the default since the society schema landed**
- * (`supabase/migrations/2026092013*.sql`): the app is already Supabase-backed for
- * auth, so a society that lives only on one device has no reason left to exist.
- * Reads and writes go through the RLS-protected tables and the functions in
- * `20260920130200_society_rpc.sql` — see the adapter's own header for why RLS, and
- * not this layer, is the security boundary.
+ * **The API is the default since `/v1/societies` gained the two membership
+ * reads**, which was the last thing standing between this app and a single
+ * transport. Reads and writes now go through the NestJS API, which owns the
+ * rules, applies them over the same `@ses/application` use cases this app could
+ * call locally, and reaches the database under the caller's own RLS identity.
+ * Supabase is still the infrastructure — it is where the session comes from and
+ * where the data lives — but it is no longer an API the app calls directly, so the
+ * anon key in the bundle can no longer be pointed at PostgREST to walk the schema.
  *
- * The other two implementations of the same port stay available:
+ * The REST adapter that used to be here is gone rather than kept behind a flag.
+ * Two live implementations of one port is how a client and a server start
+ * disagreeing: whichever one the flag did not select stops being exercised, and
+ * the divergence only shows up in production. The mock stays because it is not a
+ * second transport — it is offline storage, with no network and no rules of its
+ * own, which is what makes it useful for UI work and tests.
  *
- *  - `MockSocietyRepository` — device-local, MMKV-persisted, no network. Useful
- *    for working on the UI without a project, and for tests. It is deliberately
- *    *not* imported here, so it stays out of the bundle until something asks for
- *    it: `setSocietyRepository(new MockSocietyRepository())` from a dev menu or a
- *    test setup.
- *  - the API-backed adapter (Roadmap T040, `features/society/api/society.api.ts`)
- *    — the end state, where `/societies` owns the rules and the mobile client is
- *    one of two consumers. It is a one-line swap here; no service, hook or screen
- *    changes, because they only ever see the port
- *    (`packages/domain/src/society/ports.ts`).
+ * `MockSocietyRepository` is deliberately *not* imported here, so it stays out of
+ * the bundle until something asks for it:
+ * `setSocietyRepository(new MockSocietyRepository())` from a dev menu or a test
+ * setup.
  */
 let instance: SocietyRepository | null = null;
 
 export function getSocietyRepository(): SocietyRepository {
-  instance ??= new SupabaseSocietyRepository();
+  instance ??= new ApiSocietyRepository();
   return instance;
 }
 
-/** Test/tooling seam — inject a fake, the mock or the API repository. */
+/** Test/tooling seam — inject a fake, the mock, or a stub. */
 export function setSocietyRepository(repository: SocietyRepository | null): void {
   instance = repository;
 }

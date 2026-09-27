@@ -1,12 +1,15 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { Stack, useRouter } from 'expo-router';
+import { useState } from 'react';
 import { ScrollView, View } from 'react-native';
 
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Text } from '@/components/ui/Text';
 import { useSociety } from '@/features/society/hooks/use-societies';
+import { useLeaveSociety } from '@/features/society/hooks/use-society-actions';
 import { societyKeys } from '@/features/society/hooks/society-keys';
+import { societyErrorMessage } from '@/features/society/services/society.service';
 import { selectMemberships, useSocietyStore } from '@/stores/society.store';
 
 /**
@@ -68,16 +71,57 @@ export default function JoinPending() {
   );
 }
 
-/** Reads the society detail so the pending list shows a real name, not an id. */
+/**
+ * One pending request: the society it is for, and the withdraw affordance (T049).
+ *
+ * Withdrawing is `POST /societies/:id/leave` — the same call as leaving, because a pending
+ * membership *is* the request (`chk_member_self_change()` allows `pending → removed`). The
+ * confirmation is inline rather than a system dialog, matching the app's other destructive
+ * controls, and the row disappears on success because the service drops the membership from
+ * the routing snapshot the moment the server confirms it.
+ */
 function PendingSocietyRow({ societyId }: { societyId: string }) {
   const { society, isLoading } = useSociety(societyId);
+  const leave = useLeaveSociety(societyId);
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const withdraw = async (): Promise<void> => {
+    setError(null);
+    try {
+      await leave.mutateAsync();
+    } catch (caught: unknown) {
+      setError(societyErrorMessage(caught));
+    }
+  };
 
   return (
-    <View className="rounded-card bg-surface-container-low p-4">
+    <View className="gap-2 rounded-card bg-surface-container-low p-4">
       <Text variant="titleSmall">{society?.name ?? (isLoading ? 'Loading…' : 'Society')}</Text>
       <Text variant="bodySmall" color="onSurfaceVariant">
         {society === null ? 'Request pending' : `Request pending · ${society.city}`}
       </Text>
+
+      {error !== null ? (
+        <Text variant="bodySmall" color="error">
+          {error}
+        </Text>
+      ) : null}
+
+      {isConfirming ? (
+        <View className="flex-row gap-2">
+          <Button variant="outlined" loading={leave.isPending} onPress={() => void withdraw()}>
+            Yes, withdraw
+          </Button>
+          <Button variant="text" onPress={() => setIsConfirming(false)}>
+            Keep waiting
+          </Button>
+        </View>
+      ) : (
+        <Button variant="text" onPress={() => setIsConfirming(true)}>
+          Withdraw request
+        </Button>
+      )}
     </View>
   );
 }

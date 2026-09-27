@@ -3,9 +3,16 @@ import { Pressable, View } from 'react-native';
 import { Text } from '@/components/ui/Text';
 
 /**
- * Single-select chip row — the non-text-input fields (society type, occupancy)
- * use this instead of a native picker: fewer taps, works offline, and keeps
- * every choice visible rather than hidden behind a modal.
+ * Single-select chip row — the non-text-input fields (society type, occupancy
+ * status) use this instead of a native picker: fewer taps, works offline, and
+ * keeps every choice visible rather than hidden behind a modal.
+ *
+ * It lives in `components/forms/` rather than inside a feature because it is a
+ * generic control with no domain knowledge — its options are `{ value, label }`
+ * pairs of strings and it knows nothing about a society or a flat. It started in
+ * the society feature, where it was the only consumer; the apartment form made it
+ * the second, and a feature importing another feature's component is the kind of
+ * coupling that is cheap to fix now and expensive to unpick later.
  */
 export interface ChoiceOption<TValue extends string> {
   readonly value: TValue;

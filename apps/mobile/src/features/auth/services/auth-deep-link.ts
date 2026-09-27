@@ -8,7 +8,7 @@ import { handleAuthRedirectUrl, type AuthLinkResult } from '../api/auth.api';
  * Splitting "parse and verify the link" (`auth.api.ts`, no navigation) from
  * "where does the user go" (here) keeps the API slice unit-testable and gives
  * every email link one landing place — signup confirmations, recovery links and
- * email changes all arrive as `societyexpense://auth/callback`.
+ * email changes all arrive as `resident360://auth/callback`.
  */
 export async function handleAuthDeepLink(url: string): Promise<AuthLinkResult> {
   const result = await handleAuthRedirectUrl(url);

@@ -15,14 +15,14 @@
       "distribution": "internal",
       "channel": "preview",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://staging-api.societyexpensesplitter.com/v1"
+        "EXPO_PUBLIC_API_URL": "https://staging-api.resident360.com/v1"
       }
     },
     "production": {
       "autoIncrement": true,
       "channel": "production",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://api.societyexpensesplitter.com/v1"
+        "EXPO_PUBLIC_API_URL": "https://api.resident360.com/v1"
       }
     }
   },

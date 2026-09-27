@@ -1,5 +1,11 @@
 import { isValidJoinCode, normalizeJoinCode } from '@ses/domain';
-import type { Society, SocietyJoinPreview, SocietyMembership, SocietySummary } from '@ses/domain';
+import type {
+  Society,
+  SocietyJoinFlat,
+  SocietyJoinPreview,
+  SocietyMembership,
+  SocietySummary,
+} from '@ses/domain';
 import { useQuery } from '@tanstack/react-query';
 
 import { selectAuthUser, useAuthStore } from '@/stores/auth.store';
@@ -9,7 +15,12 @@ import {
   useSocietyStore,
 } from '@/stores/society.store';
 
-import { loadSociety, loadSocietySummaries, previewJoin } from '../services/society.service';
+import {
+  loadJoinOptions,
+  loadSociety,
+  loadSocietySummaries,
+  previewJoin,
+} from '../services/society.service';
 
 import { societyKeys } from './society-keys';
 
@@ -151,5 +162,56 @@ export function useJoinPreview(rawCode: string): {
     preview: query.data ?? null,
     isSearching: enabled && query.isFetching,
     notFound: enabled && query.isSuccess && query.data === null,
+  };
+}
+
+export interface JoinOptionsResult {
+  readonly flats: readonly SocietyJoinFlat[];
+  /** Flats matching the search — not flats returned. What "showing 50 of 312" is built from. */
+  readonly total: number;
+  /** True when the cap was reached, so the screen says "keep typing" rather than lying. */
+  readonly truncated: boolean;
+  readonly isLoading: boolean;
+  readonly error: unknown;
+}
+
+/**
+ * The flats a join code's society offers (T049) — the join screen's picker.
+ *
+ * Disabled until the code is complete **and** a session exists, for two different reasons: a
+ * partial code is not a code (the `join-preview` hook makes the same judgement), and the route
+ * is authenticated — the flat list is the building's layout, served to a holder of the code
+ * rather than to the world.
+ *
+ * `search` narrows server-side (flat number or building name), so a 300-flat society is
+ * searchable instead of scrollable. The caller debounces it; this hook does not, because only
+ * the screen knows whether the user is still typing.
+ */
+export function useJoinOptions(rawCode: string, search = ''): JoinOptionsResult {
+  const user = useAuthStore(selectAuthUser);
+  const userId = user?.id ?? null;
+  const code = normalizeJoinCode(rawCode);
+  const term = search.trim();
+  const enabled = isValidJoinCode(code) && userId !== null;
+
+  const query = useQuery({
+    queryKey: societyKeys.joinOptions(code, term),
+    queryFn: () => loadJoinOptions(userId ?? '', code, term.length === 0 ? {} : { q: term }),
+    enabled,
+    /*
+      Flats are edited rarely and the list is read on one screen, so a short stale window saves
+      the request a user would otherwise pay for when they go back to fix their occupancy
+      declaration. The picker is not a billing surface — an Admin who adds a flat while somebody
+      is mid-form is a case the submission's own validation covers.
+    */
+    staleTime: 60_000,
+  });
+
+  return {
+    flats: query.data?.flats ?? [],
+    total: query.data?.total ?? 0,
+    truncated: query.data?.truncated ?? false,
+    isLoading: enabled && query.isPending,
+    error: query.error,
   };
 }

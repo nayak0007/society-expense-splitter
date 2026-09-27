@@ -3,7 +3,13 @@ import type {
   JoinSocietyPayload,
   UpdateSocietyPayload,
 } from '@ses/contracts';
-import { OCCUPANCY_TYPES, SOCIETY_TYPES, isValidJoinCode, normalizeJoinCode } from '@ses/domain';
+import {
+  JOIN_NOTE_MAX_LENGTH,
+  OCCUPANCY_TYPES,
+  SOCIETY_TYPES,
+  isValidJoinCode,
+  normalizeJoinCode,
+} from '@ses/domain';
 import type { Society } from '@ses/domain';
 import { z } from 'zod';
 
@@ -110,6 +116,18 @@ export const joinFormSchema = z.object({
     .transform(normalizeJoinCode)
     .refine(isValidJoinCode, 'A join code is 6 characters (no 0, O, 1 or I)'),
   occupancyType: z.enum(OCCUPANCY_TYPES),
+  /**
+   * The flat the requester picks, as a string because a form value is a string.
+   *
+   * `''` is "none picked yet", which is a legitimate submission — a society whose flats are
+   * not recorded still has to be joinable, and an Admin assigns the flat at approval (T049).
+   * The mapper is what turns it into an *absent* field rather than an empty id.
+   */
+  apartmentId: z.string(),
+  /** The optional note to the reviewer, bounded by the same constant the column is. */
+  message: z
+    .string()
+    .max(JOIN_NOTE_MAX_LENGTH, `Keep your note to ${JOIN_NOTE_MAX_LENGTH} characters or fewer`),
 });
 
 export type JoinFormValues = z.infer<typeof joinFormSchema>;
@@ -117,11 +135,31 @@ export type JoinFormValues = z.infer<typeof joinFormSchema>;
 export const joinFormResolver = sesResolver(joinFormSchema);
 
 export function emptyJoinForm(code = ''): JoinFormValues {
-  return { code: normalizeJoinCode(code), occupancyType: 'owner' };
+  return {
+    code: normalizeJoinCode(code),
+    occupancyType: 'owner',
+    apartmentId: '',
+    message: '',
+  };
 }
 
+/**
+ * The join submission, with the T049 fields only when they carry something.
+ *
+ * A blank note is *no* note and an unpicked flat is *no* flat — sending `message: ''` would
+ * store an empty string the queue then renders as a blank line, and `apartmentId: ''` would
+ * fail the contract's UUID check. The contract is `.strict()` and both fields are optional,
+ * so the honest mapping is to omit rather than to send a placeholder.
+ */
 export function formValuesToJoinPayload(values: JoinFormValues): JoinSocietyPayload {
-  return { code: normalizeJoinCode(values.code), occupancyType: values.occupancyType };
+  const apartmentId = values.apartmentId.trim();
+  const message = values.message.trim();
+  return {
+    code: normalizeJoinCode(values.code),
+    occupancyType: values.occupancyType,
+    ...(apartmentId.length === 0 ? {} : { apartmentId }),
+    ...(message.length === 0 ? {} : { message }),
+  };
 }
 
 /**

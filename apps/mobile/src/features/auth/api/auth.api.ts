@@ -16,7 +16,7 @@ import { getSupabaseClient } from '@/lib/supabase/supabase.client';
  */
 
 /** Deep-link target for OAuth, email-confirmation and recovery links (PRD §3.2). */
-export const AUTH_REDIRECT_PREFIX = 'societyexpense://auth/callback';
+export const AUTH_REDIRECT_PREFIX = 'resident360://auth/callback';
 
 /**
  * Error codes the UI branches on. Anything unrecognised falls through to a
@@ -150,7 +150,7 @@ export async function signInWithPassword(email: string, password: string): Promi
  *
  * Implicit OAuth flow: `skipBrowserRedirect: true` returns the authorize URL,
  * which we open in an auth session; Supabase redirects back to
- * `societyexpense://auth/callback` with tokens in the URL fragment. iOS
+ * `resident360://auth/callback` with tokens in the URL fragment. iOS
  * resolves them from the openAuthSessionAsync result; Android and cold-start
  * returns are captured by the Linking listener in AppProviders — both paths
  * call handleAuthRedirectUrl, which is idempotent.
@@ -278,7 +278,7 @@ export async function logout(scope: 'local' | 'global' = 'local'): Promise<AuthR
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * What an incoming `societyexpense://auth/callback` URL turned out to be. The
+ * What an incoming `resident360://auth/callback` URL turned out to be. The
  * caller routes on it; a URL that is not ours returns `ignored`.
  */
 export type AuthLinkResult =

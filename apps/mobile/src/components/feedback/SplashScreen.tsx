@@ -11,7 +11,7 @@ export function SplashScreen() {
   return (
     <View className="flex-1 items-center justify-center gap-2 bg-surface">
       <Text variant="headlineMedium" color="primary" align="center">
-        Society Expense Splitter
+        Resident 360
       </Text>
       <Text variant="bodyMedium" color="onSurfaceVariant">
         Transparent society finances

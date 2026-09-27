@@ -1,6 +1,6 @@
 import { OCCUPANCY_TYPES } from '@ses/domain';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { ScrollView, View } from 'react-native';
 
@@ -9,8 +9,8 @@ import { Card } from '@/components/ui/Card';
 import { LoadingIndicator } from '@/components/ui/LoadingIndicator';
 import { Text } from '@/components/ui/Text';
 import { TextInput } from '@/components/ui/TextInput';
-import { ChoiceChips } from '@/features/society/components/ChoiceChips';
-import { useJoinPreview } from '@/features/society/hooks/use-societies';
+import { ChoiceChips } from '@/components/forms/ChoiceChips';
+import { useJoinOptions, useJoinPreview } from '@/features/society/hooks/use-societies';
 import { useJoinSociety } from '@/features/society/hooks/use-society-actions';
 import { OCCUPANCY_LABELS } from '@/features/society/labels';
 import {
@@ -24,13 +24,21 @@ import { selectPendingJoinCode, useSocietyStore } from '@/stores/society.store';
 
 /**
  * Join society (PRD §3.2 "Join Society"): enter code → preview the society
- * (name, city, member count) → declare occupancy → submit.
+ * (name, city, member count) → **pick your flat** → declare occupancy → submit.
  *
- * Choosing the flat is deliberately absent: it must come from the society's
- * real apartment list, which the structure module (T042+) has not created yet.
- * Collecting a flat number here would be inventing data the server cannot
- * validate, so the membership carries the occupancy declaration only and the
- * admin assigns the flat during approval.
+ * ## The flat comes from the society's own list (T049)
+ *
+ * `GET /societies/join-options` is keyed by the code the user already holds and returns only
+ * the selector's fields — id, number, building, wing, floor. The screen therefore never asks
+ * anybody to *type* a flat number: a typed number is a label the server would have to resolve,
+ * which is how two flats end up claiming one number. Picking none is a legitimate submission
+ * (a society whose flats are not recorded yet still has to be joinable); the reviewer assigns
+ * one at approval.
+ *
+ * ## The note is optional on purpose
+ *
+ * The reviewer sees it beside the request, and the common case — "I am the tenant of A-402" —
+ * needs no message at all, so a required text box would only slow the flow down.
  */
 export default function SocietyJoin() {
   const router = useRouter();
@@ -38,6 +46,8 @@ export default function SocietyJoin() {
   const pendingJoinCode = useSocietyStore(selectPendingJoinCode);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [requested, setRequested] = useState(false);
+  const [flatSearch, setFlatSearch] = useState('');
+  const [flatQuery, setFlatQuery] = useState('');
 
   const { control, handleSubmit, formState, watch } = useForm<JoinFormValues>({
     resolver: joinFormResolver,
@@ -48,6 +58,15 @@ export default function SocietyJoin() {
   const { preview, isSearching, notFound } = useJoinPreview(code);
   const joinSociety = useJoinSociety();
 
+  // One beat behind the keyboard, so the flats are not requested per character. The term the
+  // request is made with is separate state — the same pattern the member directory uses.
+  useEffect(() => {
+    const timer = setTimeout(() => setFlatQuery(flatSearch), 300);
+    return () => clearTimeout(timer);
+  }, [flatSearch]);
+
+  const options = useJoinOptions(preview === null ? '' : code, flatQuery);
+
   const submit = handleSubmit(async (values) => {
     setSubmitError(null);
     try {
@@ -57,8 +76,7 @@ export default function SocietyJoin() {
         return;
       }
       // PRD §3.2: joins are never auto-approved — the request waits for an
-      // Admin. The mock backend auto-approves for now; this path renders as
-      // soon as the approval queue exists.
+      // Admin, and the pending screen is where it is visible (and withdrawable).
       setRequested(true);
     } catch (error: unknown) {
       setSubmitError(societyErrorMessage(error));
@@ -85,6 +103,14 @@ export default function SocietyJoin() {
     );
   }
 
+  const flatOptions = [
+    { value: '', label: 'Not sure yet' },
+    ...options.flats.map((flat) => ({
+      value: flat.id,
+      label: `${flat.buildingName} · ${flat.number}`,
+    })),
+  ];
+
   return (
     <View className="flex-1 bg-surface">
       <Stack.Screen options={{ title: 'Join society' }} />
@@ -106,6 +132,8 @@ export default function SocietyJoin() {
                 value={field.value}
                 onChangeText={(text) => {
                   setSubmitError(null);
+                  setFlatSearch('');
+                  setFlatQuery('');
                   field.onChange(text);
                 }}
                 onBlur={field.onBlur}
@@ -140,6 +168,65 @@ export default function SocietyJoin() {
 
           {preview !== null ? (
             <>
+              <View className="gap-2">
+                <Text variant="titleSmall">Your flat</Text>
+                <Text variant="bodySmall" color="onSurfaceVariant">
+                  Your Admin confirms the flat when they approve your request — and if somebody else
+                  has already claimed it, they see both claims.
+                </Text>
+
+                {options.isLoading ? (
+                  <LoadingIndicator message="Loading the society's flats…" />
+                ) : null}
+
+                {options.error != null ? (
+                  <Text variant="bodySmall" color="error">
+                    {societyErrorMessage(options.error)}
+                  </Text>
+                ) : null}
+
+                {!options.isLoading && options.flats.length === 0 ? (
+                  <Text variant="bodySmall" color="onSurfaceVariant">
+                    This society has not recorded its flats yet. Submit without one and an Admin
+                    will assign it when they approve you.
+                  </Text>
+                ) : null}
+
+                {options.flats.length > 0 ? (
+                  <>
+                    <TextInput
+                      label="Find your flat"
+                      value={flatSearch}
+                      onChangeText={setFlatSearch}
+                      helperText="By flat number or building name"
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                    />
+                    <Controller
+                      control={control}
+                      name="apartmentId"
+                      render={({ field }) => (
+                        <ChoiceChips
+                          label={
+                            options.total > options.flats.length
+                              ? `Showing ${options.flats.length} of ${options.total} flats`
+                              : 'Pick your flat'
+                          }
+                          options={flatOptions}
+                          value={field.value}
+                          onChange={field.onChange}
+                        />
+                      )}
+                    />
+                  </>
+                ) : null}
+                {/*
+                  With no list there is nothing to choose from, so the form keeps its empty
+                  value (no flat) rather than silently holding an id the user cannot see. The
+                  `apartmentId` field is not rendered at all in that branch.
+                */}
+              </View>
+
               <Controller
                 control={control}
                 name="occupancyType"
@@ -153,6 +240,24 @@ export default function SocietyJoin() {
                     value={field.value}
                     onChange={field.onChange}
                     error={formState.errors.occupancyType?.message}
+                  />
+                )}
+              />
+
+              <Controller
+                control={control}
+                name="message"
+                render={({ field, fieldState }) => (
+                  <TextInput
+                    label="Message to the reviewer (optional)"
+                    value={field.value}
+                    onChangeText={field.onChange}
+                    onBlur={field.onBlur}
+                    error={fieldState.error !== undefined}
+                    helperText={fieldState.error?.message ?? 'For example: tenant since March 2026'}
+                    multiline
+                    numberOfLines={3}
+                    maxLength={500}
                   />
                 )}
               />

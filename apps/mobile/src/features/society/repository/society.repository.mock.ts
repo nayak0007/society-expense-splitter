@@ -19,6 +19,7 @@ import type {
   MemberRole,
   OccupancyType,
   Society,
+  SocietyJoinOptions,
   SocietyJoinPreview,
   SocietyMembership,
   SocietyRepository,
@@ -261,6 +262,32 @@ export class MockSocietyRepository implements SocietyRepository {
       if (row.societyId === id) row.status = 'removed';
     }
     this.write(db);
+  }
+
+  /**
+   * The join screen's flat options (T049).
+   *
+   * Empty by construction: this store models societies and memberships, not structure, so there
+   * is no flat to offer. It answers the *shape* — the society the code names, no flats, nothing
+   * truncated — which is what the join screen needs to render its "no flats recorded yet" state;
+   * the API adapter is where a real society's list comes from.
+   */
+  async joinOptions(
+    rawCode: string,
+    _query: { readonly query?: string | undefined; readonly limit?: number | undefined },
+    _actor: string,
+  ): Promise<SocietyJoinOptions> {
+    const db = this.read();
+    const code = normalizeJoinCode(rawCode);
+    const record = db.societies.find(
+      (society) => society.deletedAt === null && society.joinCode === code,
+    );
+    if (record === undefined) {
+      throw new SocietyError('join_code_invalid', 'That join code does not match any society.', {
+        field: 'code',
+      });
+    }
+    return { societyId: asSocietyId(record.id), flats: [], total: 0, truncated: false };
   }
 
   async join(input: JoinSocietyInput, actor: string): Promise<SocietyMembership> {

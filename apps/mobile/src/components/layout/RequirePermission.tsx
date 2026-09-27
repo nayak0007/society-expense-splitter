@@ -9,9 +9,12 @@ import { Text } from '@/components/ui/Text';
  * fallback INSTEAD of the children (rather than redirecting) is the point —
  * the user sees why they cannot proceed.
  *
- * NAVIGATION-PHASE STUB: `authorized` is passed straight through. The real
- * evaluator (`packages/domain` permission check against the role matrix)
- * plugs in here in Phase 3; call sites already read like the final API.
+ * `authorized` is the caller's to compute, and it is meant to be a **capability** —
+ * `canManageStructure`, `canManageSociety` — evaluated by `@ses/domain` from the
+ * membership, which is the same matrix the API's `PermissionGuard` and the RLS
+ * policies read. A role literal compared inline is a second copy of a rule that
+ * must not have two. The society edit screen still does that; it is the call site
+ * to bring in line.
  */
 export interface RequirePermissionProps {
   /** e.g. 'expense.create', 'cycle.publish' — checked against the role matrix. */

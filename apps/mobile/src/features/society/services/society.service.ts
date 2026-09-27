@@ -3,6 +3,7 @@ import {
   deleteSociety as deleteSocietyUseCase,
   joinSociety as joinSocietyUseCase,
   leaveSociety as leaveSocietyUseCase,
+  listJoinOptions as listJoinOptionsUseCase,
   listSocietySummaries as listSocietySummariesUseCase,
   regenerateJoinCode as regenerateJoinCodeUseCase,
   updateSociety as updateSocietyUseCase,
@@ -25,6 +26,7 @@ import {
 import type {
   Result,
   Society,
+  SocietyJoinOptions,
   SocietyJoinPreview,
   SocietyMembership,
   SocietySummary,
@@ -164,6 +166,23 @@ export async function previewJoin(rawCode: string): Promise<SocietyJoinPreview |
   const code = normalizeJoinCode(rawCode);
   if (code.length === 0) return null;
   return getSocietyRepository().findJoinPreview(code);
+}
+
+/**
+ * The flats a join code's society offers (T049) — the join screen's selector.
+ *
+ * Authenticated, unlike the preview: the flat list is the society's building layout and is
+ * served only to somebody who holds the code (the API's `/societies/join-options` is behind a
+ * session for the same reason). It is *not* validated here beyond the code's shape — the code
+ * itself is the server's to resolve, and a dead one answers `join_code_invalid`, which is the
+ * same branch the submission uses.
+ */
+export async function loadJoinOptions(
+  actorId: string,
+  rawCode: string,
+  query: { readonly q?: string | undefined; readonly limit?: number | undefined } = {},
+): Promise<SocietyJoinOptions> {
+  return unwrap(await listJoinOptionsUseCase(societyDeps(), asUserId(actorId), rawCode, query));
 }
 
 export async function joinSociety(
