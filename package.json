@@ -1,8 +1,8 @@
 {
-  "name": "society-expense-splitter",
+  "name": "resident-360",
   "version": "0.1.0",
   "private": true,
-  "description": "Monorepo for the Society Expense Splitter app (Expo mobile + NestJS API + shared packages)",
+  "description": "Monorepo for the Resident 360 app (Expo mobile + NestJS API + shared packages)",
   "packageManager": "pnpm@11.5.2",
   "engines": {
     "node": ">=24.16.0"

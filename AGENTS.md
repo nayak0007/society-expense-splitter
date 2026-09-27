@@ -1,5 +1,7 @@
 # AI Development Instructions
 
+**Product identity:** the user-facing product is **Resident 360** (Expo slug `resident-360`, deep-link scheme `resident360://`). **`@ses` is a historical/internal package namespace and does not represent the user-facing product name** — the same applies to the `ses` local database, the `ses_meta` migrations ledger, the `ses/*` persisted storage keys, and the `SES-` ticket prefix in branch/TODO conventions. Do not rename these as part of brand work; "society" remains the domain concept the product manages.
+
 Before implementing any task:
 
 1. Read docs/Architecture.md

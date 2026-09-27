@@ -1,6 +1,8 @@
-# Society Expense Splitter
+# Resident 360
 
 A modern Expo (React Native) application for managing apartment society expenses, maintenance, payments, complaints, visitors, and announcements.
+
+> Package names use the internal `@ses/*` scope — a historical namespace that does not represent the product name.
 
 ## Project Status
 
@@ -24,7 +26,7 @@ A modern Expo (React Native) application for managing apartment society expenses
 ## Folder Structure
 
 ```
-society-expense-splitter/
+resident-360/
 ├── apps/
 │   ├── mobile/          # Expo app (Expo Router + NativeWind)
 │   └── api/             # NestJS API + workers (scaffolded in T006)
