@@ -148,6 +148,94 @@ describe("GET /v1/societies", () => {
   });
 });
 
+describe("GET /v1/societies/memberships", () => {
+  it("carries the membership's own id, which the summary list cannot", async () => {
+    const seeded = repository.seed({ ownerId: OWNER, name: "Mine" });
+    repository.seed({ ownerId: OUTSIDER, name: "Theirs" });
+
+    const response = await server()
+      .get("/v1/societies/memberships")
+      .set("Authorization", `Bearer ${await tokenFor(OWNER)}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.memberships).toHaveLength(1);
+
+    const [membership] = response.body.data.memberships;
+    expect(membership.societyId).toBe(seeded.society.id);
+    // The reason this route exists. `GET /societies` returns a *summary* whose
+    // `id` is the society's, so a client reconstructing a membership from it
+    // would hold a society id where a member id belongs. The two must differ.
+    expect(membership.id).not.toBe(seeded.society.id);
+    expect(membership.id).toBe(seeded.membership.id);
+    expect(membership.userId).toBe(OWNER);
+    // Absent from the summary entirely, and what a membership screen edits.
+    expect(membership.occupancyType).toBe("owner");
+    expect(membership.joinedAt).not.toBeNull();
+  });
+
+  it("returns an empty list for someone in no society yet", async () => {
+    const response = await server()
+      .get("/v1/societies/memberships")
+      .set("Authorization", `Bearer ${await tokenFor(OUTSIDER)}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.memberships).toEqual([]);
+  });
+
+  it("requires a session", async () => {
+    const response = await server().get("/v1/societies/memberships");
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe("UNAUTHENTICATED");
+  });
+});
+
+describe("GET /v1/societies/:societyId/members", () => {
+  it("returns the roster to a member", async () => {
+    const seeded = repository.seed({ ownerId: OWNER, name: "Mine" });
+
+    const response = await server()
+      .get(`/v1/societies/${seeded.society.id}/members`)
+      .set("Authorization", `Bearer ${await tokenFor(OWNER)}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.memberships).toHaveLength(1);
+    expect(response.body.data.memberships[0].role).toBe("admin");
+    expect(response.body.data.memberships[0].userId).toBe(OWNER);
+  });
+
+  it("answers 404 to a non-member rather than an empty roster", async () => {
+    const seeded = repository.seed({ ownerId: OWNER, name: "Mine" });
+
+    const response = await server()
+      .get(`/v1/societies/${seeded.society.id}/members`)
+      .set("Authorization", `Bearer ${await tokenFor(OUTSIDER)}`);
+
+    // Not an empty list: `{ memberships: [] }` would confirm the society exists,
+    // which is exactly what PRD T041 forbids.
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe("NOT_FOUND");
+  });
+
+  it("rejects a non-UUID society id with 422 before any query runs", async () => {
+    const response = await server()
+      .get("/v1/societies/not-a-uuid/members")
+      .set("Authorization", `Bearer ${await tokenFor(OWNER)}`);
+
+    expect(response.status).toBe(422);
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("requires a session", async () => {
+    const seeded = repository.seed({ ownerId: OWNER, name: "Mine" });
+    const response = await server().get(
+      `/v1/societies/${seeded.society.id}/members`,
+    );
+
+    expect(response.status).toBe(401);
+  });
+});
+
 describe("GET /v1/societies/lookup", () => {
   it("resolves a join code without a session", async () => {
     // PRD §3.2: the join screen resolves a code before the user has joined
@@ -206,11 +294,32 @@ describe("POST /v1/societies/join", () => {
     const response = await server()
       .post("/v1/societies/join")
       .set("Authorization", `Bearer ${await tokenFor(OUTSIDER)}`)
-      .send({ code: society.joinCode, occupancyType: "tenant" });
+      .send({
+        code: society.joinCode,
+        occupancyType: "tenant",
+        message: "Tenant of A-402 from March",
+      });
 
     expect(response.status).toBe(201);
     expect(response.body.data.membership.status).toBe("pending");
     expect(response.body.data.membership.occupancyType).toBe("tenant");
+  });
+
+  it("refuses a note past the contract's bound, naming the field", async () => {
+    const { society } = repository.seed({ ownerId: OWNER });
+
+    const response = await server()
+      .post("/v1/societies/join")
+      .set("Authorization", `Bearer ${await tokenFor(OUTSIDER)}`)
+      .send({
+        code: society.joinCode,
+        occupancyType: "tenant",
+        message: "x".repeat(501),
+      });
+
+    expect(response.status).toBe(422);
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
+    expect(response.body.error.field).toBe("message");
   });
 
   it("refuses a second join as DUPLICATE_RESOURCE", async () => {
@@ -369,7 +478,12 @@ describe("PATCH /v1/societies/:societyId", () => {
   it("refuses a non-Admin member with SOCIETY_ADMIN_REQUIRED", async () => {
     const { society } = repository.seed({ ownerId: OWNER });
     await repository.join(
-      { code: society.joinCode, occupancyType: "tenant" },
+      {
+        code: society.joinCode,
+        occupancyType: "tenant",
+        apartmentId: null,
+        note: null,
+      },
       OUTSIDER,
     );
     // Approve them, so the refusal is about the role and not about the pending
@@ -427,7 +541,12 @@ describe("POST /v1/societies/:societyId/join-code", () => {
   it("refuses a plain member", async () => {
     const { society } = repository.seed({ ownerId: OWNER });
     await repository.join(
-      { code: society.joinCode, occupancyType: "tenant" },
+      {
+        code: society.joinCode,
+        occupancyType: "tenant",
+        apartmentId: null,
+        note: null,
+      },
       OUTSIDER,
     );
 
@@ -481,7 +600,12 @@ describe("POST /v1/societies/:societyId/leave", () => {
   it("lets a pending applicant withdraw", async () => {
     const { society } = repository.seed({ ownerId: OWNER });
     await repository.join(
-      { code: society.joinCode, occupancyType: "tenant" },
+      {
+        code: society.joinCode,
+        occupancyType: "tenant",
+        apartmentId: null,
+        note: null,
+      },
       OUTSIDER,
     );
     const membership = repository.state.memberships.find(

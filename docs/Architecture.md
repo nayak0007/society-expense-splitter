@@ -1,7 +1,7 @@
-# Software Architecture Document — Society Expense Splitter
+# Software Architecture Document — Resident 360
 
 **Version:** 1.0
-**Companion to:** Society Expense Splitter PRD v1.0
+**Companion to:** Resident 360 PRD v1.0
 **Audience:** AI coding agents and engineers implementing the system
 **Status:** Normative. Where an implementation detail is specified here, build it exactly this way.
 
@@ -698,7 +698,7 @@ In tests, swap `useClass: InMemoryExpenseRepository` and `useValue: new FixedClo
 ## 4.1 Repository Root
 
 ```
-society-expense-splitter/
+resident-360/
 ├── apps/
 │   ├── mobile/                  # Expo app
 │   ├── api/                     # NestJS API + worker
@@ -760,7 +760,7 @@ apps/mobile/
 │   │   │   ├── components/     OtpInput.tsx  PhoneField.tsx
 │   │   │   ├── screens/        LoginScreen.tsx  OtpScreen.tsx
 │   │   │   └── __tests__/
-│   │   ├── society/  members/  expenses/  payments/  maintenance/
+│   │   ├── society/  members/  structure/  expenses/  payments/  maintenance/
 │   │   ├── complaints/  notices/  visitors/  reports/
 │   │   ├── notifications/  ai/  subscription/  sync/
 │   │   └── …                             # each with the same 5 sub-folders
@@ -1006,7 +1006,7 @@ Five tabs (`home`, `expenses`, `payments`, `community`, `more`), each owning an 
 
 ## 5.4 Deep Linking
 
-Scheme `societyexpense://` plus universal links on `https://app.societysplit.in`.
+Scheme `resident360://` plus universal links on `https://app.societysplit.in`.
 
 | Link | Route | Notes |
 |---|---|---|
@@ -1973,6 +1973,8 @@ export function canOnResource(
 
 **This function is the single source of truth.** The API guard calls it, the mobile UI calls it, the RLS policies mirror it. A parameterised test iterates every `(role × action)` pair against the PRD matrix and fails the build on any divergence.
 
+> **Implementation status (T046, 2026-09-26) — roles are handed out; a permission is still a function.** The matrix above is unchanged and remains the single source of truth: **no `Role` entity, no `roles` table and no `role_permissions` join were added**, because a table could hold a row the matrix does not imply while the guard — not the table — is what wins. What T046 adds is the write path and a readable form of the same matrix. `packages/domain/src/member/role-rules.ts` holds the rules that are *not* cells of §2.1 — `ROLE_ORDER` (PRD §2.1's order), the caps (`MAX_ADMINS` 3, `MAX_TREASURERS` 2, counted over **active** holders only, so a suspended officer does not keep a society from appointing a replacement), `REVOKE_TARGET_ROLE` (`resident`: revocation is an assignment, not a deletion) and four typed refusals (`checkRoleLimit` → `role_cap_exceeded`, `checkRoleTarget`, `checkRoleChangeIsMeaningful`, `checkAdminPresence` → `sole_admin`) — plus `canAssignRole`/`canRevokeRole`, which are `can(role, 'member.role_change')` rather than a second grant list. `applyRoleChange` in `@ses/application` is the one write path (context → capability → target → self-change → status → no-op → cap → admin presence), and `PATCH|DELETE /v1/members/:memberId/role` is its only route. Introspection is the same matrix read back: `GET /v1/permissions` (the catalogue), `/permissions/me` and `/permissions/members/:memberId`, every answer `actionsFor(role)` with the membership's status folded in — a non-active member answers `permissions: []`, because the role's grant is not what applies to somebody who cannot act. Enforcement is doubled deliberately: the `members_update_self_or_admin` policy and the `UPDATE (role)` grant, `chk_member_self_change()`, the `BEFORE` cap trigger `chk_role_caps()` and the deferred `chk_admin_present()` are all asserted in `scripts/db/rls-canary.sql`. **Deviations:** there is no `owner` role — the shipped PRD enum is `admin | treasurer | committee | resident | tenant | guest`, and *owner* is an occupancy; the caps are a trigger rather than a constraint, because no single row can see a population; and there is no *Validate Permission* endpoint, because the guard already answers it by evaluating `can()`. **Outstanding:** the audit row (T050), notifications, and PRD §2.2's acceptance step on an admin handover (it needs a pending-transfer record to accept against — a promotion today is immediate). See `docs/guides/AUTHORIZATION.md` §3 for the order of refusals and what the canary covers.
+
 ## 9.4 Guard Chain
 
 Executed in strict order; each stage may only narrow access.
@@ -2006,6 +2008,12 @@ export class SocietyGuard implements CanActivate {
 
 `RequestContext` uses `AsyncLocalStorage`, so repositories and the audit service read the actor without threading it through every signature — while remaining request-isolated.
 
+> **Implementation status (T042, 2026-09-24) — the chain's first production consumer.** `/v1/buildings` (`apps/api/src/modules/structure/presentation/buildings.controller.ts`) is the first shipped route set that runs stages 2–4, and it is **addressed by `X-Society-Id` rather than by a `:societyId` path segment**, which is what the guards require: a permission is a per-membership grant, so a route that names one is by definition society-scoped, and the header is how it says which society. A route carrying *both* a path parameter and the header is the shape to avoid — the guard would authorise against the header while the query read the path, and nothing in between would notice. The society routes stay path-scoped with no declared permission and therefore reach the database under RLS alone (stage 6). Three further notes: per-*resource* scoping (this document's `canOnResource`) is still not a guard concern and is done in the use case, where `loadBuildingContext` looks the building up **within** the society the guard resolved, so a building id belonging to another tenant is `not_found` and not a permission error; the membership is still memoised for the request lifetime and the **5-minute cache remains unimplemented** (unchanged from T038 — there is still no membership writer that could invalidate it); and `scripts/db/rls-canary.sql` now asserts the building policies on the **guard-bypassed** path too, so a direct query as a stranger is refused by the database even when the guards are not in the way.
+
+> **Implementation status (T043, 2026-09-25) — the same chain, two address shapes.** The flat routes (`apps/api/src/modules/structure/presentation/apartments.controller.ts`) run stages 2–4 unchanged and add the first case where one module addresses the same resource two ways: `GET|POST /v1/buildings/:buildingId/apartments` because a flat is created *inside* a building, and `GET|PATCH|DELETE /v1/apartments/:apartmentId` because once it exists its id is the whole address — repeating the parent in every path would be two ids that can disagree, which is the same hazard as a path parameter beside the `X-Society-Id` header. Per-resource scoping moved up one level rather than sideways: `loadApartmentContext` resolves the flat **within** the society the guard resolved, and the *list* and *create* paths load the **parent building** first, which is what turns a building id from another society into `404` rather than `200 []` — a distinguishable answer for structure the caller cannot see would defeat PRD T041 even though no row leaked. `scripts/db/rls-canary.sql` now covers the `wings`/`apartments` policies and the building-delete guard, and each was confirmed to be *load-bearing* by weakening it and watching the canary fail: an `apartments` select policy opened to `true`, an insert policy loosened to `WITH CHECK (true)`, and `building_soft_delete` reverted to its pre-T043 body.
+
+> **Implementation status (T038, 2026-09-24).** Stages **2–4 are built**; 1 and 5 are not. `SupabaseAuthGuard`, `SocietyGuard` and `PermissionGuard` are registered as `APP_GUARD` providers in that order in `apps/api/src/app.module.ts`, and `RequestContext` carries a narrowed `member` (`membershipId`, `societyId`, `role`, `status`). Three deviations from the sketch above, each deliberate: the society guards are **inert unless the route declares `@RequirePermission`**, because every action is a per-membership grant and so a route naming a permission is by definition header-scoped — making them unconditional would require `X-Society-Id` on `/health/*` and on the join-code lookup; a missing header is `400 VALIDATION_ERROR` in the shipped error catalogue rather than the sketch's `MISSING_SOCIETY_CONTEXT`; and the **5-minute membership cache is not implemented** — the membership is memoised for the lifetime of the request and no longer. SAD §9.3's `canOnResource` is likewise deferred to the first module that owns a resource. The guard chain is the *application* authorization layer; RLS (§12) remains the database layer and is not replaced by it — `scripts/db/rls-canary.sql` asserts the guard-bypassed path is still blocked. See `docs/guides/AUTHORIZATION.md`.
+
 ## 9.5 Permission Matrix (implementation view)
 
 Condensed from PRD §2.1. `✅` full, `🟡` conditional (see `canOnResource`), `—` denied.
@@ -2016,6 +2024,7 @@ Condensed from PRD §2.1. `✅` full, `🟡` conditional (see `canOnResource`), 
 | `society.delete` | ✅ | — | — | — | — | — |
 | `member.invite` / `member.approve` | ✅ | ✅ | — | — | — | — |
 | `member.role_change` / `member.remove` | ✅ | — | — | — | — | — |
+| `structure.view` / `member.view` (implementation additions) | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | `expense.create` | ✅ | ✅ | 🟡 draft | — | — | — |
 | `expense.publish` | ✅ | ✅ | — | — | — | — |
 | `expense.approve` | ✅ | — | — | — | — | — |

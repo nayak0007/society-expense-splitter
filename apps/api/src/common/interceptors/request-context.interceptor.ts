@@ -13,6 +13,7 @@ import {
   readRequestActor,
   readRequestId,
   readRequestHeader,
+  readRequestMembership,
 } from "../http/http-access";
 
 /**
@@ -30,10 +31,17 @@ import {
  * hook in `bootstrap.ts`, because an interceptor is only bound to matched routes
  * and would therefore miss 404s. See the comment there.
  *
- * The actor is *copied* from the request, not resolved here: guards run before
- * interceptors, so `SupabaseAuthGuard` has already written the verified actor
- * onto the request by this point. Copying rather than re-reading the token keeps
- * one verification per request and one source of truth for who the caller is.
+ * The actor and the society context are *copied* from the request, not resolved
+ * here: guards run before interceptors, so `SupabaseAuthGuard` has already written
+ * the verified actor and `SocietyGuard` the resolved membership onto the request
+ * by this point. Copying rather than re-reading keeps one verification and one
+ * membership read per request, and one source of truth for both.
+ *
+ * The store carries a *narrowed* member — id, society, role, status — rather than
+ * the whole membership object. The ALS store outlives the request's stack frames
+ * and is read by logging and audit code; handing those a live domain object that
+ * nothing in this layer owns is how a stray mutation somewhere becomes
+ * un-reproducible.
  */
 @Injectable()
 export class RequestContextInterceptor implements NestInterceptor {
@@ -49,8 +57,22 @@ export class RequestContextInterceptor implements NestInterceptor {
       readRequestHeader(request, "x-request-id") ??
       randomUUID();
 
+    const membership = readRequestMembership(request);
+
     return RequestContext.run(
-      { requestId, userId: readRequestActor(request)?.userId },
+      {
+        requestId,
+        userId: readRequestActor(request)?.userId,
+        member:
+          membership === undefined
+            ? undefined
+            : {
+                membershipId: membership.id,
+                societyId: membership.societyId,
+                role: membership.role,
+                status: membership.status,
+              },
+      },
       () => next.handle(),
     );
   }

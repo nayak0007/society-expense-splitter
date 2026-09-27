@@ -2,6 +2,8 @@ import { Module } from "@nestjs/common";
 import { systemClock } from "@ses/domain";
 import type { Clock } from "@ses/domain";
 
+import { MEMBERSHIP_READER } from "../../common/authorization/membership-reader";
+import { SOCIETY_AUTHORIZATION_READER } from "../../common/authorization/society-authorization";
 import { DatabaseModule } from "../../infrastructure/database/database.module";
 import { SocietyOperations } from "./application/society.operations";
 import {
@@ -46,8 +48,31 @@ import { SocietiesController } from "./presentation/societies.controller";
     SocietyOperations,
     SocietyRepositoryPostgres,
     { provide: SOCIETY_REPOSITORY, useExisting: SocietyRepositoryPostgres },
+    // The guard chain's read (T038). Bound to the same instance as the domain
+    // port rather than to a second class: the guard needs one query, and that
+    // query is the `society_snapshot()` read this adapter already owns. Two
+    // providers over one instance also means `useExisting` — not `useClass` — so
+    // a test that swaps `SocietyRepositoryPostgres` for a fake gets a coherent
+    // guard context from the same fake instead of a half-real chain.
+    {
+      provide: SOCIETY_AUTHORIZATION_READER,
+      useExisting: SocietyRepositoryPostgres,
+    },
+    // T042's one read of a `members` row, satisfied by the same instance. The
+    // building module consumes it through this module's exported surface rather
+    // than implementing a third translation of a `members` row — see the token's
+    // own note for why the token lives in `common/` and this does not.
+    { provide: MEMBERSHIP_READER, useExisting: SocietyRepositoryPostgres },
     { provide: SOCIETY_CLOCK, useValue: systemClock satisfies Clock },
   ],
-  exports: [SocietyOperations],
+  // Both readers are exported for the same reason, from two directions:
+  // `SOCIETY_AUTHORIZATION_READER` because `SocietyGuard` is registered in
+  // `AppModule` and resolves its dependencies there — a global guard's own
+  // dependencies must be visible in the module that registers it — and
+  // `MEMBERSHIP_READER` because the building module (T042) consumes it. Both
+  // interfaces live in `common/authorization/` (or in `@ses/domain`) and both
+  // implementations live here, so the dependency still points inward; these two
+  // lines are what make the container agree with that.
+  exports: [SocietyOperations, SOCIETY_AUTHORIZATION_READER, MEMBERSHIP_READER],
 })
 export class SocietiesModule {}

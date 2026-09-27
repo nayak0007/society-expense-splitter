@@ -1,5 +1,6 @@
 import {
   createdSocietyResponseSchema,
+  joinOptionsResponseSchema,
   membershipResponseSchema,
   societyJoinPreviewSchema,
   societyProfileResponseSchema,
@@ -8,6 +9,7 @@ import {
 } from "@ses/contracts";
 import type {
   CreatedSocietyResponseDto,
+  JoinOptionsResponseDto,
   MembershipDto,
   MembershipResponseDto,
   SocietyCapabilitiesDto,
@@ -19,6 +21,7 @@ import type {
 import type {
   Society,
   SocietyCapabilities,
+  SocietyJoinOptions,
   SocietyJoinPreview,
   SocietyMembership,
   SocietySummary,
@@ -126,6 +129,36 @@ export function joinPreviewToDto(
     state: preview.state,
     type: preview.type,
     memberCount: preview.memberCount,
+    // The code's expiry, not the society's. The client re-checks it against the
+    // domain's own clock rather than trusting the server to have done so.
+    joinCodeExpiresAt: preview.joinCodeExpiresAt,
+  });
+}
+
+/**
+ * `GET /societies/join-options` — the flats the join screen may offer (T049).
+ *
+ * Parsed through the client's own schema for the reason every mapper here is: a domain rename
+ * fails *here*, naming the field, rather than shipping a payload the client cannot read. The
+ * flat's ids stay strings on the wire and are branded in the domain — the same boundary the
+ * request body crosses.
+ */
+export function joinOptionsToDto(
+  options: SocietyJoinOptions,
+): JoinOptionsResponseDto {
+  return joinOptionsResponseSchema.parse({
+    societyId: options.societyId,
+    flats: options.flats.map((flat) => ({
+      id: flat.id,
+      number: flat.number,
+      buildingId: flat.buildingId,
+      buildingName: flat.buildingName,
+      wingId: flat.wingId,
+      wingName: flat.wingName,
+      floor: flat.floor,
+    })),
+    total: options.total,
+    truncated: options.truncated,
   });
 }
 

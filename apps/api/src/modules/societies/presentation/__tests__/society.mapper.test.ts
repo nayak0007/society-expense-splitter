@@ -194,9 +194,17 @@ describe("joinPreviewToDto", () => {
   it("exposes only the fields the SQL function is allowed to return", () => {
     // The bound on the public endpoint's exposure: name, city, state, type and
     // member count. Never the join code itself, never members, never settings.
+    //
+    // `joinCodeExpiresAt` is inside the bound rather than outside it: it
+    // describes a code the caller already presented — a preview cannot be reached
+    // without one — so it reveals nothing a valid request did not already know,
+    // and it cannot be used to enumerate codes. The client needs it because the
+    // domain re-evaluates expiry against its own clock (`join-society.ts`)
+    // instead of trusting whichever adapter remembered to check.
     expect(Object.keys(joinPreviewToDto(PREVIEW)).sort()).toEqual([
       "city",
       "id",
+      "joinCodeExpiresAt",
       "memberCount",
       "name",
       "state",

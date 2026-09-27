@@ -1,6 +1,8 @@
 import {
   DEFAULT_SOCIETY_SETTINGS,
   SocietyError,
+  asApartmentId,
+  asBuildingId,
   asMemberId,
   asSocietyId,
   asUserId,
@@ -12,6 +14,7 @@ import type {
   MembershipStatus,
   OccupancyType,
   Society,
+  SocietyJoinOptions,
   SocietyJoinPreview,
   SocietyMembership,
   SocietySettings,
@@ -19,6 +22,15 @@ import type {
   UpdateSocietyInput,
 } from "@ses/domain";
 import { z } from "zod";
+
+import {
+  asErrorLike,
+  SQLSTATE,
+} from "../../../common/database/postgres-errors";
+import {
+  nullableTimestampSchema,
+  timestampSchema,
+} from "../../../common/database/postgres-rows";
 
 /**
  * The database ⇄ domain boundary for the society module.
@@ -57,37 +69,10 @@ import { z } from "zod";
 // Primitives
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * One canonical timestamp shape.
- *
- * Three serialisations reach this function and all must become the same string:
- * `postgres.js` returns a `timestamptz` column as a JavaScript `Date`, `jsonb`
- * (every `society_snapshot()` field) carries the same instant as an ISO string,
- * and Postgres's own text form is `2026-09-20 10:00:00+00`. The domain compares
- * against `Date.parse` and renders through `Intl`, so normalising here is what
- * keeps `Society.createdAt` identical in shape to what the mobile mock and
- * `new Date().toISOString()` produce.
- *
- * This is the one place the driver's behaviour differs from PostgREST in a way
- * that would otherwise reach a screen: PostgREST always sends strings, so a copy
- * of this file written for the driver alone would silently produce `Date`
- * objects wherever a row is read directly rather than through a function.
- */
-function toIso(value: string | Date | null | undefined): string | null {
-  if (value === null || value === undefined || value === "") return null;
-  const parsed = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toISOString();
-}
-
-/** An instant on a `NOT NULL` column: always an ISO string out. */
-const timestampSchema = z
-  .union([z.string(), z.date()])
-  .transform((value) => toIso(value) ?? "");
-
-/** An instant on a nullable column: `null` in means `null` out. */
-const nullableTimestampSchema = z
-  .union([z.string(), z.date(), z.null()])
-  .transform((value) => toIso(value));
+// Timestamp normalisation (`timestampSchema`, `nullableTimestampSchema`) and the
+// driver-error unwrapping (`asErrorLike`, `SQLSTATE`) moved to `common/database/`
+// when the building module needed the identical behaviour. Two copies of either
+// would drift, and the error half is a bug fix this module paid for once.
 
 /** Bigint columns arrive as JSON numbers; coerced so a string never slips through. */
 const paiseSchema = z.coerce.number().int().min(0);
@@ -174,6 +159,51 @@ export const joinPreviewSchema = z.object({
   joinCodeExpiresAt: nullableTimestampSchema.optional(),
 });
 export type JoinPreviewPayload = z.infer<typeof joinPreviewSchema>;
+
+/**
+ * What `public.society_join_options()` returns (T049) — camelCase, it is not a row either.
+ *
+ * `id` on each flat is branded by `joinOptionsFromPayload` rather than here, because a schema
+ * cannot carry a brand; the two are one step apart on purpose, so the wire shape and the
+ * domain shape are each validated by the thing that knows about them.
+ */
+export const joinOptionsSchema = z.object({
+  society_id: z.string(),
+  flats: z.array(
+    z.object({
+      id: z.string(),
+      number: z.string(),
+      buildingId: z.string(),
+      buildingName: z.string(),
+      wingId: z.string().nullable(),
+      wingName: z.string().nullable(),
+      floor: z.coerce.number().int().nullable(),
+    }),
+  ),
+  total: countSchema,
+  truncated: z.boolean(),
+});
+export type JoinOptionsPayload = z.infer<typeof joinOptionsSchema>;
+
+/** The validated payload → the domain's `SocietyJoinOptions`. */
+export function joinOptionsFromPayload(
+  payload: JoinOptionsPayload,
+): SocietyJoinOptions {
+  return {
+    societyId: asSocietyId(payload.society_id),
+    flats: payload.flats.map((flat) => ({
+      id: asApartmentId(flat.id),
+      number: flat.number,
+      buildingId: asBuildingId(flat.buildingId),
+      buildingName: flat.buildingName,
+      wingId: flat.wingId,
+      wingName: flat.wingName,
+      floor: flat.floor,
+    })),
+    total: payload.total,
+    truncated: payload.truncated,
+  };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Enum translation
@@ -407,33 +437,6 @@ export function updatePayload(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * A `postgres.js` error, narrowed.
- *
- * Field names are the driver's: Postgres's `DETAIL` arrives as `detail` and
- * `HINT` as `hint`. Only `code` and `message` are guaranteed; the rest are
- * present when the server sent them.
- */
-interface PostgresErrorLike {
-  readonly code?: string;
-  readonly message?: string;
-  readonly detail?: string;
-  readonly hint?: string;
-  readonly constraint_name?: string;
-}
-
-/** SQLSTATE codes raised by the migrations' own functions (see the RPC header). */
-export const SQLSTATE = {
-  raised: "P0001",
-  societyNotFound: "P0002",
-  societyForbidden: "P0003",
-  uniqueViolation: "23505",
-  foreignKeyViolation: "23503",
-  checkViolation: "23514",
-  insufficientPrivilege: "42501",
-  undefinedTable: "42P01",
-} as const;
-
-/**
  * The named exceptions the migrations raise. They travel as `P0001` with the
  * name in the message, so they are matched by name rather than by code — which
  * is why every one of them is listed here instead of inline: adding a
@@ -449,6 +452,16 @@ export const RAISED_EXCEPTION = {
   emptyPatch: "EMPTY_PATCH",
   emptyPayload: "EMPTY_PAYLOAD",
   notAuthenticated: "NOT_AUTHENTICATED",
+  /**
+   * T049: `society_join_options()` was handed a code no live society has.
+   *
+   * The *preview* answers the same case with `NULL` rather than an exception (it is a `sql`
+   * function and returns nothing for no rows); the options function raises, because its
+   * caller is asking to *act* on the code, and the refusal has to carry the same
+   * `join_code_invalid` the submission would give — one string on the join screen for "no
+   * such society", whichever request produced it.
+   */
+  societyJoinCodeInvalid: "SOCIETY_JOIN_CODE_INVALID",
 } as const;
 
 /**
@@ -465,10 +478,6 @@ export function unexpectedShapeError(what: string): SocietyError {
       hint: `Unexpected ${what} shape returned by the database.`,
     },
   );
-}
-
-function asErrorLike(error: unknown): PostgresErrorLike {
-  return (error ?? {}) as PostgresErrorLike;
 }
 
 /**
@@ -507,7 +516,16 @@ export function societyErrorFromPostgres(
   const code = candidate.code ?? "";
   const message = candidate.message ?? "";
   const hint = candidate.hint;
-  const haystack = `${message} ${candidate.detail ?? ""}`;
+  // The constraint name is included because a check violation's most useful
+  // discriminator lives there (and in the message), not always in `detail`.
+  const haystack = [
+    message,
+    candidate.detail,
+    candidate.constraint,
+    candidate.constraint_name,
+  ]
+    .filter((part): part is string => typeof part === "string")
+    .join(" ");
 
   const withHint = (): Record<string, unknown> => ({
     code: candidate.code,
@@ -515,14 +533,14 @@ export function societyErrorFromPostgres(
   });
 
   switch (code) {
-    case SQLSTATE.societyNotFound:
+    case SQLSTATE.notFound:
       return new SocietyError(
         "not_found",
         "That society is not available to you.",
         withHint(),
       );
 
-    case SQLSTATE.societyForbidden:
+    case SQLSTATE.forbidden:
       return new SocietyError(
         "forbidden",
         hint ?? "Only a society Admin can change society details.",
@@ -636,6 +654,13 @@ function raisedError(
     return new SocietyError(
       "sole_admin",
       hint ?? "You are the only Admin. Promote another member to Admin first.",
+      base,
+    );
+  }
+  if (message.includes(RAISED_EXCEPTION.societyJoinCodeInvalid)) {
+    return new SocietyError(
+      "join_code_invalid",
+      hint ?? "That join code does not match any society.",
       base,
     );
   }

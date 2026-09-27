@@ -18,6 +18,7 @@ import type {
   OccupancyType,
   Society,
   SocietyId,
+  SocietyJoinOptions,
   SocietyJoinPreview,
   SocietyMembership,
   SocietyRepository,
@@ -53,6 +54,7 @@ export type RepositoryMethod =
   | "listSocietyMemberships"
   | "findById"
   | "findJoinPreview"
+  | "joinOptions"
   | "create"
   | "update"
   | "regenerateJoinCode"
@@ -87,6 +89,7 @@ export class FakeSocietyRepository implements SocietyRepository {
   private readonly societies = new Map<SocietyId, Society>();
   private readonly memberships: SocietyMembership[] = [];
   private readonly updates: UpdateSocietyInput[] = [];
+  private readonly joins: JoinSocietyInput[] = [];
   private readonly recorded: RepositoryMethod[] = [];
   private readonly failures = new Map<RepositoryMethod, unknown>();
   private readonly clock: Clock;
@@ -180,6 +183,15 @@ export class FakeSocietyRepository implements SocietyRepository {
     return [...this.updates];
   }
 
+  /**
+   * Every join submission handed over — the *request*, where the fake's return value only
+   * carries the stored membership. T049's flat and note are not fields of the membership, so
+   * this is the only place a test can see what the form actually sent.
+   */
+  joinInputs(): readonly JoinSocietyInput[] {
+    return [...this.joins];
+  }
+
   // ── the port ───────────────────────────────────────────────────────────────
 
   async listMemberships(actor: UserId): Promise<readonly SocietyMembership[]> {
@@ -233,6 +245,41 @@ export class FakeSocietyRepository implements SocietyRepository {
       }
     }
     return null;
+  }
+
+  /**
+   * The join screen's flat options (T049).
+   *
+   * Hard-wired to an empty society, deliberately: this fake models societies and memberships,
+   * not structure, and the *use case* under test is the code's shape and the refusal of a dead
+   * code — which is why an unknown code throws here exactly as the SQL function raises. The
+   * flat list itself is the repository's and the canary's to prove.
+   */
+  async joinOptions(
+    code: string,
+    _query: {
+      readonly query?: string | undefined;
+      readonly limit?: number | undefined;
+    },
+    _actor: UserId,
+  ): Promise<SocietyJoinOptions> {
+    this.record("joinOptions");
+    this.throwIfQueued("joinOptions");
+    const normalized = normalizeJoinCode(code);
+    for (const society of this.societies.values()) {
+      if (society.joinCode === normalized) {
+        return {
+          societyId: society.id,
+          flats: [],
+          total: 0,
+          truncated: false,
+        };
+      }
+    }
+    throw societyError(
+      "join_code_invalid",
+      "That join code does not match any society.",
+    );
   }
 
   async create(
@@ -366,6 +413,7 @@ export class FakeSocietyRepository implements SocietyRepository {
   ): Promise<SocietyMembership> {
     this.record("join");
     this.throwIfQueued("join");
+    this.joins.push(input);
 
     const normalized = normalizeJoinCode(input.code);
     let target: Society | undefined;

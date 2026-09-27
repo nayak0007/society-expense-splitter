@@ -14,12 +14,12 @@ export const JOIN_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export const JOIN_CODE_LENGTH = 6;
 export const JOIN_CODE_PATTERN = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/;
 
-/** `societyexpense://join?code=XXXXXX` (PRD §3.2 deep link + QR). */
-export const JOIN_LINK_SCHEME = "societyexpense://join";
+/** `resident360://join?code=XXXXXX` (PRD §3.2 deep link + QR). */
+export const JOIN_LINK_SCHEME = "resident360://join";
 
 /**
  * Tolerates what users actually paste: lowercase, spaces, hyphens and the
- * `societyexpense://join?code=` wrapper itself.
+ * `resident360://join?code=` wrapper itself.
  */
 export function normalizeJoinCode(raw: string): string {
   const fromLink = extractCodeFromText(raw);
@@ -66,7 +66,7 @@ export function buildJoinShareMessage(
 ): string {
   const link = buildJoinDeepLink(code);
   return [
-    `You are invited to join ${societyName} on Society Expense Splitter.`,
+    `You are invited to join ${societyName} on Resident 360.`,
     "",
     `Join code: ${normalizeJoinCode(code)}`,
     `Open the app: ${link}`,

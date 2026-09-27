@@ -24,9 +24,15 @@ import type { VerifiedActor } from "./actor";
  * - **Signature, against the project's JWKS.** Fetched from
  *   `auth/v1/.well-known/jwks.json` and cached by `jose`, which also refetches
  *   when a `kid` it has never seen arrives — the key-rotation path.
- * - **`alg: RS256`, pinned.** Without pinning, a token whose header says `none`
- *   or `HS256` could be presented and the *public* JWKS material reused as an
- *   HMAC secret — the classic JWT algorithm-confusion attack.
+ * - **`alg` pinned to an allowlist of Supabase's signing algorithms.** Without
+ *   pinning, a token whose header says `none` or `HS256` could be presented and
+ *   the *public* JWKS material reused as an HMAC secret — the classic JWT
+ *   algorithm-confusion attack. The allowlist exists rather than a single value
+ *   because Supabase has two generations of project: legacy projects sign
+ *   `RS256` (RSA), and current ones sign `ES256` (ECDSA P-256). A single pinned
+ *   `RS256` rejected every token from this project's real JWKS with
+ *   `"alg" (Algorithm) Header Parameter value not allowed`, which surfaced as a
+ *   blanket 401 on every authenticated request — see _Verification_ below.
  * - **`iss` equals `SUPABASE_JWT_ISSUER`.** A token minted for a *different*
  *   Supabase project must not authenticate here. Both projects' keys verify
  *   against their own JWKS, so the issuer is the only thing separating them.
@@ -55,8 +61,25 @@ export const SUPABASE_JWKS = Symbol("SUPABASE_JWKS");
 /** Supabase's audience for a logged-in user's access token. */
 const EXPECTED_AUDIENCE = "authenticated";
 
-/** The only algorithm this project is configured to sign with. */
-const EXPECTED_ALGORITHM = "RS256";
+/**
+ * The algorithms a Supabase project may sign access tokens with.
+ *
+ * Both are asymmetric, which is the property that matters: a verifier holding
+ * only public key material can never be tricked into using it as an HMAC secret,
+ * and neither `none` nor any `HS*` variant is nameable here. The allowlist
+ * is not widened beyond what Supabase actually issues, so the list stays a
+ * statement of fact about the identity provider rather than a compatibility
+ * catch-all.
+ *
+ * ```
+ * RS256  legacy projects  (RSA-2048, JWKS kty: "RSA")
+ * ES256  current projects (ECDSA P-256, JWKS kty: "EC")   <- vbxausombynirovqkwlk
+ * ```
+ *
+ * Both may appear at once while Supabase rotates a project's signing key, so the
+ * allowlist is a set and not a single value.
+ */
+const ALLOWED_ALGORITHMS = ["RS256", "ES256"] as const;
 
 /** T018: "60-second clock-skew tolerance". */
 const CLOCK_TOLERANCE_SECONDS = 60;
@@ -166,7 +189,7 @@ export class SupabaseJwtVerifier {
       const verified = await jwtVerify(token, this.jwks, {
         issuer: this.config.supabaseJwtIssuer,
         audience: EXPECTED_AUDIENCE,
-        algorithms: [EXPECTED_ALGORITHM],
+        algorithms: [...ALLOWED_ALGORITHMS],
         clockTolerance: CLOCK_TOLERANCE_SECONDS,
       });
       payload = verified.payload;

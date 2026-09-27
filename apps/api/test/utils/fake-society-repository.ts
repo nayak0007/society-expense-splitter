@@ -255,6 +255,34 @@ export function createFakeSocietyRepository(
       return null;
     },
 
+    /**
+     * The join screen's flat options (T049).
+     *
+     * Empty by construction: this fake models societies and memberships, not structure, and what
+     * the e2e suite asserts about the options route is its *shape* and its refusal of a dead code.
+     * The flat list itself is the repository's and the canary's to prove, against real SQL.
+     */
+    async joinOptions(rawCode, _query, _actor) {
+      calls.push("joinOptions");
+      const code = rawCode.trim().toUpperCase();
+      const society = [...societies.values()].find(
+        (candidate) =>
+          candidate.joinCode === code && candidate.deletedAt === null,
+      );
+      if (society === undefined) {
+        throw new SocietyError(
+          "join_code_invalid",
+          "That join code does not match any society.",
+        );
+      }
+      return {
+        societyId: society.id,
+        flats: [],
+        total: 0,
+        truncated: false,
+      };
+    },
+
     async create(input: CreateSocietyInput, actor) {
       calls.push("create");
       const now = clock.now().toISOString();

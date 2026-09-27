@@ -22,7 +22,7 @@ pnpm --filter @ses/mobile dev
 Open the Expo Go app / dev client, or press `a` (Android) / `i` (iOS).
 
 > Expo Go is fine for UI work, but **not** for auth: deep links
-> (`societyexpense://`), SecureStore and the Google sign-in sheet need a dev
+> (`resident360://`), SecureStore and the Google sign-in sheet need a dev
 > build (`pnpm exec expo run:android` / `run:ios`, or an EAS dev client).
 
 ## Supabase
@@ -52,7 +52,7 @@ it is project configuration, once per environment.
 | Confirm email                                    | **on**                                                     | PRD §3.1: sign-up sends a verification link. With it off, sign-up signs the user straight in.                                               |
 | Minimum password length                          | 8                                                          | Matches `passwordSchema`; the contract is the policy of record, this is a floor.                                                            |
 | Site URL                                         | production web origin (e.g. `https://app.societysplit.in`) | Supabase's fallback redirect target.                                                                                                        |
-| Redirect URLs                                    | `societyexpense://auth/callback`, `societyexpense://**`    | Email links and the Google sheet return here. Without these the links land on the Site URL in a browser and the app never sees the session. |
+| Redirect URLs                                    | `resident360://auth/callback`, `resident360://**`          | Email links and the Google sheet return here. Without these the links land on the Site URL in a browser and the app never sees the session. |
 | Email templates (Confirm signup, Reset password) | token-hash form (below)                                    | Survives mail-client link rewriting; the app verifies it with `verifyOtp`.                                                                  |
 | Providers → Google                               | enabled, with iOS/Android client IDs                       | Google sign-in (T025/T032).                                                                                                                 |
 | SMTP                                             | configured for any non-test environment                    | Supabase's built-in SMTP is rate-limited and not for production.                                                                            |
@@ -60,7 +60,7 @@ it is project configuration, once per environment.
 Token-hash template body:
 
 ```
-{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup&redirect_to=societyexpense://auth/callback
+{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup&redirect_to=resident360://auth/callback
 ```
 
 Use `type=recovery` in the _Reset password_ template. Supabase's default
@@ -75,7 +75,8 @@ pnpm db:status                  # verify what the project has applied
 ```
 
 The same runner is used in CI and in the deploy pipeline (ADR-0008) — see
-`supabase/README.md` for the naming, immutability and manual-fallback rules.
+`supabase/README.md` for the naming, immutability, manual-fallback, **rollback**
+and **troubleshooting** rules.
 
 ### 4. Verify
 

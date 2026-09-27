@@ -1,6 +1,7 @@
 import { asSocietyId, asUserId, isSocietyError } from "@ses/domain";
 import type { CreateSocietyInput, UpdateSocietyInput } from "@ses/domain";
 
+import { SQLSTATE } from "../../../../common/database/postgres-errors";
 import {
   createPayload,
   isJoinCodeCollision,
@@ -12,7 +13,6 @@ import {
   societyErrorFromPostgres,
   societyFromSnapshot,
   societySnapshotSchema,
-  SQLSTATE,
   updatePayload,
 } from "../society.rows";
 
@@ -332,6 +332,129 @@ describe("isJoinCodeCollision", () => {
       }),
     ).toBe(false);
     expect(isJoinCodeCollision(new Error("socket closed"))).toBe(false);
+  });
+});
+
+/**
+ * The wrapper Drizzle actually throws.
+ *
+ * `tx.execute()` does not rethrow `postgres.js`'s error — it wraps it in a
+ * `DrizzleQueryError` whose own properties are `query`, `params` and `cause`.
+ * Every test above builds a driver-shaped error by hand, which is precisely why
+ * the classifier could be inert in production while this file stayed green: the
+ * wrapper was never modelled. These cases are the regression that closes that
+ * gap, and they are written against the observed shape (`code` absent from the
+ * wrapper, the `PostgresError` one `cause` down) rather than a convenient one.
+ */
+function asDrizzleWraps(
+  cause: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    message:
+      "Failed query: select public.society_create($1::jsonb) as snapshot\nparams: {...}",
+    query: "select public.society_create($1::jsonb) as snapshot",
+    params: ["{...}"],
+    cause,
+  };
+}
+
+describe("Drizzle's error wrapper (live-database regression)", () => {
+  it("does not hide the driver's SQLSTATE behind `cause`", () => {
+    // The failure that started this: two tenants choosing the same society name
+    // answered 500 INTERNAL, because the wrapper has no `code` and the unique
+    // violation on `societies_slug_key` was therefore never classified.
+    const error = societyErrorFromPostgres(
+      asDrizzleWraps({
+        code: SQLSTATE.uniqueViolation,
+        message:
+          'duplicate key value violates unique constraint "societies_slug_key"',
+        detail: "Key (slug)=(green-meadows) already exists.",
+      }),
+      "write",
+    );
+
+    expect(error.code).toBe("conflict");
+  });
+
+  it("keeps the join-code retry reachable", () => {
+    // `isJoinCodeCollision` reads the same narrowing, so a wrapped error would
+    // silently disable the retry PRD T040 requires.
+    expect(
+      isJoinCodeCollision(
+        asDrizzleWraps({
+          code: SQLSTATE.uniqueViolation,
+          detail: "Key (join_code)=(ABC123) already exists.",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps a read refusal a 404 and a write refusal a 403", () => {
+    const wrapped = () =>
+      asDrizzleWraps({
+        code: SQLSTATE.insufficientPrivilege,
+        message:
+          'new row violates row-level security policy for table "societies"',
+      });
+
+    // PRD T041: a cross-tenant write must not become a 500, which both leaks
+    // that the row exists and pages an operator.
+    expect(societyErrorFromPostgres(wrapped(), "read").code).toBe("not_found");
+    expect(societyErrorFromPostgres(wrapped(), "write").code).toBe("forbidden");
+  });
+
+  it("reaches the migrations' named exceptions", () => {
+    const raised = (name: string) =>
+      societyErrorFromPostgres(
+        asDrizzleWraps({ code: SQLSTATE.raised, message: name }),
+        "write",
+      ).code;
+
+    expect(raised(RAISED_EXCEPTION.societyAdminRequired)).toBe("sole_admin");
+    expect(raised(RAISED_EXCEPTION.societyNotFound)).toBe("not_found");
+    expect(raised(RAISED_EXCEPTION.memberRoleChangeForbidden)).toBe(
+      "forbidden",
+    );
+  });
+
+  it("follows a chain nested deeper than one level", () => {
+    // Pinning `cause[0]` would leave this file wrong the day the ORM (or an
+    // aggregation layer) adds a wrapper of its own.
+    const error = societyErrorFromPostgres(
+      asDrizzleWraps({
+        message: "outer",
+        cause: {
+          code: SQLSTATE.checkViolation,
+          detail: "Failing row contains (..., pincode).",
+        },
+      }),
+      "write",
+    );
+
+    expect(error.message).toBe("Enter a 6-digit PIN code.");
+  });
+
+  it("matches on the server's message when no link carries a SQLSTATE", () => {
+    // The wrapper's own message is `Failed query: …`, so falling back to the
+    // outermost object would lose the phrase the fallback matches on.
+    const error = societyErrorFromPostgres(
+      asDrizzleWraps({ message: "permission denied for table societies" }),
+      "write",
+    );
+
+    expect(error.code).toBe("forbidden");
+  });
+
+  it("still classifies an unwrapped driver error", () => {
+    expect(
+      societyErrorFromPostgres(
+        {
+          code: SQLSTATE.uniqueViolation,
+          detail: "Key (slug)=(x) already exists.",
+        },
+        "write",
+      ).code,
+    ).toBe("conflict");
   });
 });
 

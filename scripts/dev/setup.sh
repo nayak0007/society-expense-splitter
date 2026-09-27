@@ -23,7 +23,7 @@ cd "$REPO_ROOT"
 info() { printf '  %s\n' "$1"; }
 warn() { printf '  ! %s\n' "$1" >&2; }
 
-echo "Society Expense Splitter — local setup"
+echo "Resident 360 — local setup"
 echo
 
 # ── Environment files ────────────────────────────────────────────────────────

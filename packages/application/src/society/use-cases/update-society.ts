@@ -159,9 +159,23 @@ export async function updateSociety(
 
     // Settings are stored with the society, so the repository receives the whole
     // object rather than a partial patch — there is no way to half-apply it.
+    //
+    // ALL NINE FIELDS, not the three financial basics: this block used to copy
+    // only `billingDay`, `dueDay` and `approvalThresholdPaise`, silently dropping
+    // the six the update contract also exposes. They were validated one line
+    // above and then never sent (the `timezone` comment below explains why the
+    // "whole object" claim is the intent, not the old behaviour). A live database
+    // found it; `@ses/domain`'s `UpdateSocietyInput` had to gain the fields first,
+    // which is what made dropping them possible to overlook.
     patch.billingDay = settings.value.billingDay;
     patch.dueDay = settings.value.dueDay;
+    patch.graceDays = settings.value.graceDays;
     patch.approvalThresholdPaise = settings.value.approvalThresholdPaise;
+    patch.billVacantFlats = settings.value.billVacantFlats;
+    patch.allowPartialPayments = settings.value.allowPartialPayments;
+    patch.defaulterListPublic = settings.value.defaulterListPublic;
+    patch.financialYearStartMonth = settings.value.financialYearStartMonth;
+    patch.timezone = settings.value.timezone;
   }
 
   try {

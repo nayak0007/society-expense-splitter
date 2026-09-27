@@ -12,6 +12,7 @@ import {
   getSocietyProfile,
   joinSociety,
   leaveSociety,
+  listJoinOptions,
   listSocietySummaries,
   regenerateJoinCode,
   updateSociety,
@@ -239,10 +240,66 @@ describe("updateSociety", () => {
     expect(patch.dueDay).toBe(25);
     // Settings are stored with the society, so there is no way to half-apply
     // them: the untouched keys travel at their current values.
-    expect(patch.billingDay).toBe(society.settings.billingDay);
-    expect(patch.approvalThresholdPaise).toBe(
-      society.settings.approvalThresholdPaise,
-    );
+    //
+    // **Every** patchable key, not only the three financial basics this
+    // assertion originally checked. The narrow version stayed green for as long
+    // as six fields were validated and then dropped, because a test that inspects
+    // only the fields a bug happens to preserve cannot report the ones it
+    // discards — a live database found them instead.
+    const settingsKeys = [
+      "billingDay",
+      "dueDay",
+      "graceDays",
+      "approvalThresholdPaise",
+      "billVacantFlats",
+      "allowPartialPayments",
+      "defaulterListPublic",
+      "financialYearStartMonth",
+      "timezone",
+    ] as const;
+
+    // Presence first: a field the contract exposes but the repository never
+    // receives fails here, which is exactly how the six below were lost.
+    for (const key of settingsKeys) {
+      expect([key, patch[key] === undefined]).toEqual([key, false]);
+    }
+    // Then the values: the patched key is its new value, the rest are untouched.
+    for (const key of settingsKeys) {
+      expect([key, patch[key]]).toEqual([
+        key,
+        key === "dueDay" ? 25 : society.settings[key],
+      ]);
+    }
+  });
+
+  it("carries each settings field the update contract exposes", async () => {
+    const { deps, repository } = setup();
+    const { society } = seedWithAdminAndResident(repository);
+
+    // One field at a time, so a regression names the field it lost. `timezone`
+    // is moved away from its default deliberately: asserting the default would
+    // pass whether or not the patch carried the field at all.
+    const cases: readonly [
+      Parameters<typeof updateSociety>[3],
+      string,
+      unknown,
+    ][] = [
+      [{ graceDays: 9 }, "graceDays", 9],
+      [{ billVacantFlats: false }, "billVacantFlats", false],
+      [{ allowPartialPayments: false }, "allowPartialPayments", false],
+      [{ defaulterListPublic: true }, "defaulterListPublic", true],
+      [{ financialYearStartMonth: 1 }, "financialYearStartMonth", 1],
+      [{ timezone: "America/New_York" }, "timezone", "America/New_York"],
+    ];
+
+    for (const [command, key, expected] of cases) {
+      await updateSociety(deps, ADMIN, society.id, command);
+      const patch = (repository.updatePatches().at(-1) ?? {}) as Record<
+        string,
+        unknown
+      >;
+      expect([key, patch[key]]).toEqual([key, expected]);
+    }
   });
 
   it("rejects an out-of-range setting without I/O", async () => {
@@ -459,6 +516,49 @@ describe("joinSociety", () => {
     expect(repository.callCount("join")).toBe(1);
   });
 
+  it("carries the chosen flat and the trimmed note into the submission", async () => {
+    // T049: the join screen picks a flat from the society's real list and may attach a
+    // message. Both are the *request's* fields — the membership comes back pending, and the
+    // flat is a claim until a reviewer confirms it — so the assertion is on what was sent.
+    const { deps, repository } = setup();
+    seedJoinable(repository);
+
+    expectOk(
+      await joinSociety(deps, RESIDENT, {
+        code: "AB2CD3",
+        occupancyType: "tenant",
+        apartmentId: "dddddddd-0000-4000-8000-000000000101",
+        message: "  Tenant of A-402  ",
+      }),
+    );
+
+    expect(repository.joinInputs()).toEqual([
+      {
+        code: "AB2CD3",
+        occupancyType: "tenant",
+        apartmentId: "dddddddd-0000-4000-8000-000000000101",
+        note: "Tenant of A-402",
+      },
+    ]);
+  });
+
+  it("refuses a note past the bound without touching the repository", async () => {
+    const { deps, repository } = setup();
+    seedJoinable(repository);
+
+    const error = expectErr(
+      await joinSociety(deps, RESIDENT, {
+        code: "AB2CD3",
+        occupancyType: "owner",
+        message: "x".repeat(501),
+      }),
+    );
+
+    expect(error.code).toBe("validation");
+    expect(error.details).toMatchObject({ field: "message" });
+    expect(repository.calls()).toEqual([]);
+  });
+
   it("surfaces an existing membership as a conflict", async () => {
     const { deps, repository } = setup();
     repository.seedSociety({
@@ -477,6 +577,67 @@ describe("joinSociety", () => {
     );
 
     expect(error.code).toBe("conflict");
+  });
+});
+
+describe("listJoinOptions", () => {
+  /** A joinable society — the same fixture `joinSociety`'s tests use, local to this block. */
+  function seedJoinable(
+    repository: FakeSocietyRepository,
+  ): ReturnType<FakeSocietyRepository["seedSociety"]> {
+    return repository.seedSociety({
+      joinCode: "AB2CD3",
+      members: [{ userId: "user-other", role: "admin" }],
+    });
+  }
+
+  it("rejects a malformed code without ever querying for it", async () => {
+    const { deps, repository } = setup();
+
+    const error = expectErr(await listJoinOptions(deps, RESIDENT, "ABC"));
+
+    expect(error.code).toBe("join_code_invalid");
+    expect(error.details).toMatchObject({ field: "code" });
+    expect(repository.calls()).toEqual([]);
+  });
+
+  it("resolves a normalised code to its society's flat list", async () => {
+    const { deps, repository } = setup();
+    const { society } = seedJoinable(repository);
+
+    const options = expectOk(
+      await listJoinOptions(deps, RESIDENT, " ab2cd-3 "),
+    );
+
+    expect(options.societyId).toBe(society.id);
+    expect(options.flats).toEqual([]);
+    expect(options.truncated).toBe(false);
+    expect(repository.callCount("joinOptions")).toBe(1);
+  });
+
+  it("reports an unknown code as invalid, not as an empty society", async () => {
+    const { deps, repository } = setup();
+    seedJoinable(repository);
+
+    const error = expectErr(await listJoinOptions(deps, RESIDENT, "ZZZZZZ"));
+
+    expect(error.code).toBe("join_code_invalid");
+    expect(repository.callCount("joinOptions")).toBe(1);
+  });
+
+  it("converts a repository failure into the domain's error vocabulary", async () => {
+    const { deps, repository } = setup();
+    repository.failNext(
+      "joinOptions",
+      new SocietyError(
+        "join_code_invalid",
+        "That join code does not match any society.",
+      ),
+    );
+
+    expect(
+      expectErr(await listJoinOptions(deps, RESIDENT, "AB2CD3")).code,
+    ).toBe("join_code_invalid");
   });
 });
 

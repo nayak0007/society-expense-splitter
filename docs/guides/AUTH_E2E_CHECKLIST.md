@@ -22,13 +22,13 @@ number) · ⏭️ not applicable on this device.
 - [ ] Both migrations applied, in filename order:
       `supabase/migrations/20260920120000_auth_profiles.sql`,
       `supabase/migrations/20260920120100_auth_profiles_rls.sql`.
-- [ ] Auth → URL configuration: `societyexpense://auth/callback` present in
+- [ ] Auth → URL configuration: `resident360://auth/callback` present in
       **Redirect URLs**; Site URL set to the production web origin.
 - [ ] Auth → Email: **Confirm email** enabled (the flows below assume it; with it
       off, sign-up signs the user straight in and step 5A.2 becomes ⏭️).
 - [ ] Auth → Email templates for _Confirm signup_ and _Reset password_ use the
       token-hash form:
-      `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup&redirect_to=societyexpense://auth/callback`
+      `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup&redirect_to=resident360://auth/callback`
       The default template also works (see 5A.6), but the token-hash form is the
       one that survives mail-client link rewriting.
 - [ ] Auth → Providers → Google enabled, with the iOS/Android client IDs; the
@@ -270,12 +270,12 @@ reset role;
 
 ### 5G — Deep links
 
-1. ☐ `societyexpense://join?code=ABC123` cold start (app not running) → opens
+1. ☐ `resident360://join?code=ABC123` cold start (app not running) → opens
    the join screen with the code prefilled.
 2. ☐ Same link warm (app in background, already signed in) → same result.
 3. ☐ Confirmation link cold start → verify screen, session installed.
 4. ☐ Recovery link cold start → reset screen, not the welcome screen.
-5. ☐ A URL that is not ours (`societyexpense://nonsense`) → ignored, no crash, app
+5. ☐ A URL that is not ours (`resident360://nonsense`) → ignored, no crash, app
    stays where it was.
 
 ### 5H — Logout

@@ -1,4 +1,11 @@
+import type { Society, SocietyMembership } from "@ses/domain";
+
 import { REQUEST_ACTOR_KEY, type VerifiedActor } from "../auth/actor";
+import {
+  REQUEST_MEMBERSHIP_KEY,
+  REQUEST_SOCIETY_KEY,
+  type SocietyAuthorizationContext,
+} from "../authorization/society-authorization";
 
 /**
  * Narrow accessors for the two places this codebase has to touch the HTTP
@@ -104,6 +111,67 @@ export function writeRequestActor(
  * back to Fastify's `header`. Silent when neither exists — a missing correlation
  * header must never be the thing that fails a request.
  */
+/**
+ * The society `SocietyGuard` resolved for this request, if the route asked for
+ * one.
+ *
+ * Written by the guard (which runs before the async context exists) and read back
+ * by `@Ctx()`, the request-context interceptor and anything that needs the tenant
+ * without taking it as a parameter. Absent on every route that declares no
+ * permission, which is most of them — this is not "the society of this request"
+ * so much as "the society this route said it needed".
+ */
+export function readRequestSociety(request: unknown): Society | undefined {
+  if (typeof request !== "object" || request === null) {
+    return undefined;
+  }
+  const society: unknown = (request as Record<string, unknown>)[
+    REQUEST_SOCIETY_KEY
+  ];
+  return typeof society === "object" && society !== null
+    ? (society as Society)
+    : undefined;
+}
+
+/**
+ * The caller's membership in that society. The guard for the permissions that
+ * depend on it and the repositories for the tenant it scopes — never a source of
+ * authority on its own beyond what `can()` grants.
+ */
+export function readRequestMembership(
+  request: unknown,
+): SocietyMembership | undefined {
+  if (typeof request !== "object" || request === null) {
+    return undefined;
+  }
+  const membership: unknown = (request as Record<string, unknown>)[
+    REQUEST_MEMBERSHIP_KEY
+  ];
+  return typeof membership === "object" && membership !== null
+    ? (membership as SocietyMembership)
+    : undefined;
+}
+
+/**
+ * Attaches the resolved society context for the rest of the request.
+ *
+ * Both halves at once, from one call: the two are always produced by the same
+ * read (`society_snapshot`), and letting them be written separately would allow a
+ * request whose membership belongs to a different society than its
+ * `currentSociety` — an inconsistency no later layer would notice.
+ */
+export function writeRequestSocietyContext(
+  request: unknown,
+  context: SocietyAuthorizationContext,
+): void {
+  if (typeof request !== "object" || request === null) {
+    return;
+  }
+  const target = request as Record<string, unknown>;
+  target[REQUEST_SOCIETY_KEY] = context.society;
+  target[REQUEST_MEMBERSHIP_KEY] = context.membership;
+}
+
 export function writeResponseHeader(
   response: unknown,
   name: string,

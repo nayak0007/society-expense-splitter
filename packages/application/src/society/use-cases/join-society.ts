@@ -31,6 +31,21 @@ import type { SocietyDeps } from "./support";
 export interface JoinSocietyCommand {
   readonly code: string;
   readonly occupancyType: OccupancyType;
+  /**
+   * The flat the requester claims (T049), or `null`/absent when they did not pick one.
+   *
+   * T049's headline: PRD §3.2's flow selects a flat from the society's real list, and the
+   * *reviewer* is who the choice is for — a claim an Admin confirms, corrects or refuses
+   * with the other claimants visible. A request without one stays legitimate (a society
+   * whose flats are not recorded yet still has to be joinable), and the Admin assigns the
+   * flat at approval.
+   */
+  readonly apartmentId?: string | null | undefined;
+  /**
+   * The optional note to the reviewer. Bounded and trimmed by `createJoinNote`, so the
+   * value that reaches the row is the value the queue renders.
+   */
+  readonly message?: string | null | undefined;
 }
 
 export async function joinSociety(
@@ -38,7 +53,12 @@ export async function joinSociety(
   actor: UserId,
   command: JoinSocietyCommand,
 ): Promise<Result<SocietyMembership, ReturnType<typeof asSocietyError>>> {
-  const request = createSocietyJoinRequest(command.code, command.occupancyType);
+  const request = createSocietyJoinRequest(
+    command.code,
+    command.occupancyType,
+    command.apartmentId,
+    command.message,
+  );
   if (!request.ok) return request;
 
   try {
@@ -66,7 +86,12 @@ export async function joinSociety(
     }
 
     const membership = await deps.repository.join(
-      { code: request.value.code, occupancyType: request.value.occupancyType },
+      {
+        code: request.value.code,
+        occupancyType: request.value.occupancyType,
+        apartmentId: request.value.apartmentId,
+        note: request.value.note,
+      },
       actor,
     );
     return ok(membership);

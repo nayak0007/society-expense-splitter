@@ -88,32 +88,47 @@ function issueReceivedOf(issue: ZodIssueLike): unknown {
 export class ZodPipe<TOutput> implements PipeTransform<unknown, TOutput> {
   constructor(private readonly schema: ZodType<TOutput>) {}
 
-  // `_metadata` is unused: returning the parsed value is enough. Prefixed with
-  // an underscore because `noUnusedParameters` is enabled and this signature is
-  // fixed by the interface.
-  transform(value: unknown, _metadata: ArgumentMetadata): TOutput {
+  /**
+   * `metadata.data` is the parameter's name, and it is used for exactly one case: a
+   * **scalar** parameter.
+   *
+   * A path parameter is validated with `@Param("memberId", new ZodPipe(z.uuid()))`, and a
+   * failure on a scalar schema has an *empty* issue path — there is no object to name — so
+   * the field used to be reported as `"(root)"`. That is unusable for the one thing
+   * `field` exists for: a client attaching the failure to the input the user typed in. For
+   * a body, which is an object, the path already names the field and this contributes
+   * nothing; the fallback only applies when the path is empty.
+   */
+  transform(value: unknown, metadata: ArgumentMetadata): TOutput {
     const result = this.schema.safeParse(value);
 
     if (result.success) {
       return result.data;
     }
 
-    throw this.toException(result.error);
+    throw this.toException(
+      result.error,
+      typeof metadata.data === "string" && metadata.data !== ""
+        ? metadata.data
+        : undefined,
+    );
   }
 
   private toException(
     error: ZodError,
+    parameterName: string | undefined,
   ): BadRequestException | UnprocessableEntityException {
     const issues = error.issues;
 
     const details = issues.map((issue) => {
+      const path = formatPath(issue.path);
       const detail = {
-        field: formatPath(issue.path),
+        field: path === "" ? (parameterName ?? "(root)") : path,
         code: issueCodeOf(issue),
         message: issue.message,
         received: issueReceivedOf(issue),
       };
-      return detail.field === "" ? { ...detail, field: "(root)" } : detail;
+      return detail;
     });
 
     // One classification for the whole payload: if any part of the shape is

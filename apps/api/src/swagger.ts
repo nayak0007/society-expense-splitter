@@ -23,10 +23,10 @@ import type { AppConfig } from "./config/app-config";
  * were excluded, which was simply untrue of the generated output.
  */
 
-const API_TITLE = "Society Expense Splitter API";
+const API_TITLE = "Resident 360 API";
 const API_VERSION = "1.0.0";
 const API_DESCRIPTION = [
-  "The SES API. Money is always integer paise in a `*Paise` field; timestamps are",
+  "The Resident 360 API. Money is always integer paise in a `*Paise` field; timestamps are",
   "ISO-8601 UTC with milliseconds. Success responses are `{ data, meta }`; failures",
   "are `{ error: { code, message, requestId, timestamp, docs } }`.",
 ].join(" ");
@@ -37,8 +37,9 @@ export function buildOpenApiDocument(app: INestApplication): OpenAPIObject {
     .setDescription(API_DESCRIPTION)
     .setVersion(API_VERSION)
     // Declared now so the first authenticated route inherits the scheme rather
-    // than each controller describing it. The token is a Supabase-issued RS256
-    // JWT (SAD §9.1), verified by the API against Supabase's JWKS.
+    // than each controller describing it. The token is a Supabase-issued JWT
+    // (SAD §9.1) — RS256 or ES256 depending on the project's key generation —
+    // verified by the API against Supabase's JWKS.
     .addBearerAuth(
       { type: "http", scheme: "bearer", bearerFormat: "JWT" },
       "supabase-jwt",

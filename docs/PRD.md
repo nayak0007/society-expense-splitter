@@ -1,4 +1,4 @@
-# Society Expense Splitter — Product Requirements Document
+# Resident 360 — Product Requirements Document
 
 **Version:** 1.0
 **Status:** Source of truth for implementation
@@ -351,7 +351,7 @@ The creator becomes Society Admin. A `society_settings` row and a default set of
 ### Join Society
 Three paths:
 - **Join code:** 6-character alphanumeric, uppercase, ambiguity-free alphabet (no `0/O/1/I`). Regenerable by Admin; optional expiry.
-- **Deep link / QR:** `societyexpense://join?code=XXXXXX` plus an `https://` universal link fallback. QR displayed by Admin at the notice board or society gate.
+- **Deep link / QR:** `resident360://join?code=XXXXXX` plus an `https://` universal link fallback. QR displayed by Admin at the notice board or society gate.
 - **Search:** by city + society name; produces a *request to join* (never auto-approve).
 
 Join flow: enter code → preview society (name, city, member count) → select building/wing/flat from the actual apartment list → declare occupancy (`owner | tenant | family_member`) → submit → status `pending` → Admin/Treasurer approves → role assigned.
@@ -2692,7 +2692,7 @@ Alternatives: Clerk (best DX, excellent UI components, but priced per MAU which 
 Feature-first (vertical slices), not type-first. A developer changing expenses should touch one directory.
 
 ```
-society-expense-splitter/
+resident-360/
 ├── apps/
 │   ├── mobile/                          # Expo app
 │   │   ├── app/                         # Expo Router routes ONLY (thin)
@@ -3136,7 +3136,7 @@ Implement the §2.1 matrix as a single `PERMISSIONS` map in `packages/validation
 
 **Task 9 — Expo app shell + routing.**
 Expo Router with the `(auth)` / `(setup)` / `(app)` / `(modals)` groups from §5.1, splash route resolver, deep-link configuration, and typed routes.
-*DoD:* navigating to every top-level route renders a placeholder; `societyexpense://expenses/123` opens the right screen.
+*DoD:* navigating to every top-level route renders a placeholder; `resident360://expenses/123` opens the right screen.
 
 **Task 10 — Design system.**
 MD3 theme from the `#2E7D5B` seed with generated light/dark schemes, Inter + Noto Sans Devanagari via `expo-font`, type scale, spacing tokens, and the shared `ui/` primitives: `Screen`, `Button`, `Card`, `Money`, `Chip`, `EmptyState`, `Skeleton`, `ErrorState`, `BottomSheet`, `ConfirmSheet`.

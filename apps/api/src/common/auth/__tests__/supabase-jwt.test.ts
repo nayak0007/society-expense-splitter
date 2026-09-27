@@ -204,6 +204,29 @@ describe("SupabaseJwtVerifier", () => {
     });
   });
 
+  it("accepts an ES256 token from a project that signs with ECDSA", async () => {
+    // Regression, and the reason the allowlist is a set rather than one value:
+    // the deployed project publishes an EC P-256 key (`kty: "EC"`) and signs
+    // `ES256`. A single pinned `RS256` rejected every real token with `"alg"
+    // (Algorithm) Header Parameter value not allowed`, which presented as a
+    // blanket 401 on every authenticated request. Verified against live JWKS:
+    //
+    //   {"alg":"ES256","crv":"P-256","kty":"EC","use":"sig","kid":"ed449a23-…"}
+    const { publicKey, privateKey } = await generateKeyPair("ES256", {
+      extractable: true,
+    });
+    const jwk = await exportJWK(publicKey);
+    const jwks = createLocalJWKSet({
+      keys: [{ ...jwk, alg: "ES256", kid: "ec-key-1" }],
+    });
+
+    await expect(
+      verifierWith(jwks).verify(
+        await sign(privateKey, { alg: "ES256", kid: "ec-key-1" }),
+      ),
+    ).resolves.toMatchObject({ userId: USER_ID });
+  });
+
   it("refuses a token signed by a key the project does not publish", async () => {
     const keys = await makeKeySet();
     const attacker = await generateKeyPair("RS256", { extractable: true });

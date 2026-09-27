@@ -4,6 +4,7 @@ import type {
   CreateSocietyInput,
   JoinSocietyInput,
   Society,
+  SocietyJoinOptions,
   SocietyJoinPreview,
   SocietyMembership,
   UpdateSocietyInput,
@@ -68,6 +69,36 @@ export interface SocietyRepository {
 
   remove(id: SocietyId, actor: UserId): Promise<void>;
 
+  /**
+   * The flats a join code's society offers the join screen, narrowed by a search term
+   * (T049; PRD §3.2's "select building/wing/flat from the actual apartment list").
+   *
+   * Keyed by the **code**, not by the society id, and that is the authorisation rather
+   * than a convenience: the requester is not a member yet, so no policy can serve the read
+   * — the code is what grants the ability to join at all, and an id-addressed variant would
+   * be an enumeration endpoint for anyone who guessed one.
+   *
+   * An unknown or dead code is `join_code_invalid` — the same answer `findJoinPreview`
+   * gives, so the join screen has one string for "no such society". Expiry is *not* judged
+   * here, exactly as in the preview: the domain evaluates it against the injected clock so
+   * a code that expires between two requests does not produce two different answers.
+   */
+  joinOptions(
+    rawCode: string,
+    query: {
+      readonly query?: string | undefined;
+      readonly limit?: number | undefined;
+    },
+    actor: UserId,
+  ): Promise<SocietyJoinOptions>;
+
+  /**
+   * Ask to join with a code (PRD §3.2: "never auto-approve").
+   *
+   * The row it writes is this module's and the member module's at once — a pending
+   * membership is the join request (see `@ses/domain`'s `join-requests.ts`) — which is why
+   * the write lives here: the join code is the credential, and the code is a society.
+   */
   join(input: JoinSocietyInput, actor: UserId): Promise<SocietyMembership>;
 
   leave(id: SocietyId, actor: UserId): Promise<void>;

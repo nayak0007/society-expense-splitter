@@ -282,7 +282,46 @@ describe("createSocietyJoinRequest", () => {
     expect(expectOk(createSocietyJoinRequest(" gv4k-2m ", "tenant"))).toEqual({
       code: "GV4K2M",
       occupancyType: "tenant",
+      apartmentId: null,
+      note: null,
     });
+  });
+
+  it("carries the chosen flat and the trimmed note when the form sends them", () => {
+    // T049: the join flow selects a flat and may attach a message, so both travel on the
+    // command. A blank note is *no* note (`createJoinNote`), never an empty string.
+    expect(
+      expectOk(
+        createSocietyJoinRequest(
+          "GV4K2M",
+          "tenant",
+          "dddddddd-0000-4000-8000-000000000001",
+          "  Tenant of A-402  ",
+        ),
+      ),
+    ).toEqual({
+      code: "GV4K2M",
+      occupancyType: "tenant",
+      apartmentId: "dddddddd-0000-4000-8000-000000000001",
+      note: "Tenant of A-402",
+    });
+    expect(
+      expectOk(createSocietyJoinRequest("GV4K2M", "owner", "", "   ")),
+    ).toEqual({
+      code: "GV4K2M",
+      occupancyType: "owner",
+      apartmentId: null,
+      note: null,
+    });
+  });
+
+  it("refuses a note beyond the member note's own bound, naming the field", () => {
+    const error = expectErr(
+      createSocietyJoinRequest("GV4K2M", "tenant", null, "x".repeat(501)),
+    );
+
+    expect(error.code).toBe("validation");
+    expect(error.details).toMatchObject({ field: "message" });
   });
 
   it("rejects a malformed code with the field named", () => {

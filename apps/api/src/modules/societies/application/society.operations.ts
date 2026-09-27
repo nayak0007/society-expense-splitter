@@ -5,6 +5,12 @@ import {
   getSocietyProfile,
   joinSociety,
   leaveSociety,
+  // Aliased because the methods below carry the same names, and an unqualified
+  // call inside a class body resolves to the import, not to `this.<method>` —
+  // which reads as a method call while doing the opposite.
+  listMemberships as listMembershipsUseCase,
+  listSocietyMemberships as listSocietyMembershipsUseCase,
+  listJoinOptions,
   listSocietySummaries,
   lookupJoinCode,
   regenerateJoinCode,
@@ -13,6 +19,7 @@ import {
 import type {
   CreateSocietyCommand,
   CreatedSociety,
+  JoinOptionsQuery,
   JoinSocietyCommand,
   SocietyDeps,
   SocietyProfileView,
@@ -24,6 +31,7 @@ import type {
   Society,
   SocietyError,
   SocietyId,
+  SocietyJoinOptions,
   SocietyMembership,
   SocietyJoinPreview,
   SocietyRepository,
@@ -89,8 +97,42 @@ export class SocietyOperations {
     return unwrap(lookupJoinCode(this.deps, code));
   }
 
+  /**
+   * The flats a join code's society offers (T049).
+   *
+   * Takes the actor even though the code is the credential: the endpoint is authenticated
+   * (the function is granted to `authenticated` only — a code oracle reachable by `anon`
+   * with no rate limiting is a brute-force surface, the same argument
+   * `society_join_preview` records), and the repository's transaction identity is the caller.
+   */
+  async joinOptions(
+    actor: UserId,
+    code: string,
+    query: JoinOptionsQuery,
+  ): Promise<SocietyJoinOptions> {
+    return unwrap(listJoinOptions(this.deps, actor, code, query));
+  }
+
   async profile(actor: UserId, id: SocietyId): Promise<SocietyProfileView> {
     return unwrap(getSocietyProfile(this.deps, actor, id));
+  }
+
+  /**
+   * The caller's own memberships.
+   *
+   * Separate from `list`, which returns summaries: a summary carries the
+   * *society's* id, whereas this carries the membership's — a client that read
+   * one of these as the other would hold a society id in a `MemberId`.
+   */
+  async listMemberships(actor: UserId): Promise<readonly SocietyMembership[]> {
+    return unwrap(listMembershipsUseCase(this.deps, actor));
+  }
+
+  async listSocietyMemberships(
+    actor: UserId,
+    id: SocietyId,
+  ): Promise<readonly SocietyMembership[]> {
+    return unwrap(listSocietyMembershipsUseCase(this.deps, actor, id));
   }
 
   async update(

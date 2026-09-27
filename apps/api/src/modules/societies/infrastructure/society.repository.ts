@@ -11,13 +11,19 @@ import type {
   JoinSocietyInput,
   Society,
   SocietyId,
+  SocietyJoinOptions,
   SocietyJoinPreview,
   SocietyMembership,
   SocietyRepository,
+  StructureMembershipReader,
   UpdateSocietyInput,
   UserId,
 } from "@ses/domain";
 
+import type {
+  SocietyAuthorizationContext,
+  SocietyAuthorizationReader,
+} from "../../../common/authorization/society-authorization";
 import {
   UnitOfWork,
   type TransactionActor,
@@ -26,6 +32,8 @@ import {
 import {
   createPayload,
   isJoinCodeCollision,
+  joinOptionsFromPayload,
+  joinOptionsSchema,
   joinPreviewFromPayload,
   joinPreviewSchema,
   memberRowListSchema,
@@ -76,7 +84,12 @@ import type { MemberRow, SocietySnapshot } from "./society.rows";
  * rather than from anything sent here.
  */
 @Injectable()
-export class SocietyRepositoryPostgres implements SocietyRepository {
+export class SocietyRepositoryPostgres
+  implements
+    SocietyRepository,
+    SocietyAuthorizationReader,
+    StructureMembershipReader
+{
   constructor(private readonly unitOfWork: UnitOfWork) {}
 
   // ── read ────────────────────────────────────────────────────────────────────
@@ -139,6 +152,44 @@ export class SocietyRepositoryPostgres implements SocietyRepository {
     });
   }
 
+  /**
+   * The caller's own membership row in one society, or `null`.
+   *
+   * Satisfies `StructureMembershipReader` (`@ses/domain`), which the building
+   * module consumes — see that interface for why the implementation lives here
+   * rather than in the structure module. One indexed lookup on
+   * `uq_members_society_user`, not a roster read: the caller needs their own role
+   * and nothing else.
+   *
+   * Returns a `pending` or `removed` row rather than filtering it, because the
+   * *caller* has to distinguish "not a member" (`not_found`) from "a member whose
+   * role is insufficient" (`forbidden`), and collapsing the two here would move
+   * that rule into every consumer.
+   */
+  async findMembership(
+    societyId: SocietyId,
+    actor: UserId,
+  ): Promise<SocietyMembership | null> {
+    return this.run(actor, "read", async (tx) => {
+      const rows = await query(
+        tx,
+        sql`
+          select id, society_id, user_id, role, status, occupancy, joined_at
+            from public.members
+           where society_id = ${societyId}::uuid
+             and user_id = ${actor}::uuid
+           limit 1
+        `,
+      );
+      const [row] = parseMemberRows(rows);
+      // A shadow member (no `user_id`) cannot be represented by the domain, and
+      // cannot be the caller of an authenticated request; `null` is the honest
+      // answer for both it and "no row".
+      if (row === undefined || row.user_id === null) return null;
+      return membershipFromRow(row);
+    });
+  }
+
   /** One society, whole, for a member of it — `null` for anyone else. */
   async findById(id: SocietyId, actor: UserId): Promise<Society | null> {
     return this.run(actor, "read", async (tx) => {
@@ -146,6 +197,93 @@ export class SocietyRepositoryPostgres implements SocietyRepository {
       // `null` is the function's way of saying "no live membership for you",
       // which the port requires to be indistinguishable from "no such society".
       return snapshot === null ? null : societyFromSnapshot(snapshot);
+    });
+  }
+
+  /**
+   * The guard's read: the society and the caller's membership, in one query.
+   *
+   * Deliberately the same `society_snapshot()` call `findById` uses, rather than
+   * a second query bolted on for the guard. That function already answers
+   * membership and existence together — it returns `null` for a non-member, for a
+   * deleted society, and for one that never existed — so asking it once gives the
+   * guard everything `SocietyAuthorizationReader` promises, under the caller's own
+   * RLS identity, with no opportunity for the two answers to disagree.
+   *
+   * `membership === null` is a state the RPC should not produce for a caller who
+   * passed the membership predicate, and `user_id === null` means a shadow member
+   * (PRD §3.2, no account yet) — which the domain cannot represent, since
+   * `SocietyMembership.userId` is a `UserId`. Both are reported as "no membership"
+   * rather than thrown: this is a guard, and the safe answer to an unrepresentable
+   * membership is to treat the caller as not a member.
+   */
+  async load(
+    societyId: SocietyId,
+    actor: UserId,
+  ): Promise<SocietyAuthorizationContext | null> {
+    return this.run(actor, "read", async (tx) => {
+      const snapshot = await this.snapshot(tx, societyId);
+      if (
+        snapshot === null ||
+        snapshot.membership === null ||
+        snapshot.membership.user_id === null
+      ) {
+        return null;
+      }
+      return {
+        society: societyFromSnapshot(snapshot),
+        membership: membershipFromRow(snapshot.membership),
+      };
+    });
+  }
+
+  /**
+   * The flats a join code's society offers, for the join screen's selector (T049).
+   *
+   * Runs as the **caller** (authenticated, no membership), which is exactly why the read goes
+   * through `society_join_options()`: `apartments_select_member` requires
+   * `is_society_member(society_id, true)`, so no policy can serve a requester who has not
+   * joined yet — the join code is the credential, and the function is the venue.
+   *
+   * An unknown code arrives as `P0001/SOCIETY_JOIN_CODE_INVALID` and is classified into the
+   * society vocabulary, so the screen shows the same string the submission would.
+   */
+  async joinOptions(
+    rawCode: string,
+    options: {
+      readonly query?: string | undefined;
+      readonly limit?: number | undefined;
+    },
+    actor: UserId,
+  ): Promise<SocietyJoinOptions> {
+    const code = normalizeJoinCode(rawCode);
+    if (code.length === 0) {
+      throw new SocietyError(
+        "join_code_invalid",
+        "That join code does not match any society.",
+      );
+    }
+
+    return this.run(actor, "read", async (tx) => {
+      const rows = await query(
+        tx,
+        sql`select public.society_join_options(
+              ${code},
+              ${options.query ?? null},
+              ${options.limit ?? null}
+            ) as options`,
+      );
+      const payload = firstValue(rows, "options");
+      if (payload === null || payload === undefined) {
+        // The function either returns a payload or raises; a `null` here would mean a
+        // signature change nobody noticed, so it is reported as the shape error it is.
+        throw unexpectedShapeError("join options");
+      }
+      const parsed = joinOptionsSchema.safeParse(payload);
+      if (!parsed.success) {
+        throw unexpectedShapeError("join options");
+      }
+      return joinOptionsFromPayload(parsed.data);
     });
   }
 
@@ -287,11 +425,41 @@ export class SocietyRepositoryPostgres implements SocietyRepository {
   /**
    * Ask to join with a code (never auto-approved — PRD §3.2).
    *
-   * One transaction for all three steps. The write is pinned to
+   * One transaction for all five steps. The write is pinned to
    * `user_id = actor` and to the `pending`/`resident` defaults *by the column
    * grant*, so a tampered caller cannot approve itself; a race is answered by
    * `members_society_user_key`, which the error classifier reports as
    * `already_member`.
+   *
+   * ## The flat, the note, and the four states a caller can arrive in (T049)
+   *
+   * | Row the actor already has | Answer                                                                 |
+   * | ------------------------- | ---------------------------------------------------------------------- |
+   * | none                      | insert a `pending` request carrying the flat and note                  |
+   * | `pending`                 | `already_member` — "you have already asked"; a second row is refused by `members_society_user_key` anyway, this says so in words |
+   * | `active` / `inactive`     | `already_member` — they are in the society                                |
+   * | `rejected`                | re-ask: the same row returns to `pending` with the new claim             |
+   * | `removed`                 | re-ask: the same row returns to `pending`, `removed_at` cleared          |
+   *
+   * The `rejected` branch is T049's: `chk_member_self_change()` allows exactly that transition,
+   * and it is the difference between "rejected once, wrong flat, ask again" and a dead end that
+   * only an Admin can unlock. The previous rejection's reason survives on the row, so the next
+   * reviewer sees what the last one decided.
+   *
+   * ## Why the flat is checked through a function
+   *
+   * `is_live_society_apartment()` is `SECURITY DEFINER` because the caller is not a member yet:
+   * `apartments_select_member` requires `is_society_member(society_id, true)`, so a
+   * policy-filtered existence check would answer "no" to every flat. The composite foreign key
+   * would catch another tenant's flat, but not a *soft-deleted* one in this society — and a
+   * request that claims a flat being removed would only fail at approval, with the message meant
+   * for a different situation.
+   *
+   * `join_request_blocking_shadow()` is the same shape for the same reason, and it closes the one
+   * collision that ends in money: if the Admin has already recorded this person as a shadow
+   * occupant, activating a second row would bill the same flat's occupant twice. The designed
+   * path for that person is an invitation (T047 links the shadow row); this refuses the join
+   * request and says so.
    */
   async join(
     input: JoinSocietyInput,
@@ -318,6 +486,44 @@ export class SocietyRepositoryPostgres implements SocietyRepository {
       }
       const societyId = asSocietyId(parsedPreview.data.id);
 
+      const occupancy = occupancyToRow(input.occupancyType);
+
+      // The two facts a requester cannot read for themselves, resolved by definer functions:
+      // the flat is a live flat of this society, and this person is not already recorded here
+      // as a shadow occupant. Both are refused *before* anything is written, so a request is
+      // never accepted and then found to be a duplicate.
+      if (input.apartmentId !== null) {
+        const flatRows = await query(
+          tx,
+          sql`select public.is_live_society_apartment(
+                ${input.apartmentId}::uuid,
+                ${societyId}::uuid
+              ) as ok`,
+        );
+        if (firstValue(flatRows, "ok") !== true) {
+          throw new SocietyError(
+            "validation",
+            "That flat is not an available flat of this society.",
+            { field: "apartmentId" },
+          );
+        }
+      }
+
+      const shadowRows = await query(
+        tx,
+        sql`select public.join_request_blocking_shadow(
+              ${societyId}::uuid,
+              ${actor}::uuid
+            ) as shadow`,
+      );
+      if (firstValue(shadowRows, "shadow") != null) {
+        throw new SocietyError(
+          "already_member",
+          "An occupant is already recorded for your number in this society. Ask an Admin for an invitation link.",
+          { field: "phone" },
+        );
+      }
+
       const existingRows = await query(
         tx,
         sql`
@@ -330,20 +536,30 @@ export class SocietyRepositoryPostgres implements SocietyRepository {
       const [existing] = parseMemberRows(existingRows);
 
       if (existing !== undefined) {
-        if (existing.status !== "removed") {
+        if (existing.status === "active" || existing.status === "inactive") {
           throw new SocietyError(
             "already_member",
             "You are already a member of this society.",
           );
         }
-        // Re-joining after leaving: the row is history and is re-asked, never
-        // re-created. The self-change trigger allows exactly this transition.
+        if (existing.status === "pending") {
+          throw new SocietyError(
+            "already_member",
+            "You have already asked to join this society. An Admin has to approve it.",
+          );
+        }
+        // `removed` (left or withdrew) and `rejected` (refused, asking again): the row is history
+        // and is re-asked, never re-created. `chk_member_self_change()` allows exactly these two
+        // transitions, and it is also what refuses a self-approval if a caller tried to write
+        // `active` here instead.
         const reasked = await query(
           tx,
           sql`
             update public.members
                set status = 'pending',
-                   occupancy = ${occupancyToRow(input.occupancyType)},
+                   occupancy = ${occupancy},
+                   apartment_id = ${input.apartmentId}::uuid,
+                   request_note = ${input.note},
                    removed_at = null
              where id = ${existing.id}::uuid
             returning id, society_id, user_id, role, status, occupancy, joined_at
@@ -355,11 +571,15 @@ export class SocietyRepositoryPostgres implements SocietyRepository {
       const inserted = await query(
         tx,
         sql`
-          insert into public.members (society_id, user_id, occupancy)
+          insert into public.members (
+            society_id, user_id, occupancy, apartment_id, request_note
+          )
           values (
             ${societyId}::uuid,
             ${actor}::uuid,
-            ${occupancyToRow(input.occupancyType)}
+            ${occupancy},
+            ${input.apartmentId}::uuid,
+            ${input.note}
           )
           returning id, society_id, user_id, role, status, occupancy, joined_at
         `,

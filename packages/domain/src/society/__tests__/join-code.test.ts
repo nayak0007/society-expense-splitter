@@ -77,9 +77,7 @@ describe("normalizeJoinCode", () => {
   });
 
   it("unwraps a deep link pasted as text", () => {
-    expect(normalizeJoinCode("societyexpense://join?code=gv4k2m")).toBe(
-      "GV4K2M",
-    );
+    expect(normalizeJoinCode("resident360://join?code=gv4k2m")).toBe("GV4K2M");
   });
 
   it("unwraps an https link with a code query parameter", () => {
@@ -129,7 +127,7 @@ describe("deep links", () => {
 
   it("returns null for a URL that is not a join link", () => {
     expect(
-      parseJoinDeepLink("societyexpense://auth/callback#access_token=x"),
+      parseJoinDeepLink("resident360://auth/callback#access_token=x"),
     ).toBeNull();
     expect(
       parseJoinDeepLink("https://example.com/join?code=GV4K2M"),

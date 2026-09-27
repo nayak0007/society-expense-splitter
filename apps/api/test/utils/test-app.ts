@@ -1,8 +1,21 @@
 import { Test } from "@nestjs/testing";
+import type { Type } from "@nestjs/common";
 import type { NestFastifyApplication } from "@nestjs/platform-fastify";
 import type { HealthIndicatorResult } from "@nestjs/terminus";
 import type { JWTVerifyGetKey } from "jose";
-import type { SocietyRepository } from "@ses/domain";
+import type {
+  ApartmentRepository,
+  BuildingRepository,
+  InvitationRepository,
+  InvitationTokenPort,
+  MemberRepository,
+  SocietyRepository,
+  StructureMembershipReader,
+} from "@ses/domain";
+
+import { MEMBERSHIP_READER } from "../../src/common/authorization/membership-reader";
+import { SOCIETY_AUTHORIZATION_READER } from "../../src/common/authorization/society-authorization";
+import type { SocietyAuthorizationReader } from "../../src/common/authorization/society-authorization";
 
 import { AppModule } from "../../src/app.module";
 import { createAdapter, GLOBAL_PREFIX } from "../../src/bootstrap";
@@ -10,7 +23,16 @@ import { SUPABASE_JWKS } from "../../src/common/auth/supabase-jwt";
 import { MigrationsIndicator } from "../../src/modules/health/indicators/migrations.indicator";
 import { PostgresIndicator } from "../../src/modules/health/indicators/postgres.indicator";
 import { RedisIndicator } from "../../src/modules/health/indicators/redis.indicator";
+import {
+  INVITATION_REPOSITORY,
+  INVITATION_TOKENS,
+} from "../../src/modules/invitations/application/invitation.tokens";
+import { MEMBER_REPOSITORY } from "../../src/modules/members/application/member.tokens";
 import { SOCIETY_REPOSITORY } from "../../src/modules/societies/application/society.tokens";
+import {
+  APARTMENT_REPOSITORY,
+  BUILDING_REPOSITORY,
+} from "../../src/modules/structure/application/structure.tokens";
 
 /**
  * Boots the **real** `AppModule` for integration tests.
@@ -60,6 +82,81 @@ export type TestAppOptions = {
    * mappers. Without it, every society route would need a live database.
    */
   repository?: SocietyRepository;
+  /**
+   * Substitutes the guard chain's membership read (T038).
+   *
+   * A separate seam from `repository` because the two are bound to the same
+   * instance via `useExisting`: a suite exercising the guards needs a reader it
+   * controls, and one that swapped only `repository` would leave the real
+   * Postgres adapter — and therefore a database — in the chain.
+   */
+  reader?: SocietyAuthorizationReader;
+  /**
+   * Substitutes the building repository (T042).
+   *
+   * A third seam, because the building routes are the first in the API to run the
+   * whole guard chain: the society module's routes are addressed by a path
+   * parameter and reach the database directly, so a suite that swapped only
+   * `repository` still has a real `BuildingRepositoryPostgres` in the graph.
+   */
+  buildings?: BuildingRepository;
+  /**
+   * Substitutes the flat repository (T043).
+   *
+   * A fourth seam and not a widening of `buildings`: the two are separate ports
+   * with separate adapters, and the flats' tests need one substituted while the
+   * buildings' stay real — otherwise a suite could not exercise the
+   * "building still has flats" refusal without a database.
+   */
+  apartments?: ApartmentRepository;
+  /**
+   * Substitutes the member repository (T045).
+   *
+   * A fifth seam, and the member routes are the first whose module needs **no** cross-module
+   * membership reader: the caller's own membership is read from `members` by the same port, so
+   * one fake covers the guard's separate read and the use cases' — see `members.module.ts` for
+   * why that dependency is absent rather than forgotten.
+   */
+  members?: MemberRepository;
+  /**
+   * Substitutes the invitation repository (T047).
+   *
+   * A sixth seam, and the invitations module borrows the member fake through the `members` one:
+   * "may this caller invite?" is the member module's `member.invite` cell, and the invitations e2e
+   * suite points both seams at the same fixture on purpose rather than by accident — that shared
+   * answer is exactly what the module reuse is for.
+   */
+  invitations?: InvitationRepository;
+  /**
+   * Substitutes the token port, or leaves the **real** one in place.
+   *
+   * Left real by default, and that is the interesting default: the digest the fake repository
+   * receives is then genuinely `sha256(token)` of the token the caller was handed, so a suite can
+   * assert the property that matters (the token travels; the digest is what storage sees) rather
+   * than assert against a stub that agrees with itself.
+   */
+  invitationTokens?: InvitationTokenPort;
+  /**
+   * Substitutes the caller's membership read used by the building use cases.
+   *
+   * Separate from `reader` (which `SocietyGuard` uses) even though both are
+   * satisfied by the same class in production: a suite has to be able to give the
+   * guard one answer and the use case another to prove the two are independent
+   * gates — and, in the ordinary case, must be able to point them at the same
+   * fixture deliberately rather than by accident.
+   */
+  membershipReader?: StructureMembershipReader;
+  /**
+   * Extra controllers to mount alongside `AppModule`.
+   *
+   * The authorization chain has no production route to exercise yet: every
+   * society route is addressed by a path parameter, and the header-scoped routes
+   * belong to the modules that do not exist (expenses, payments). Rather than
+   * invent a real endpoint or weaken a guard to make it testable, a suite mounts a
+   * throwaway controller and lets the *global* guards govern it — which is also the
+   * property worth proving, since a route registered here never opts into anything.
+   */
+  controllers?: readonly Type<unknown>[];
 };
 
 /** A stand-in indicator whose only job is to report the status the test asked for. */
@@ -79,7 +176,10 @@ function fakeIndicator(
 export async function createTestApp(
   options: TestAppOptions = {},
 ): Promise<NestFastifyApplication> {
-  const builder = Test.createTestingModule({ imports: [AppModule] })
+  const builder = Test.createTestingModule({
+    imports: [AppModule],
+    controllers: [...(options.controllers ?? [])],
+  })
     .overrideProvider(PostgresIndicator)
     .useValue(fakeIndicator("postgres", options.postgres ?? "up"))
     .overrideProvider(RedisIndicator)
@@ -97,6 +197,35 @@ export async function createTestApp(
   if (options.repository !== undefined) {
     builder.overrideProvider(SOCIETY_REPOSITORY).useValue(options.repository);
   }
+  if (options.reader !== undefined) {
+    builder
+      .overrideProvider(SOCIETY_AUTHORIZATION_READER)
+      .useValue(options.reader);
+  }
+  if (options.buildings !== undefined) {
+    builder.overrideProvider(BUILDING_REPOSITORY).useValue(options.buildings);
+  }
+  if (options.apartments !== undefined) {
+    builder.overrideProvider(APARTMENT_REPOSITORY).useValue(options.apartments);
+  }
+  if (options.members !== undefined) {
+    builder.overrideProvider(MEMBER_REPOSITORY).useValue(options.members);
+  }
+  if (options.invitations !== undefined) {
+    builder
+      .overrideProvider(INVITATION_REPOSITORY)
+      .useValue(options.invitations);
+  }
+  if (options.invitationTokens !== undefined) {
+    builder
+      .overrideProvider(INVITATION_TOKENS)
+      .useValue(options.invitationTokens);
+  }
+  if (options.membershipReader !== undefined) {
+    builder
+      .overrideProvider(MEMBERSHIP_READER)
+      .useValue(options.membershipReader);
+  }
 
   const moduleRef = await builder.compile();
 
@@ -108,6 +237,23 @@ export async function createTestApp(
   await app.init();
   // Fastify only serves once its own plugin graph has finished loading.
   await app.getHttpAdapter().getInstance().ready();
+
+  // ## Why the harness listens on an ephemeral port before handing the app over
+  //
+  // supertest starts a server it finds un-listening, and **closes** it again when
+  // that request finishes. That is fine for one request at a time, and wrong for
+  // the concurrent ones a suite legitimately fires (`Promise.all([...])`, a burst
+  // of refusals asserted together): every request in the burst sees no address,
+  // each of them starts its own ephemeral listener on the shared instance, and the
+  // first to finish closes it under the others — surfaces as
+  // `read ECONNRESET`, intermittently, on whichever request happened to be in
+  // flight. Observed exactly once in six full runs before this line existed.
+  //
+  // Listening here (port 0 = the OS picks a free one, so parallel suites never
+  // collide) makes the address non-null before any request, so supertest reuses
+  // the open server for every call and closes nothing. `app.close()` in the
+  // suite's `afterAll` is what tears it down.
+  await app.listen(0, "127.0.0.1");
 
   return app;
 }

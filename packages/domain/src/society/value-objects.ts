@@ -1,3 +1,5 @@
+import { createJoinNote } from "../member/join-requests";
+import { asApartmentId, type ApartmentId } from "../shared/ids";
 import { paise, type Paise } from "../shared/money";
 import { err, ok, type Result } from "../shared/result";
 
@@ -367,12 +369,26 @@ function stripUndefined(input: SocietySettingsInput): SocietySettingsInput {
 export interface SocietyJoinRequest {
   readonly code: string;
   readonly occupancyType: OccupancyType;
+  /** The flat the requester claims, already branded — `null` when they picked none. */
+  readonly apartmentId: ApartmentId | null;
+  /** The optional note to the reviewer, trimmed and bounded by `createJoinNote`. */
+  readonly note: string | null;
 }
 
-/** Validated join submission: a well-formed code and a known occupancy. */
+/**
+ * Validated join submission: a well-formed code, a known occupancy, and a request that says
+ * what the reviewer needs (T049).
+ *
+ * The flat is *not* checked here against the chosen society — that needs the database, and it
+ * happens in two places that can: `society_join_options()` decides what may be offered, and
+ * the composite foreign key (`fk_members_apartment_society`, T045) refuses a flat of another
+ * tenant outright. What the value object owns is the shape: an id, or nothing.
+ */
 export function createSocietyJoinRequest(
   rawCode: string,
   occupancyType: OccupancyType,
+  rawApartmentId?: string | null,
+  rawNote?: string | null,
 ): Result<SocietyJoinRequest, SocietyError> {
   const code = normalizeJoinCode(rawCode);
 
@@ -398,5 +414,30 @@ export function createSocietyJoinRequest(
       ),
     );
   }
-  return ok({ code, occupancyType });
+
+  // The note is the member module's value object (`createJoinNote`), reused rather than
+  // restated: a join request *is* a pending membership, so the note's bound and trimming
+  // have to be the same ones the queue's contract renders. The error travels as the
+  // society vocabulary because this is the society module's value object, and the two
+  // codes are the same word (`validation`) with the same `field`.
+  const note = createJoinNote(rawNote);
+  if (!note.ok) {
+    return err(
+      societyError("validation", note.error.message, {
+        field: note.error.details?.field ?? "message",
+      }),
+    );
+  }
+
+  // A flat chosen by the requester: an id, or nothing. `null`/empty is "not picked yet" — a
+  // society whose flats are not recorded has to stay joinable — while a non-empty string
+  // that is not a UUID is a client bug worth naming before it reaches `$1::uuid`.
+  const apartmentId =
+    rawApartmentId === undefined ||
+    rawApartmentId === null ||
+    rawApartmentId === ""
+      ? null
+      : asApartmentId(rawApartmentId);
+
+  return ok({ code, occupancyType, apartmentId, note: note.value });
 }

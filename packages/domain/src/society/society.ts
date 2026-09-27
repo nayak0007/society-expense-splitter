@@ -1,4 +1,10 @@
-import type { MemberId, SocietyId, UserId } from "../shared/ids";
+import type {
+  ApartmentId,
+  BuildingId,
+  MemberId,
+  SocietyId,
+  UserId,
+} from "../shared/ids";
 
 /**
  * Society entity + value unions (PRD §3.2, SAD §8.2 `societies` /
@@ -147,13 +153,80 @@ export interface CreateSocietyInput {
  *    use case (`patch.name = …`) one validated field at a time. The immutability
  *    that matters is on the entity the repository returns and on the command it
  *    receives — not on the builder the domain writes into.
+ *
+ * The settings half is **listed rather than inherited from `CreateSocietyInput`**,
+ * and that is a correctness fix, not style. The update contract exposes six
+ * settings the create wizard does not — `graceDays`, `billVacantFlats`,
+ * `allowPartialPayments`, `defaulterListPublic`, `financialYearStartMonth` and
+ * `timezone` — so deriving the patch from the create input alone made them
+ * unrepresentable, and `updateSociety` could only copy the three fields the type
+ * allowed. Every one of them was accepted by the wire contract, validated by
+ * `updateSocietySettings`, and then dropped before the repository call — the
+ * user saw `200` with the old value. Found by running the module against a live
+ * database; the mocked-repository tests cannot see it, because a fake repository
+ * accepts whatever it is handed.
  */
 export type UpdateSocietyInput = {
   -readonly [K in keyof CreateSocietyInput]?: CreateSocietyInput[K] | undefined;
+} & {
+  // No `-readonly` here: that modifier is only legal inside a mapped type, and
+  // these are plain members. `updateSociety` assembles the patch in place.
+  graceDays?: number | undefined;
+  billVacantFlats?: boolean | undefined;
+  allowPartialPayments?: boolean | undefined;
+  defaulterListPublic?: boolean | undefined;
+  financialYearStartMonth?: number | undefined;
+  timezone?: string | undefined;
 };
 
 export interface JoinSocietyInput {
   /** Raw user input; normalised by the join-code value object. */
   readonly code: string;
   readonly occupancyType: OccupancyType;
+  /**
+   * The flat the requester claims (T049; PRD §3.2's "select building/wing/flat from the
+   * actual apartment list"). `null` when they did not pick one — a society whose flats are
+   * not recorded yet still has to be joinable, and the Admin assigns it at approval.
+   *
+   * An `ApartmentId` and not a number: the number is a label the society may rename, and a
+   * request that named one would have to be resolved by whoever reads it — which is how two
+   * flats end up claiming one number.
+   */
+  readonly apartmentId: ApartmentId | null;
+  /**
+   * The optional note to whoever reviews the request. Already trimmed and bounded by
+   * `createJoinNote`; `null` means the requester wrote nothing.
+   */
+  readonly note: string | null;
+}
+
+/**
+ * One flat the join screen offers (T049).
+ *
+ * A *label* projection, deliberately: the id the request will carry, the number a human
+ * recognises, and the building/wing/floor needed to tell two `101`s apart. No areas, no
+ * occupancy status, no residents — none of which a person choosing their own front door
+ * needs, and all of which a stranger holding a shared code should not receive.
+ */
+export interface SocietyJoinFlat {
+  readonly id: ApartmentId;
+  readonly number: string;
+  readonly buildingId: BuildingId;
+  readonly buildingName: string;
+  readonly wingId: string | null;
+  readonly wingName: string | null;
+  readonly floor: number | null;
+}
+
+/** What `GET /societies/join-options` answers: the flats, and whether it was cut short. */
+export interface SocietyJoinOptions {
+  readonly societyId: SocietyId;
+  readonly flats: readonly SocietyJoinFlat[];
+  /**
+   * Rows matching the search, not rows returned. `truncated` is what lets the screen say
+   * "keep typing" instead of presenting a page as the whole society — the failure mode a
+   * silently capped list has.
+   */
+  readonly total: number;
+  readonly truncated: boolean;
 }

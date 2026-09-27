@@ -166,6 +166,11 @@ const FALLBACK_CODE_BY_STATUS: Readonly<Record<number, ErrorCode>> = {
   403: "FORBIDDEN",
   404: "NOT_FOUND",
   409: "CONFLICT",
+  // Fastify's body limit (bootstrap.ts's `bodyLimit`) rejects an oversized request
+  // before any handler runs. VALIDATION_ERROR is the honest catalogue reading — the
+  // caller can fix it by sending less — and 413 travels as the status so a client can
+  // also tell it apart from a field-level refusal (T048's import needs that).
+  413: "VALIDATION_ERROR",
   422: "VALIDATION_ERROR",
   429: "RATE_LIMITED",
   500: "INTERNAL",

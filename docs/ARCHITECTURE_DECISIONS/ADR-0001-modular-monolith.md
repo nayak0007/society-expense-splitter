@@ -7,7 +7,7 @@
 
 ## Context
 
-Society Expense Splitter's server side has to do several things that look, at first
+Resident 360's server side has to do several things that look, at first
 glance, like separate services: identity, society tenancy, expense capture,
 split calculation, dues generation, payment reconciliation against Razorpay
 webhooks, notifications, and AI/OCR extraction of receipts.

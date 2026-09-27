@@ -23,15 +23,17 @@ import {
   createdSocietyResponseSchema,
   createSocietySchema,
   joinCodeSchema,
+  joinOptionsResponseSchema,
   joinSocietySchema,
   joinPreviewResponseSchema,
+  membershipListResponseSchema,
   membershipResponseSchema,
   societyProfileResponseSchema,
   societyResponseSchema,
   societySummaryListSchema,
   updateSocietySchema,
 } from "@ses/contracts";
-import { asSocietyId, asUserId } from "@ses/domain";
+import { MEMBER_SEARCH_MAX_LENGTH, asSocietyId, asUserId } from "@ses/domain";
 import { z } from "zod";
 
 import { AppError } from "../../../common/errors/app-error";
@@ -46,7 +48,9 @@ import { ZodPipe } from "../../../common/pipes/zod.pipe";
 import { SocietyOperations } from "../application/society.operations";
 import {
   createdSocietyToDto,
+  joinOptionsToDto,
   joinPreviewToDto,
+  membershipToDto,
   membershipResponseToDto,
   profileToDto,
   societyToDto,
@@ -141,6 +145,35 @@ export class SocietiesController {
   }
 
   /**
+   * The caller's own memberships, as memberships.
+   *
+   * `GET /societies` answers "which societies am I in?" with a summary per
+   * society — the society's name, city and member count, plus the caller's role.
+   * That row has the *society's* id and nothing about the relationship itself, so
+   * a client cannot get the membership's id, its occupancy, or when it was joined
+   * out of it. This route returns the relationship instead, which is what the
+   * domain port exposes and what a membership screen edits.
+   *
+   * Declared before `/societies/:societyId` for the same reason `lookup` is: a
+   * static segment must not be shadowed by the parameter route.
+   */
+  @Get("memberships")
+  @ApiOperation({
+    summary: "List the caller's memberships",
+    description:
+      "The caller's own memberships in full — id, society, role, status, occupancy and join date — newest first. Excludes memberships that were removed.",
+  })
+  @ApiOkResponse({
+    description: "The caller's memberships, newest first.",
+    schema: envelopeSchemaOf(membershipListResponseSchema),
+  })
+  async listMemberships(@Ctx() context: RequestCtx) {
+    const { userId } = requireActor(context);
+    const memberships = await this.operations.listMemberships(asUserId(userId));
+    return { memberships: memberships.map((m) => membershipToDto(m)) };
+  }
+
+  /**
    * Public: the join screen must resolve a code before the user has joined
    * anything. The exposure is bounded by the SQL function, which returns name,
    * city, state, type and member count — never members, never settings, and never
@@ -181,6 +214,66 @@ export class SocietiesController {
       );
     }
     return { preview: joinPreviewToDto(preview) };
+  }
+
+  /**
+   * The flats a join code's society offers (T049) — the join screen's selector.
+   *
+   * Authenticated, and deliberately **not** part of `/societies/lookup`: that one is public and
+   * its contract is "name, city and member count only" (T040). A public endpoint listing a
+   * society's flats would let anyone holding a code shared in a WhatsApp group map the building.
+   *
+   * Declared before `/:societyId` for the same reason `lookup` is: a static segment must not be
+   * shadowed by the parameter route.
+   */
+  @Get("join-options")
+  @ApiOperation({
+    summary: "List the flats a join code offers",
+    description:
+      'The live flats of the society the code names — id, number, building, wing and floor — for the join screen\'s selector. `q` narrows by flat number or building name; `total` and `truncated` let the client say "keep typing" rather than present a capped page as the whole society. Returns 422 `JOIN_CODE_INVALID` for a code no live society has.',
+  })
+  @ApiQuery({
+    name: "code",
+    required: true,
+    description: "The 6-character join code, case-insensitive.",
+  })
+  @ApiQuery({
+    name: "q",
+    required: false,
+    description: "Free text over the flat number and the building name.",
+  })
+  @ApiQuery({
+    name: "limit",
+    required: false,
+    description: "How many flats to return (1–200, default 50).",
+  })
+  @ApiOkResponse({
+    description: "The flats, newest first, and whether the list was cut short.",
+    schema: envelopeSchemaOf(joinOptionsResponseSchema),
+  })
+  async joinOptions(
+    @Ctx() context: RequestCtx,
+    @Query(
+      new ZodPipe(
+        z.strictObject({
+          code: joinCodeSchema,
+          q: z.string().trim().max(MEMBER_SEARCH_MAX_LENGTH).optional(),
+          limit: z.coerce.number().int().min(1).max(200).optional(),
+        }),
+      ),
+    )
+    query: { code: string; q?: string | undefined; limit?: number | undefined },
+  ) {
+    const { userId } = requireActor(context);
+    const options = await this.operations.joinOptions(
+      asUserId(userId),
+      query.code,
+      {
+        ...(query.q === undefined ? {} : { q: query.q }),
+        ...(query.limit === undefined ? {} : { limit: query.limit }),
+      },
+    );
+    return joinOptionsToDto(options);
   }
 
   @Post("join")
@@ -251,6 +344,37 @@ export class SocietiesController {
       body,
     );
     return { society: societyToDto(society) };
+  }
+
+  /**
+   * The society's roster, as the caller may see it.
+   *
+   * A non-member gets the same `404` as a society that does not exist, never an
+   * empty list: an empty list would confirm the id is real. A pending member does
+   * see the society they applied to, which is deliberate (see the RLS migration's
+   * `is_society_member(…, false)`).
+   */
+  @Get(":societyId/members")
+  @ApiOperation({
+    summary: "List a society's memberships",
+    description:
+      "Every membership of the society that the caller is allowed to see. A non-member receives 404, indistinguishable from a society that does not exist.",
+  })
+  @ApiParam({ name: "societyId", description: "Society UUID." })
+  @ApiOkResponse({
+    description: "The society's memberships, oldest first.",
+    schema: envelopeSchemaOf(membershipListResponseSchema),
+  })
+  async members(
+    @Ctx() context: RequestCtx,
+    @Param("societyId", new ZodPipe(societyIdParam)) societyId: string,
+  ) {
+    const { userId } = requireActor(context);
+    const memberships = await this.operations.listSocietyMemberships(
+      asUserId(userId),
+      asSocietyId(societyId),
+    );
+    return { memberships: memberships.map((m) => membershipToDto(m)) };
   }
 
   @Post(":societyId/join-code")
