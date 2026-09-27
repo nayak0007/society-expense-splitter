@@ -60,7 +60,70 @@ statements were no-ops). Prefer the runner in every case.
 ## `supabase db push` (legacy instructions)
 
 The Supabase CLI can still apply these files (`npx supabase login &&
-npx supabase link --project-ref <ref> && npx supabase db push`). It is no
-longer the documented path — it writes Supabase's own ledger rather than
+npx supabase link --project-ref <ref> && npx supabase db push`). It isno longer the documented path — it writes Supabase's own ledger rather than
 `ses_meta`, which desynchronises the gate every other environment trusts. If
 you must use it, run `pnpm db:migrate` afterwards to reconcile the ledger.
+
+## Rollback
+
+**The runner is forward-only. There is no `down` command, and that is a
+decision, not an omission** (ADR-0008): a migration that drops a column cannot
+be reversed by a script that has the old data nowhere to put back. Every file
+still documents its reverse in a commented block at the top, to be applied by
+hand when a release must be reverted.
+
+Which case you are in decides the procedure. Pick the first that applies.
+
+### 1. Not yet applied anywhere
+
+Delete the file. The ledger has no row for it and nothing was ever executed.
+If it was applied in _your_ database only (a local experiment), also remove the
+row so the checksum does not linger:
+
+```sql
+DELETE FROM ses_meta.migrations WHERE version = '<timestamp>';
+```
+
+### 2. Applied in development only
+
+`pnpm db:reset` drops `public`, `ses_meta` and `drizzle` and re-applies the whole
+history through the same runner. It touches **only the database in
+`MIGRATION_DATABASE_URL`** — which is why that variable must never point at
+production, and why the schema asserts the two URLs differ outside development.
+
+### 3. Applied in production
+
+Reverse the data-shape change **forward**, in this order (SAD §8.8,
+`Architecture.md` §19.4):
+
+1. **Expand → migrate → contract.** The contract phase (dropping the old column)
+   runs in a _later_ release, days after the new version is confirmed stable. A
+   change that is never made irreversible never needs a rollback.
+2. **Fix forward with a new migration.** Write the reverse here as a new file and
+   apply it through the runner. This is the expected path for anything short of a
+   data-loss incident — see `20260923162920_society_gen_join_code_grant.sql`,
+   which re-granted an EXECUTE that an earlier migration had over-revoked.
+3. **Restore from a backup** only if data was destroyed. Prefer point-in-time
+   recovery to the last pre-migration timestamp (**Dashboard → Database →
+   Backups**), then re-apply the history with `pnpm db:migrate`. A restore rolls
+   back _everything_ since that timestamp, so it is the last resort, not a
+   deploy step.
+
+**Never** edit an applied file to "undo" it: the checksum ledger will reject the
+next run, and every environment that already applied it is now diverged.
+
+## Troubleshooting
+
+| Symptom                                                               | Cause                                                                                         | Fix                                                                                                                                               |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `checksum mismatch for <file>`                                        | The file was edited after it was applied                                                      | Revert the edit; if the change is wanted, add a **new** migration instead                                                                         |
+| `db:check` fails: _database is behind HEAD_                           | A migration was added but never applied                                                       | `pnpm db:migrate`                                                                                                                                 |
+| `db:check` fails: _database is ahead_ / a file is missing             | Ledger row with no file — usually `supabase db push` or a hand-applied script                 | Restore the file, or delete the orphan ledger row                                                                                                 |
+| `must be owner of …` / `permission denied for schema`                 | Connected with a non-owner role                                                               | Migrations need `MIGRATION_DATABASE_URL` (owner); `DATABASE_URL` is the runtime role                                                              |
+| `could not translate host name "db.<ref>.supabase.co"`                | The project is **pooler-only** — newer Supabase projects have no direct-connection DNS record | Use `aws-0-<region>.pooler.supabase.com` with the username `postgres.<ref>`: port `5432` for DDL/session, `6543` for the transaction-mode runtime |
+| `tenant/user postgres.<ref> not found` (XX000)                        | Wrong pooler **region**                                                                       | Look up the project region and use that region's pooler host                                                                                      |
+| `permission denied to set role "authenticated"`                       | The login role is not a member of `authenticated`                                             | The bootstrap migration grants it; on hosted Supabase confirm the role exists                                                                     |
+| API refuses to boot in staging/production: _both URLs connect as "…"_ | `DATABASE_URL` and `MIGRATION_DATABASE_URL` share a role                                      | Give the runtime a dedicated non-owner login role                                                                                                 |
+| `health/ready` is 503 with `redis:down`                               | Redis is not running                                                                          | Start it (`docker compose -f infra/docker/docker-compose.dev.yml up -d`); `health/live` stays 200 by design                                       |
+| Auth returns `429` on signup / password reset                         | Default Supabase SMTP is rate-limited                                                         | Configure custom SMTP (**Dashboard → Authentication → Emails**)                                                                                   |
+| `email_address_invalid` on signup                                     | Supabase only accepts mail-capable domains                                                    | Use a real domain; test accounts go through the Admin API instead                                                                                 |

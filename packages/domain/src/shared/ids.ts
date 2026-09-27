@@ -15,8 +15,18 @@ export type Brand<TValue, TBrand extends string> = TValue & {
 export type UserId = Brand<string, "UserId">;
 export type SocietyId = Brand<string, "SocietyId">;
 export type MemberId = Brand<string, "MemberId">;
+export type BuildingId = Brand<string, "BuildingId">;
+export type WingId = Brand<string, "WingId">;
+export type ApartmentId = Brand<string, "ApartmentId">;
+export type InvitationId = Brand<string, "InvitationId">;
 
 /** Boundary helpers — the only place a raw string becomes a branded id. */
 export const asUserId = (value: string): UserId => value as UserId;
 export const asSocietyId = (value: string): SocietyId => value as SocietyId;
 export const asMemberId = (value: string): MemberId => value as MemberId;
+export const asBuildingId = (value: string): BuildingId => value as BuildingId;
+export const asWingId = (value: string): WingId => value as WingId;
+export const asApartmentId = (value: string): ApartmentId =>
+  value as ApartmentId;
+export const asInvitationId = (value: string): InvitationId =>
+  value as InvitationId;

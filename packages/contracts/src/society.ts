@@ -1,4 +1,9 @@
-import { JOIN_CODE_PATTERN, OCCUPANCY_TYPES, SOCIETY_TYPES } from "@ses/domain";
+import {
+  JOIN_CODE_PATTERN,
+  JOIN_NOTE_MAX_LENGTH,
+  OCCUPANCY_TYPES,
+  SOCIETY_TYPES,
+} from "@ses/domain";
 import { z } from "zod";
 
 import { societyTypeSchema } from "./primitives";
@@ -96,6 +101,17 @@ export type UpdateSocietyPayload = z.infer<typeof updateSocietySchema>;
 export const joinSocietySchema = z.strictObject({
   code: joinCodeSchema,
   occupancyType: z.enum(OCCUPANCY_TYPES),
+  /**
+   * The flat the requester claims (T049) — from `GET /societies/join-options`, so the value
+   * is an id the server itself offered rather than a number the client typed.
+   *
+   * Optional: a society whose flats are not recorded yet still has to be joinable, and the
+   * Admin assigns the flat at approval. It is *not* nullable — a request has no way to say
+   * "clear the flat", because it has not been set yet.
+   */
+  apartmentId: z.uuid().optional(),
+  /** The optional note to the reviewer, bounded by the domain's own constant. */
+  message: z.string().trim().max(JOIN_NOTE_MAX_LENGTH).optional(),
 });
 export type JoinSocietyPayload = z.infer<typeof joinSocietySchema>;
 
@@ -157,7 +173,17 @@ export const membershipSchema = z.object({
 });
 export type MembershipDto = z.infer<typeof membershipSchema>;
 
-/** Join preview — deliberately excludes the join code itself. */
+/**
+ * Join preview — deliberately excludes the join code itself.
+ *
+ * `joinCodeExpiresAt` is the expiry of the code that produced the preview, not of
+ * the society: the client needs it because the domain evaluates expiry itself
+ * (`join-society.ts`, against an injected clock) rather than trusting whichever
+ * adapter remembered to check. `null` means the code does not expire. Adding it
+ * is additive and therefore not a breaking change (SAD §7.9); omitting it left
+ * `SocietyJoinPreview` unconstructable from this response, which is how a client
+ * ends up hard-coding `null` and quietly lying about an expired code.
+ */
 export const societyJoinPreviewSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -165,10 +191,51 @@ export const societyJoinPreviewSchema = z.object({
   state: z.string(),
   type: societyTypeSchema,
   memberCount: z.number().int(),
+  joinCodeExpiresAt: z.string().nullable(),
 });
 export type SocietyJoinPreviewDto = z.infer<typeof societyJoinPreviewSchema>;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Join options (T049)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One flat the join screen may offer.
+ *
+ * The *label* projection: what a person needs to recognise their own front door, and
+ * nothing about who lives behind the others — no areas, no occupancy status, no residents.
+ * The flat's `id` travels because the request that follows names a flat by id; a client
+ * sending a *number* would be sending a label the server then has to resolve, which is how
+ * two flats end up claiming one number.
+ */
+export const societyJoinFlatSchema = z.object({
+  id: z.string(),
+  number: z.string(),
+  buildingId: z.string(),
+  buildingName: z.string(),
+  wingId: z.string().nullable(),
+  wingName: z.string().nullable(),
+  floor: z.number().int().nullable(),
+});
+export type SocietyJoinFlatDto = z.infer<typeof societyJoinFlatSchema>;
+
+/**
+ * `GET /societies/join-options?code=` — the join screen's flat selector.
+ *
+ * `total` and `truncated` are the difference between a list and a lie: a capped page must be
+ * able to say "there are more, keep typing" rather than presenting itself as the society's
+ * whole inventory.
+ */
+export const joinOptionsResponseSchema = z.object({
+  societyId: z.string(),
+  flats: z.array(societyJoinFlatSchema),
+  total: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+});
+export type JoinOptionsResponseDto = z.infer<typeof joinOptionsResponseSchema>;
+
 export const membershipListSchema = z.array(membershipSchema);
+export type MembershipListDto = z.infer<typeof membershipListSchema>;
 
 /**
  * Switcher / list view of a membership (PRD §3.1 multi-society).
@@ -253,6 +320,23 @@ export const membershipResponseSchema = z.object({
   membership: membershipSchema,
 });
 export type MembershipResponseDto = z.infer<typeof membershipResponseSchema>;
+
+/**
+ * `GET /societies/memberships` and `GET /societies/:societyId/members`.
+ *
+ * The same `membershipSchema` the profile endpoint already ships a single row of,
+ * in a list — one membership type for the client to parse whichever route it came
+ * from. The plural key (not `members`) is deliberate: these are memberships, and
+ * a "member" screen is free to join them with profile data itself rather than
+ * having this module start leaking names and phone numbers through a roster that
+ * is currently only identifiers.
+ */
+export const membershipListResponseSchema = z.object({
+  memberships: membershipListSchema,
+});
+export type MembershipListResponseDto = z.infer<
+  typeof membershipListResponseSchema
+>;
 
 /**
  * The shape shared by every endpoint that returns only the society — an edit

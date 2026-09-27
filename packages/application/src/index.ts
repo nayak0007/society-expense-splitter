@@ -20,4 +20,7 @@
  * client and server drift — and in a money application that drift is a security
  * bug rather than an inconvenience. One implementation, two callers.
  */
+export * from "./invitation";
+export * from "./member";
 export * from "./society";
+export * from "./structure";

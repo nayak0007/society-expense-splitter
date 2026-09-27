@@ -9,7 +9,18 @@
  *  - `shared/`  — primitives every module reuses: `Result`, `Clock`, `Paise`,
  *                 branded ids, the `DomainError` base;
  *  - `society/` — the Society module: entity, value objects, rules and the
- *                 repository port.
+ *                 repository port;
+ *  - `structure/` — the Building module: entity, value objects, capability rules
+ *                 and the repository port (wings and apartments land with
+ *                 T043/T044).
+ *  - `member/`  — the Members module: the membership entity (shadow members
+ *                 included), value objects, capability and consent rules, the
+ *                 repository port, and the role→action matrix the whole system
+ *                 authorises against.
+ *  - `invitation/` — the Invitations module (T047): the invitation aggregate, its
+ *                 lifecycle rules and its repository/token ports. It reads the
+ *                 member module's matrix for who may invite whom rather than
+ *                 restating it.
  *
  * Use cases are deliberately NOT here. They are the application layer
  * (`@ses/application`), which depends on this package and never the other way
@@ -28,3 +39,22 @@ export * from "./society/errors";
 export * from "./society/rules";
 export * from "./society/ports";
 export * from "./society/value-objects";
+export * from "./structure/apartment";
+export * from "./structure/apartment-value-objects";
+export * from "./structure/building";
+export * from "./structure/errors";
+export * from "./structure/rules";
+export * from "./structure/ports";
+export * from "./structure/value-objects";
+export * from "./invitation/errors";
+export * from "./invitation/invitation";
+export * from "./invitation/ports";
+export * from "./member/csv-import";
+export * from "./member/errors";
+export * from "./member/join-requests";
+export * from "./member/member";
+export * from "./member/member-rules";
+export * from "./member/member-value-objects";
+export * from "./member/permission-evaluator";
+export * from "./member/ports";
+export * from "./member/role-rules";
