@@ -69,6 +69,30 @@ export default function More() {
           </Button>
         </View>
 
+        {/* PRD §5: the physical structure is configuration, set up once and rarely
+            revisited — so it hangs off More rather than taking a tab of its own. */}
+        <Text variant="titleSmall">Structure</Text>
+        <View className="gap-3">
+          <Button variant="tonal" onPress={() => router.push('/(app)/more/structure')}>
+            Buildings
+          </Button>
+        </View>
+
+        {/* PRD §3.3: the member directory. It sits beside Structure because the
+            two are the same kind of thing — who and what the society is made of —
+            and both are read occasionally rather than daily, unlike expenses. */}
+        <Text variant="titleSmall">Members</Text>
+        <View className="gap-3">
+          <Button variant="tonal" onPress={() => router.push('/(app)/more/members')}>
+            Member directory
+          </Button>
+          {/* T046: the permissions viewer sits beside the directory, because the two answer the
+              same kind of question — who is in the society and what each of them may do. */}
+          <Button variant="outlined" onPress={() => router.push('/(app)/more/permissions')}>
+            Roles &amp; permissions
+          </Button>
+        </View>
+
         <Text variant="titleSmall">Protected-route demo (SAD §5.5 layer 2)</Text>
         <Text variant="bodySmall" color="onSurfaceVariant">
           Route-level guard rendering PermissionDenied instead of the screen — no redirect, no
