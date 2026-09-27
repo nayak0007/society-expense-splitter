@@ -21,7 +21,11 @@ import {
   apartmentDetailResponseSchema,
   apartmentListResponseSchema,
   apartmentResponseSchema,
+  bulkCreateApartmentsRequestSchema,
+  bulkCreateApartmentsResponseSchema,
   createApartmentSchema,
+  generateApartmentsRequestSchema,
+  generateApartmentsResponseSchema,
   updateApartmentSchema,
 } from "@ses/contracts";
 import { asApartmentId, asBuildingId, asUserId } from "@ses/domain";
@@ -43,6 +47,8 @@ import {
   apartmentDetailToDto,
   apartmentListToDto,
   apartmentResponseToDto,
+  bulkCreateApartmentsToDto,
+  generateApartmentsToDto,
 } from "./apartment.mapper";
 import { ApiApartmentErrors, ApiStructureErrors } from "./openapi";
 
@@ -171,6 +177,97 @@ export class BuildingApartmentsController {
       body,
     );
     return apartmentResponseToDto(apartment);
+  }
+
+  /**
+   * Generate flats from a numbering pattern (Roadmap T044).
+   *
+   * Admin-only, like every write here. The same route serves the preview and
+   * the commit: `dryRun: true` expands the pattern, reports what would be
+   * created and skipped, and writes **nothing** — the response body is identical
+   * in both modes, which is what makes the preview trustworthy. Existing numbers
+   * are skipped and reported rather than refusing the batch, so re-running after
+   * a partial generation completes it.
+   */
+  @Post("generate")
+  @RequirePermission("structure.edit")
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: "Generate flats from a pattern",
+    description:
+      "Admin-only. Expands a numbering pattern ({wing}, {floor}, {floor:0Nd}, {unit}, {unit:0Nd}, {prefix}, {suffix}) across floors, wings and units per floor, up to 2,000 flats per call. With dryRun=true (or omitted) nothing is written; with dryRun=false every label no live flat carries is created. Existing numbers are skipped and reported.",
+  })
+  @ApiParam({ name: "buildingId", description: "Building UUID." })
+  @ApiCreatedResponse({
+    description:
+      "The generation report: every expanded label with `created` or `skipped`.",
+    schema: envelopeSchemaOf(generateApartmentsResponseSchema),
+  })
+  async generate(
+    @Ctx() context: RequestCtx,
+    @Param("buildingId", new ZodPipe(buildingIdParam)) buildingId: string,
+    @Body(new ZodPipe(generateApartmentsRequestSchema))
+    body: z.infer<typeof generateApartmentsRequestSchema>,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    const result = await this.operations.generateApartments(
+      asUserId(userId),
+      society.id,
+      asBuildingId(buildingId),
+      {
+        pattern: body.pattern,
+        floors: body.floors,
+        unitsPerFloor: body.unitsPerFloor,
+        wings: body.wings,
+        prefix: body.prefix,
+        suffix: body.suffix,
+        // An omitted flag resolves to a **preview**: a client that forgets it
+        // gets a report and re-runs with `false` — never a surprise write.
+        dryRun: body.dryRun ?? true,
+      },
+    );
+    return generateApartmentsToDto(result);
+  }
+
+  /**
+   * Bulk-create flats (Roadmap T043).
+   *
+   * Admin-only, and transactional: the batch is one transaction, so a failure
+   * that is not a per-row refusal leaves nothing behind. Duplicate numbers —
+   * inside the paste or already live in the building — are skipped **and
+   * reported** per row, never silently dropped, and an invalid row is reported
+   * with its field and reason while the rest of the batch proceeds.
+   */
+  @Post("bulk")
+  @RequirePermission("structure.edit")
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: "Bulk-create flats",
+    description:
+      "Admin-only. Creates many flats in one transactional call, with a per-row report: created, existing (already live), duplicate (repeated in the request) or invalid (with the field and reason). At most 2,000 rows per call.",
+  })
+  @ApiParam({ name: "buildingId", description: "Building UUID." })
+  @ApiCreatedResponse({
+    description:
+      "The per-row report and the created flats, with the defaults each row resolved.",
+    schema: envelopeSchemaOf(bulkCreateApartmentsResponseSchema),
+  })
+  async bulkCreate(
+    @Ctx() context: RequestCtx,
+    @Param("buildingId", new ZodPipe(buildingIdParam)) buildingId: string,
+    @Body(new ZodPipe(bulkCreateApartmentsRequestSchema))
+    body: z.infer<typeof bulkCreateApartmentsRequestSchema>,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    const result = await this.operations.bulkCreateApartments(
+      asUserId(userId),
+      society.id,
+      asBuildingId(buildingId),
+      { buildingId: asBuildingId(buildingId), rows: body.rows },
+    );
+    return bulkCreateApartmentsToDto(result);
   }
 }
 

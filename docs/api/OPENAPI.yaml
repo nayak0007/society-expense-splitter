@@ -3976,6 +3976,265 @@ paths:
       security: *a35
       summary: Create a flat
       tags: *a36
+  /v1/buildings/{buildingId}/apartments/generate:
+    post:
+      description: Admin-only. Expands a numbering pattern ({wing}, {floor},
+        {floor:0Nd}, {unit}, {unit:0Nd}, {prefix}, {suffix}) across floors,
+        wings and units per floor, up to 2,000 flats per call. With dryRun=true
+        (or omitted) nothing is written; with dryRun=false every label no live
+        flat carries is created. Existing numbers are skipped and reported.
+      operationId: BuildingApartmentsController_generate
+      parameters:
+        - *a27
+        - name: buildingId
+          required: true
+          in: path
+          description: Building UUID.
+          schema:
+            type: string
+      responses:
+        "201":
+          description:
+            "The generation report: every expanded label with `created` or
+            `skipped`."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      dryRun:
+                        type: boolean
+                      total:
+                        type: integer
+                      createdCount:
+                        type: integer
+                      skippedCount:
+                        type: integer
+                      rows:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            apartmentNumber:
+                              type: string
+                            floor:
+                              nullable: true
+                              type: integer
+                            wingId:
+                              nullable: true
+                              type: string
+                            status:
+                              type: string
+                              enum:
+                                - created
+                                - skipped
+                          required:
+                            - apartmentNumber
+                            - floor
+                            - wingId
+                            - status
+                          additionalProperties: false
+                    required:
+                      - dryRun
+                      - total
+                      - createdCount
+                      - skippedCount
+                      - rows
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400": *a28
+        "401": *a29
+        "403": *a30
+        "404": *a31
+        "409": *a32
+        "422": *a33
+        "429": *a34
+      security: *a35
+      summary: Generate flats from a pattern
+      tags: *a36
+  /v1/buildings/{buildingId}/apartments/bulk:
+    post:
+      description:
+        "Admin-only. Creates many flats in one transactional call, with a
+        per-row report: created, existing (already live), duplicate (repeated in
+        the request) or invalid (with the field and reason). At most 2,000 rows
+        per call."
+      operationId: BuildingApartmentsController_bulkCreate
+      parameters:
+        - *a27
+        - name: buildingId
+          required: true
+          in: path
+          description: Building UUID.
+          schema:
+            type: string
+      responses:
+        "201":
+          description:
+            The per-row report and the created flats, with the defaults each
+            row resolved.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      createdCount:
+                        type: integer
+                      existingCount:
+                        type: integer
+                      duplicateCount:
+                        type: integer
+                      invalidCount:
+                        type: integer
+                      outcomes:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            apartmentNumber:
+                              type: string
+                            status:
+                              type: string
+                              enum:
+                                - created
+                                - existing
+                                - duplicate
+                                - invalid
+                            field:
+                              type: string
+                            message:
+                              type: string
+                          required:
+                            - apartmentNumber
+                            - status
+                          additionalProperties: false
+                      created:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            societyId:
+                              type: string
+                            buildingId:
+                              type: string
+                            wingId:
+                              nullable: true
+                              type: string
+                            apartmentNumber:
+                              type: string
+                            floor:
+                              nullable: true
+                              type: integer
+                            bhk:
+                              nullable: true
+                              type: number
+                            carpetAreaSqft:
+                              nullable: true
+                              type: number
+                            builtupAreaSqft:
+                              nullable: true
+                              type: number
+                            parkingSlots:
+                              type: integer
+                            shareUnits:
+                              type: number
+                            occupancyStatus:
+                              type: string
+                              enum:
+                                - owner_occupied
+                                - rented
+                                - vacant
+                                - under_construction
+                            isCommercial:
+                              type: boolean
+                            isBillable:
+                              type: boolean
+                            createdAt:
+                              type: string
+                            updatedAt:
+                              type: string
+                            deletedAt:
+                              nullable: true
+                              type: string
+                          required:
+                            - id
+                            - societyId
+                            - buildingId
+                            - wingId
+                            - apartmentNumber
+                            - floor
+                            - bhk
+                            - carpetAreaSqft
+                            - builtupAreaSqft
+                            - parkingSlots
+                            - shareUnits
+                            - occupancyStatus
+                            - isCommercial
+                            - isBillable
+                            - createdAt
+                            - updatedAt
+                            - deletedAt
+                          additionalProperties: false
+                    required:
+                      - total
+                      - createdCount
+                      - existingCount
+                      - duplicateCount
+                      - invalidCount
+                      - outcomes
+                      - created
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400": *a28
+        "401": *a29
+        "403": *a30
+        "404": *a31
+        "409": *a32
+        "422": *a33
+        "429": *a34
+      security: *a35
+      summary: Bulk-create flats
+      tags: *a36
   /v1/apartments/{apartmentId}:
     get:
       description:

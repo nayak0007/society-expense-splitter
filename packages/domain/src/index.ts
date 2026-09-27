@@ -40,6 +40,7 @@ export * from "./society/rules";
 export * from "./society/ports";
 export * from "./society/value-objects";
 export * from "./structure/apartment";
+export * from "./structure/apartment-patterns";
 export * from "./structure/apartment-value-objects";
 export * from "./structure/building";
 export * from "./structure/errors";

@@ -938,6 +938,359 @@ describe("delete", () => {
   });
 });
 
+describe("generate from a pattern (T044)", () => {
+  const generateBody = {
+    pattern: "{wing}-{floor}{unit:02d}",
+    floors: [1, 2, 3, 4, 5, 6, 7, 8],
+    unitsPerFloor: 4,
+    wings: [
+      { id: null, label: "A" },
+      { id: null, label: "B" },
+    ],
+  };
+
+  it("creates exactly 64 flats for 2 wings x 8 floors x 4 units", async () => {
+    const response = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/generate`,
+      {
+        userId: ADMIN,
+        societyId: SOCIETY_A,
+        body: { ...generateBody, dryRun: false },
+      },
+    );
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.total).toBe(64);
+    expect(response.body.data.createdCount).toBe(64);
+    expect(response.body.data.skippedCount).toBe(0);
+    expect(response.body.data.dryRun).toBe(false);
+    expect(response.body.data.rows[0]).toEqual({
+      apartmentNumber: "A-101",
+      floor: 1,
+      wingId: null,
+      status: "created",
+    });
+    expect(response.body.data.rows[63].apartmentNumber).toBe("B-804");
+
+    // And the building really has them, in reading order.
+    const list = await call("get", `/v1/buildings/${buildingA}/apartments`, {
+      userId: ADMIN,
+      societyId: SOCIETY_A,
+    });
+    expect(list.body.data.apartments).toHaveLength(64);
+    expect(list.body.data.apartments[0].apartmentNumber).toBe("A-101");
+  });
+
+  it("dry run writes nothing — storage stays empty — and reports what would land", async () => {
+    await seedViaApi({ apartmentNumber: "A-101" });
+
+    const response = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/generate`,
+      {
+        userId: ADMIN,
+        societyId: SOCIETY_A,
+        body: {
+          pattern: "{wing}-{floor}{unit:02d}",
+          floors: [1],
+          unitsPerFloor: 2,
+          wings: [{ id: null, label: "A" }],
+          dryRun: true,
+        },
+      },
+    );
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.dryRun).toBe(true);
+    expect(response.body.data.createdCount).toBe(1);
+    expect(response.body.data.skippedCount).toBe(1);
+    expect(response.body.data.rows[0].status).toBe("skipped");
+    // The preview wrote nothing: the only storage calls are the seed's create
+    // and the one list read the dry run performed. (The building lookup lives on
+    // the buildings fake, not here.)
+    expect(apartments.state.calls).toEqual(["create", "listApartments"]);
+    expect(apartments.state.apartments.size).toBe(1);
+  });
+
+  it("re-running skips the existing numbers and completes the building", async () => {
+    await call("post", `/v1/buildings/${buildingA}/apartments/generate`, {
+      userId: ADMIN,
+      societyId: SOCIETY_A,
+      body: { ...generateBody, dryRun: false },
+    });
+
+    const again = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/generate`,
+      {
+        userId: ADMIN,
+        societyId: SOCIETY_A,
+        body: { ...generateBody, dryRun: false },
+      },
+    );
+
+    expect(again.status).toBe(201);
+    expect(again.body.data.createdCount).toBe(0);
+    expect(again.body.data.skippedCount).toBe(64);
+    expect(
+      again.body.data.rows.every(
+        (row: { status: string }) => row.status === "skipped",
+      ),
+    ).toBe(true);
+  });
+
+  it("refuses a batch over the 2,000 cap with a validation error", async () => {
+    const response = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/generate`,
+      {
+        userId: ADMIN,
+        societyId: SOCIETY_A,
+        body: {
+          pattern: "{floor}{unit:02d}",
+          floors: Array.from({ length: 100 }, (_, index) => index + 1),
+          unitsPerFloor: 200, // 20,000 > 2,000
+          dryRun: false,
+        },
+      },
+    );
+
+    // The domain's arithmetic refusal, surfaced as 422 — the API never had to
+    // carry the cap itself, because the domain owns the bound.
+    expect(response.status).toBe(422);
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
+    expect(response.body.error.message).toContain("cap");
+    expect(apartments.state.calls).toEqual([]);
+  });
+
+  it("refuses an unknown pattern token before anything is read", async () => {
+    const response = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/generate`,
+      {
+        userId: ADMIN,
+        societyId: SOCIETY_A,
+        body: {
+          pattern: "{wing}-{storey}{unit}",
+          floors: [1],
+          unitsPerFloor: 1,
+          wings: [{ id: null, label: "A" }],
+          dryRun: true,
+        },
+      },
+    );
+
+    expect(response.status).toBe(422);
+    expect(response.body.error.field).toBe("pattern");
+    expect(apartments.state.calls).toEqual([]);
+  });
+
+  it("refuses a Treasurer with 403 and writes nothing", async () => {
+    const response = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/generate`,
+      {
+        userId: TREASURER,
+        societyId: SOCIETY_A,
+        body: { ...generateBody, dryRun: false },
+      },
+    );
+
+    expect(response.status).toBe(403);
+    expect(apartments.state.calls).toEqual([]);
+  });
+});
+
+describe("bulk create (T043)", () => {
+  it("creates 64 flats in one call", async () => {
+    const rows = Array.from({ length: 64 }, (_, index) => ({
+      apartmentNumber: `F-${index + 101}`,
+    }));
+
+    const response = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/bulk`,
+      {
+        userId: ADMIN,
+        societyId: SOCIETY_A,
+        body: { rows },
+      },
+    );
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.total).toBe(64);
+    expect(response.body.data.createdCount).toBe(64);
+    expect(response.body.data.created[0]).toMatchObject({
+      apartmentNumber: "F-101",
+      parkingSlots: 0,
+      shareUnits: 1,
+      occupancyStatus: "vacant",
+      isBillable: true,
+    });
+    expect(apartments.state.calls).toContain("createMany");
+  });
+
+  it("reports duplicates per row and creates the rest, not silently", async () => {
+    const rows = Array.from({ length: 67 }, (_, index) => ({
+      apartmentNumber: `D-${index + 1}`,
+    }));
+    rows.push({ apartmentNumber: "D-1" });
+    rows.push({ apartmentNumber: "D-2" });
+    rows.push({ apartmentNumber: "D-3" });
+
+    const response = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/bulk`,
+      {
+        userId: ADMIN,
+        societyId: SOCIETY_A,
+        body: { rows },
+      },
+    );
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.total).toBe(70);
+    expect(response.body.data.duplicateCount).toBe(3);
+    expect(response.body.data.createdCount).toBe(67);
+    expect(
+      response.body.data.outcomes.filter(
+        (outcome: { status: string }) => outcome.status === "duplicate",
+      ),
+    ).toEqual([
+      { apartmentNumber: "D-1", status: "duplicate" },
+      { apartmentNumber: "D-2", status: "duplicate" },
+      { apartmentNumber: "D-3", status: "duplicate" },
+    ]);
+  });
+
+  it("reports rows a live flat already carries as existing", async () => {
+    await seedViaApi({ apartmentNumber: "E-1" });
+
+    const response = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/bulk`,
+      {
+        userId: ADMIN,
+        societyId: SOCIETY_A,
+        body: {
+          rows: [{ apartmentNumber: "E-1" }, { apartmentNumber: "E-2" }],
+        },
+      },
+    );
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.existingCount).toBe(1);
+    expect(response.body.data.createdCount).toBe(1);
+    expect(response.body.data.outcomes).toEqual([
+      { apartmentNumber: "E-1", status: "existing" },
+      { apartmentNumber: "E-2", status: "created" },
+    ]);
+  });
+
+  it("sets per-row areas, BHK, parking, share units and occupancy", async () => {
+    const response = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/bulk`,
+      {
+        userId: ADMIN,
+        societyId: SOCIETY_A,
+        body: {
+          rows: [
+            {
+              apartmentNumber: "S-1",
+              floor: 2,
+              bhk: 3,
+              carpetAreaSqft: 900,
+              builtupAreaSqft: 1100,
+              parkingSlots: 1,
+              shareUnits: 2,
+              occupancyStatus: "rented",
+            },
+          ],
+        },
+      },
+    );
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.created[0]).toMatchObject({
+      apartmentNumber: "S-1",
+      floor: 2,
+      bhk: 3,
+      carpetAreaSqft: 900,
+      builtupAreaSqft: 1100,
+      parkingSlots: 1,
+      shareUnits: 2,
+      occupancyStatus: "rented",
+    });
+  });
+
+  it("reports an invalid row with its field while the batch continues", async () => {
+    const response = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/bulk`,
+      {
+        userId: ADMIN,
+        societyId: SOCIETY_A,
+        body: {
+          rows: [
+            { apartmentNumber: "V-1" },
+            // A value the contract accepts (it bounds the range) but the domain's
+            // value object refuses (not a half step) — the one place a row can be
+            // invalid *after* the edge, which is exactly what the per-row report
+            // exists to carry.
+            { apartmentNumber: "V-2", bhk: 1.25 },
+          ],
+        },
+      },
+    );
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.invalidCount).toBe(1);
+    expect(response.body.data.createdCount).toBe(1);
+    expect(response.body.data.outcomes).toEqual([
+      { apartmentNumber: "V-1", status: "created" },
+      {
+        apartmentNumber: "V-2",
+        status: "invalid",
+        field: "bhk",
+        message: expect.stringContaining("Configuration"),
+      },
+    ]);
+  });
+
+  it("refuses an empty batch at the edge", async () => {
+    const response = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/bulk`,
+      {
+        userId: ADMIN,
+        societyId: SOCIETY_A,
+        body: { rows: [] },
+      },
+    );
+
+    expect(response.status).toBe(422);
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
+    expect(apartments.state.calls).toEqual([]);
+  });
+
+  it("refuses a Resident with 403 and writes nothing", async () => {
+    const response = await call(
+      "post",
+      `/v1/buildings/${buildingA}/apartments/bulk`,
+      {
+        userId: RESIDENT,
+        societyId: SOCIETY_A,
+        body: { rows: [{ apartmentNumber: "R-1" }] },
+      },
+    );
+
+    expect(response.status).toBe(403);
+    expect(apartments.state.calls).toEqual([]);
+  });
+});
+
 describe("deleting a building that still has flats", () => {
   it("refuses with a typed code rather than a raw failure", async () => {
     await seedViaApi();

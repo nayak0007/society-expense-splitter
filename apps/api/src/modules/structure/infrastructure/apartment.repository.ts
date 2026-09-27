@@ -170,74 +170,7 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
     actor: UserId,
   ): Promise<Apartment> {
     return this.run(actor, "write", async (tx) => {
-      const columns: SQL[] = [sql`society_id`, sql`building_id`];
-      const values: SQL[] = [sql`${societyId}::uuid`, sql`${buildingId}::uuid`];
-
-      const add = (column: string, value: SQL): void => {
-        columns.push(sql.raw(column));
-        values.push(value);
-      };
-
-      add("apartment_number", sql`${input.apartmentNumber}::varchar`);
-      // Present-but-null is a real value (\"this building has no wings\"), and it is
-      // spelled `null::uuid` rather than omitted so that a caller clearing a wing
-      // and a caller not mentioning one are distinguishable in the statement.
-      if (input.wingId !== undefined) {
-        add(
-          "wing_id",
-          input.wingId === null ? sql`null::uuid` : sql`${input.wingId}::uuid`,
-        );
-      }
-      if (input.floor !== undefined) {
-        add(
-          "floor",
-          input.floor === null
-            ? sql`null::smallint`
-            : sql`${input.floor}::smallint`,
-        );
-      }
-      if (input.bhk !== undefined) {
-        add(
-          "bhk",
-          input.bhk === null
-            ? sql`null::numeric(3,1)`
-            : sql`${input.bhk}::numeric(3,1)`,
-        );
-      }
-      if (input.carpetAreaSqft !== undefined) {
-        add(
-          "carpet_area_sqft",
-          input.carpetAreaSqft === null
-            ? sql`null::numeric(8,2)`
-            : sql`${input.carpetAreaSqft}::numeric(8,2)`,
-        );
-      }
-      if (input.builtupAreaSqft !== undefined) {
-        add(
-          "builtup_area_sqft",
-          input.builtupAreaSqft === null
-            ? sql`null::numeric(8,2)`
-            : sql`${input.builtupAreaSqft}::numeric(8,2)`,
-        );
-      }
-      if (input.parkingSlots !== undefined) {
-        add("parking_slots", sql`${input.parkingSlots}::smallint`);
-      }
-      if (input.shareUnits !== undefined) {
-        add("share_units", sql`${input.shareUnits}::numeric(8,3)`);
-      }
-      if (input.occupancyStatus !== undefined) {
-        add(
-          "occupancy_status",
-          sql`${input.occupancyStatus}::public.occupancy_status`,
-        );
-      }
-      if (input.isCommercial !== undefined) {
-        add("is_commercial", sql`${input.isCommercial}::boolean`);
-      }
-      if (input.isBillable !== undefined) {
-        add("is_billable", sql`${input.isBillable}::boolean`);
-      }
+      const { columns, values } = insertParts(input, societyId, buildingId);
 
       const rows = await query(
         tx,
@@ -397,6 +330,74 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
     });
   }
 
+  /**
+   * Creates many flats in **one transaction**, skipping the labels the building's
+   * live flats already carry (Roadmap T043's bulk create; T044's commit path).
+   *
+   * ## One transaction, row by row — and why that is not a contradiction
+   *
+   * Each row's column set is its own (one row may carry areas, the next only a
+   * number), so a single multi-row `INSERT` would have to force every row to name
+   * every column and would move the column defaults from the database into this
+   * file. Instead each row gets exactly the statement `create` would have run,
+   * inside the **one** transaction `run` opens — so the whole batch is still
+   * atomic: any failure the caller does not absorb rolls back every row, which is
+   * the property T043's "transactional" names.
+   *
+   * ## Duplicates are skipped and reported, not fatal
+   *
+   * `uq_apartments_building_number` decides a clash — there is no read-then-write
+   * check here to race with. A `23505` naming that index (or the apartment_number
+   * column) is caught per row and collected into `duplicateLabelsSkipped`; every
+   * other failure propagates and takes the whole batch with it. The use cases turn
+   * the skipped labels into report rows, so a concurrent creator between the
+   * caller's read and this write lands in the same report instead of failing the
+   * request.
+   */
+  async createMany(
+    buildingId: BuildingId,
+    societyId: SocietyId,
+    inputs: readonly CreateApartmentInput[],
+    actor: UserId,
+  ): Promise<{
+    readonly created: readonly Apartment[];
+    readonly duplicateLabelsSkipped: readonly string[];
+  }> {
+    return this.run(actor, "write", async (tx) => {
+      const created: Apartment[] = [];
+      const duplicateLabelsSkipped: string[] = [];
+
+      for (const input of inputs) {
+        const { columns, values } = insertParts(input, societyId, buildingId);
+        try {
+          const rows = await query(
+            tx,
+            sql`
+              insert into public.apartments (${sql.join(columns, sql`, `)})
+              values (${sql.join(values, sql`, `)})
+              returning ${APARTMENT_COLUMNS}
+            `,
+          );
+          created.push(apartmentFromRow(parseSingleRow(rows, "created flat")));
+        } catch (error: unknown) {
+          // A unique violation naming this table's number index is the *rule*,
+          // not a failure: the row is skipped and reported. At this point the
+          // error is still the driver's raw one — `run`'s classifier sits outside
+          // the transaction body — so the row is classified with the same function
+          // `run` would use, and the same predicate decides. Anything else
+          // re-throws *raw* and takes the batch (the transaction) with it.
+          if (isDuplicateApartmentNumber(error)) {
+            duplicateLabelsSkipped.push(input.apartmentNumber);
+            continue;
+          }
+          throw error;
+        }
+      }
+
+      return { created, duplicateLabelsSkipped };
+    });
+  }
+
   // ── internals ───────────────────────────────────────────────────────────────
 
   /** Runs `work` as `actor` and classifies any failure into the module's vocabulary. */
@@ -449,6 +450,114 @@ const APARTMENT_COLUMNS = sql.raw(
     "deleted_at",
   ].join(", "),
 );
+
+/**
+ * The tenant columns plus the fields the caller actually sent — the one column
+ * assembly `create` and `createMany` share, so a batch row and a single row can
+ * never disagree about what an absent field means (omit → the column default
+ * applies; explicit `null` → written as `null`, both spelled with the cast that
+ * keeps Postgres from inferring a type from the bind parameter).
+ *
+ * Column names are literals in this function and values are bound parameters, so
+ * the composition cannot be influenced by input.
+ */
+function insertParts(
+  input: CreateApartmentInput,
+  societyId: SocietyId,
+  buildingId: BuildingId,
+): { readonly columns: SQL[]; readonly values: SQL[] } {
+  const columns: SQL[] = [sql`society_id`, sql`building_id`];
+  const values: SQL[] = [sql`${societyId}::uuid`, sql`${buildingId}::uuid`];
+
+  const add = (column: string, value: SQL): void => {
+    columns.push(sql.raw(column));
+    values.push(value);
+  };
+
+  add("apartment_number", sql`${input.apartmentNumber}::varchar`);
+  // Present-but-null is a real value (\"this building has no wings\"), and it is
+  // spelled `null::uuid` rather than omitted so that a caller clearing a wing
+  // and a caller not mentioning one are distinguishable in the statement.
+  if (input.wingId !== undefined) {
+    add(
+      "wing_id",
+      input.wingId === null ? sql`null::uuid` : sql`${input.wingId}::uuid`,
+    );
+  }
+  if (input.floor !== undefined) {
+    add(
+      "floor",
+      input.floor === null
+        ? sql`null::smallint`
+        : sql`${input.floor}::smallint`,
+    );
+  }
+  if (input.bhk !== undefined) {
+    add(
+      "bhk",
+      input.bhk === null
+        ? sql`null::numeric(3,1)`
+        : sql`${input.bhk}::numeric(3,1)`,
+    );
+  }
+  if (input.carpetAreaSqft !== undefined) {
+    add(
+      "carpet_area_sqft",
+      input.carpetAreaSqft === null
+        ? sql`null::numeric(8,2)`
+        : sql`${input.carpetAreaSqft}::numeric(8,2)`,
+    );
+  }
+  if (input.builtupAreaSqft !== undefined) {
+    add(
+      "builtup_area_sqft",
+      input.builtupAreaSqft === null
+        ? sql`null::numeric(8,2)`
+        : sql`${input.builtupAreaSqft}::numeric(8,2)`,
+    );
+  }
+  if (input.parkingSlots !== undefined) {
+    add("parking_slots", sql`${input.parkingSlots}::smallint`);
+  }
+  if (input.shareUnits !== undefined) {
+    add("share_units", sql`${input.shareUnits}::numeric(8,3)`);
+  }
+  if (input.occupancyStatus !== undefined) {
+    add(
+      "occupancy_status",
+      sql`${input.occupancyStatus}::public.occupancy_status`,
+    );
+  }
+  if (input.isCommercial !== undefined) {
+    add("is_commercial", sql`${input.isCommercial}::boolean`);
+  }
+  if (input.isBillable !== undefined) {
+    add("is_billable", sql`${input.isBillable}::boolean`);
+  }
+
+  return { columns, values };
+}
+
+/**
+ * Whether a raw database failure is `uq_apartments_building_number` deciding a
+ * duplicate — the one refusal `createMany` absorbs; everything else is an error.
+ *
+ * The raw error is classified with `apartmentErrorFromPostgres` — the function
+ * `run` would use — rather than matched against SQLSTATE strings here: the
+ * constraint name lives in whichever property the driver chose to fill, and a
+ * second, narrower matcher would drift from the classification the rest of the
+ * module promises. The classified result is a `conflict` naming
+ * `apartmentNumber` exactly when that index refused the row.
+ */
+function isDuplicateApartmentNumber(error: unknown): boolean {
+  const classified = apartmentErrorFromPostgres(error, "write");
+  if (classified.code !== "conflict") {
+    return false;
+  }
+  const haystack =
+    JSON.stringify(classified.details ?? {}) + " " + classified.message;
+  return /apartment_number|uq_apartments/i.test(haystack);
+}
 
 /** `count(*)` is always an integer, so the coercion is exact rather than lenient. */
 const countRowSchema = z.object({ count: z.coerce.number().int() });

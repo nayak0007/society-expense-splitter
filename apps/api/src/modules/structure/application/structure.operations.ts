@@ -1,9 +1,11 @@
 import { Inject, Injectable } from "@nestjs/common";
 import {
+  bulkCreateApartments,
   createApartment,
   createBuilding,
   deleteApartment,
   deleteBuilding,
+  generateApartments,
   getApartment,
   getBuilding,
   listApartments,
@@ -16,8 +18,12 @@ import type {
   ApartmentView,
   BuildingList,
   BuildingView,
+  BulkCreateApartmentsCommand,
+  BulkCreateApartmentsResult,
   CreateApartmentCommand,
   CreateBuildingCommand,
+  GenerateApartmentsCommand,
+  GenerateApartmentsResult,
   StructureDeps,
   UpdateApartmentCommand,
   UpdateBuildingCommand,
@@ -172,6 +178,44 @@ export class StructureOperations {
     apartmentId: ApartmentId,
   ): Promise<void> {
     return unwrap(deleteApartment(this.deps, actor, societyId, apartmentId));
+  }
+
+  /**
+   * T044: expand a numbering pattern into flats, previewing or committing.
+   *
+   * Like every method here it adds nothing but dependency injection and the
+   * `Result` → exception conversion — the pattern grammar, the dry-run rule and
+   * the skip-and-report behaviour all live in the use case the mobile client
+   * shares.
+   */
+  async generateApartments(
+    actor: UserId,
+    societyId: SocietyId,
+    buildingId: BuildingId,
+    command: GenerateApartmentsCommand,
+  ): Promise<GenerateApartmentsResult> {
+    return unwrap(
+      generateApartments(this.deps, actor, societyId, buildingId, command),
+    );
+  }
+
+  /**
+   * T043: create many flats in one call, with a per-row report.
+   *
+   * The command carries its own `buildingId` (a paste is addressed to the
+   * building it was pasted into, and the route already carries it as a path
+   * parameter), so the use case is called with both — and the guard chain has
+   * already verified the caller against the society the header named.
+   */
+  async bulkCreateApartments(
+    actor: UserId,
+    societyId: SocietyId,
+    buildingId: BuildingId,
+    command: BulkCreateApartmentsCommand,
+  ): Promise<BulkCreateApartmentsResult> {
+    return unwrap(
+      bulkCreateApartments(this.deps, actor, societyId, buildingId, command),
+    );
   }
 }
 

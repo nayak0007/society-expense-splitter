@@ -298,5 +298,46 @@ export function createFakeApartmentRepository(): FakeApartmentRepository {
           apartment.deletedAt === null,
       ).length;
     },
+
+    /**
+     * The adapter's batch promise, reproduced at the seam the HTTP tests run
+     * against: one call, every row attempted against the live flats, a label
+     * already carried — by storage or by an earlier row of the same batch —
+     * skipped and reported rather than fatal, the rest created. The batch is
+     * one call here because it is one transaction in the real adapter; the
+     * atomicity that matters (all rows or none on a non-duplicate failure) is a
+     * property of storage, which is exactly what this fake does not model.
+     */
+    async createMany(
+      buildingId: BuildingId,
+      societyId: SocietyId,
+      inputs: readonly CreateApartmentInput[],
+      _actor: UserId,
+    ): Promise<{
+      readonly created: readonly Apartment[];
+      readonly duplicateLabelsSkipped: readonly string[];
+    }> {
+      calls.push("createMany");
+
+      const created: Apartment[] = [];
+      const duplicates: string[] = [];
+      const seen = new Set<string>();
+      for (const input of inputs) {
+        const clash = [...apartments.values()].some(
+          (apartment) =>
+            apartment.societyId === societyId &&
+            apartment.buildingId === buildingId &&
+            apartment.deletedAt === null &&
+            apartment.apartmentNumber === input.apartmentNumber,
+        );
+        if (clash || seen.has(input.apartmentNumber)) {
+          duplicates.push(input.apartmentNumber);
+          continue;
+        }
+        seen.add(input.apartmentNumber);
+        created.push(await this.create(buildingId, societyId, input, _actor));
+      }
+      return { created, duplicateLabelsSkipped: duplicates };
+    },
   };
 }

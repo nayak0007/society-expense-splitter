@@ -50,6 +50,7 @@ export type ApartmentRepositoryMethod =
   | "listApartments"
   | "findApartment"
   | "create"
+  | "createMany"
   | "update"
   | "remove"
   | "countForBuilding";
@@ -190,6 +191,44 @@ export class FakeApartmentRepository implements ApartmentRepository {
     });
     this.apartments.set(apartment.id, apartment);
     return apartment;
+  }
+
+  async createMany(
+    buildingId: BuildingId,
+    societyId: SocietyId,
+    inputs: readonly CreateApartmentInput[],
+    actor: UserId,
+  ): Promise<{
+    readonly created: readonly Apartment[];
+    readonly duplicateLabelsSkipped: readonly string[];
+  }> {
+    this.record("createMany");
+    this.throwIfQueued("createMany");
+
+    // The real adapter's promise, reproduced: every row is attempted, a label
+    // a live flat of this building already carries (including one created
+    // earlier in the same batch) is skipped and reported, and the rest land.
+    const created: Apartment[] = [];
+    const duplicates: string[] = [];
+    const seen = new Set<string>();
+    for (const input of inputs) {
+      const clash = [...this.apartments.values()].some(
+        (apartment) =>
+          apartment.societyId === societyId &&
+          apartment.buildingId === buildingId &&
+          apartment.deletedAt === null &&
+          apartment.apartmentNumber === input.apartmentNumber,
+      );
+      if (clash || seen.has(input.apartmentNumber)) {
+        duplicates.push(input.apartmentNumber);
+        continue;
+      }
+      seen.add(input.apartmentNumber);
+      // The whole input, not just the label: the port takes `CreateApartmentInput`
+      // so per-row fields reach the same creation path `create` serves.
+      created.push(await this.create(buildingId, societyId, input, actor));
+    }
+    return { created, duplicateLabelsSkipped: duplicates };
   }
 
   async update(

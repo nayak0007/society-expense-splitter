@@ -2,6 +2,7 @@ import {
   apartmentDetailResponseSchema,
   apartmentListResponseSchema,
   apartmentResponseSchema,
+  bulkCreateApartmentsResponseSchema,
 } from '@ses/contracts';
 import type { ApartmentDto } from '@ses/contracts';
 import { asApartmentId, asBuildingId, asSocietyId, asWingId, StructureError } from '@ses/domain';
@@ -288,5 +289,48 @@ export class ApiApartmentRepository implements ApartmentRepository {
   ): Promise<number> {
     const apartments = await this.listApartments(buildingId, societyId, actor);
     return apartments.length;
+  }
+
+  /**
+   * The port's batch method, over the API's bulk route.
+   *
+   * The port promise this must reproduce is the skip-and-report: the server
+   * answers with the created flats and the labels it skipped, and both travel
+   * through unchanged — the *decision* was the server's, so mapping here would
+   * only be a second chance to get it wrong. A failure of the whole batch (auth,
+   * permission, a non-duplicate storage refusal) is the server's error mapped
+   * through the same dictionary every other method uses; the per-row report is
+   * the success path.
+   *
+   * Not yet called from a screen (the mobile wizard is Roadmap T055), which is
+   * why no feature layer wires it — the port is implemented here so the domain's
+   * use cases can run unchanged against this adapter the day that screen lands.
+   */
+  async createMany(
+    buildingId: BuildingId,
+    societyId: SocietyId,
+    inputs: readonly CreateApartmentInput[],
+    _actor: UserId,
+  ): Promise<{
+    readonly created: readonly Apartment[];
+    readonly duplicateLabelsSkipped: readonly string[];
+  }> {
+    try {
+      const response = await apiRequest('POST', `buildings/${buildingId}/apartments/bulk`, {
+        body: {
+          rows: inputs.map((input) => body(input, APARTMENT_FIELDS)),
+        },
+        schema: bulkCreateApartmentsResponseSchema,
+        societyId,
+      });
+      return {
+        created: response.created.map((dto) => apartmentFromDto(dto)),
+        duplicateLabelsSkipped: response.outcomes
+          .filter((outcome) => outcome.status === 'existing')
+          .map((outcome) => outcome.apartmentNumber),
+      };
+    } catch (error: unknown) {
+      throw mapError(error, 'Could not create the flats.');
+    }
   }
 }

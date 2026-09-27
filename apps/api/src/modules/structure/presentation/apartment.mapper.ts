@@ -2,14 +2,22 @@ import {
   apartmentDetailResponseSchema,
   apartmentListResponseSchema,
   apartmentResponseSchema,
+  bulkCreateApartmentsResponseSchema,
+  generateApartmentsResponseSchema,
 } from "@ses/contracts";
 import type {
   ApartmentDetailResponseDto,
   ApartmentDto,
   ApartmentListResponseDto,
   ApartmentResponseDto,
+  BulkCreateApartmentsResponseDto,
+  GenerateApartmentsResponseDto,
 } from "@ses/contracts";
 import type { Apartment, StructureCapabilities } from "@ses/domain";
+import type {
+  BulkCreateApartmentsResult,
+  GenerateApartmentsResult,
+} from "@ses/application";
 
 /**
  * Domain entity → wire DTO, per SAD §4.5's `presentation/*.mapper.ts`.
@@ -92,5 +100,69 @@ export function apartmentResponseToDto(
 ): ApartmentResponseDto {
   return apartmentResponseSchema.parse({
     apartment: apartmentToDto(apartment),
+  });
+}
+
+/**
+ * T044 — the generation report, parsed against the contract so a field the
+ * domain grows silently fails here instead of shipping to the client.
+ */
+export function generateApartmentsToDto(
+  result: GenerateApartmentsResult,
+): GenerateApartmentsResponseDto {
+  return generateApartmentsResponseSchema.parse({
+    dryRun: result.dryRun,
+    total: result.total,
+    createdCount: result.createdCount,
+    skippedCount: result.skippedCount,
+    rows: result.rows.map((row) => ({
+      apartmentNumber: row.apartmentNumber,
+      floor: row.floor,
+      wingId: row.wingId,
+      status: row.status,
+    })),
+  });
+}
+
+/**
+ * T043 — the bulk report. The per-row outcomes and the created list are both
+ * enumerated rather than spread, for the same reason `apartmentToDto` is.
+ */
+export function bulkCreateApartmentsToDto(
+  result: BulkCreateApartmentsResult,
+): BulkCreateApartmentsResponseDto {
+  return bulkCreateApartmentsResponseSchema.parse({
+    total: result.total,
+    createdCount: result.createdCount,
+    existingCount: result.existingCount,
+    duplicateCount: result.duplicateCount,
+    invalidCount: result.invalidCount,
+    outcomes: result.outcomes.map((outcome) => ({
+      apartmentNumber: outcome.apartmentNumber,
+      status: outcome.status,
+      ...(outcome.field === undefined ? {} : { field: outcome.field }),
+      ...(outcome.message === undefined ? {} : { message: outcome.message }),
+    })),
+    // Full entities mapped through `apartmentToDto`, so the created list carries
+    // exactly the fields a single create returns — defaults included.
+    created: result.created.map((apartment) => ({
+      id: apartment.id,
+      societyId: apartment.societyId,
+      buildingId: apartment.buildingId,
+      wingId: apartment.wingId,
+      apartmentNumber: apartment.apartmentNumber,
+      floor: apartment.floor,
+      bhk: apartment.bhk,
+      carpetAreaSqft: apartment.carpetAreaSqft,
+      builtupAreaSqft: apartment.builtupAreaSqft,
+      parkingSlots: apartment.parkingSlots,
+      shareUnits: apartment.shareUnits,
+      occupancyStatus: apartment.occupancyStatus,
+      isCommercial: apartment.isCommercial,
+      isBillable: apartment.isBillable,
+      createdAt: apartment.createdAt,
+      updatedAt: apartment.updatedAt,
+      deletedAt: apartment.deletedAt,
+    })),
   });
 }

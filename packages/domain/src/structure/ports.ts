@@ -193,4 +193,43 @@ export interface ApartmentRepository {
     societyId: SocietyId,
     actor: UserId,
   ): Promise<number>;
+
+  /**
+   * Creates many live flats of one building, atomically, inside the caller's
+   * one transaction (Roadmap T043's bulk create; T044's commit path).
+   *
+   * ## One transaction, and why the duplicates are skipped rather than fatal
+   *
+   * Every insert here shares a single transaction, so a failure the caller does
+   * not choose to absorb leaves *nothing* behind — the atomicity `create` has
+   * row by row, at batch scale. Rows are attempted one by one rather than as
+   * one multi-row statement because each row's column set is its own (a row may
+   * carry areas, another only a number): assembling per-row column lists into
+   * one `INSERT` is not possible without forcing every row to carry every
+   * column, and column defaults are decided by the database, not by the widest
+   * row in the batch.
+   *
+   * A label a live flat of this building already carries — including one
+   * created earlier in this same batch — is **skipped and reported** in
+   * `duplicateLabelsSkipped` rather than aborting the batch: the use cases
+   * above this port promise a per-row report, and the partial unique index
+   * `uq_apartments_building_number` is what decides it, so a concurrent
+   * creator between the caller's read and this write lands in the same report
+   * instead of failing the batch. Any other failure propagates.
+   *
+   * Inputs are `CreateApartmentInput`, so everything the single-flat form can
+   * set is settable per row (T043: "area/BHK/parking/share units/occupancy all
+   * settable"); absent fields take the column defaults exactly as `create`
+   * resolves them. Scoped by `societyId` and `actor` like every other method.
+   */
+  createMany(
+    buildingId: BuildingId,
+    societyId: SocietyId,
+    inputs: readonly CreateApartmentInput[],
+    actor: UserId,
+  ): Promise<{
+    readonly created: readonly Apartment[];
+    /** Labels not inserted because a live flat already carries them. */
+    readonly duplicateLabelsSkipped: readonly string[];
+  }>;
 }
