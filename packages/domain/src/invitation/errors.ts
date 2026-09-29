@@ -36,6 +36,19 @@ export const INVITATION_ERROR_CODES = [
   "invitation_expired",
   /** The inviter may not hand out that role — `member.invite` without `member.role_change`. */
   "invitation_role_not_assignable",
+  /**
+   * The invited role is gone by the time it is accepted: the membership it would create
+   * would exceed PRD §2.2's cap (3 admins, 2 treasurers), which `chk_role_caps()` refuses
+   * from inside `invitation_accept()`.
+   *
+   * Deliberately not folded into `invitation_role_not_assignable`: that one is about the
+   * *inviter* (a permission — they may not hand out that role at all), while this one is
+   * about the *society*, whose population changed between the invitation being written and
+   * accepted, which is a race the acceptance has to settle rather than a mistake anybody
+   * made. It answers with the members module's own `ROLE_CAP_EXCEEDED` detail code, so a
+   * client that already explains a cap from a role change explains this one too.
+   */
+  "invitation_role_unavailable",
   /** A shareable link at a role above `resident`: whoever holds it would hold the role. */
   "invitation_open_link_role",
   /** Somebody who already has an account in the society. A *shadow* member is not this. */

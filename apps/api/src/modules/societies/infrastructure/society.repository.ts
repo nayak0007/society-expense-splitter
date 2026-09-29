@@ -32,6 +32,7 @@ import {
 import {
   createPayload,
   isJoinCodeCollision,
+  isSlugCollision,
   joinOptionsFromPayload,
   joinOptionsSchema,
   joinPreviewFromPayload,
@@ -335,23 +336,60 @@ export class SocietyRepositoryPostgres
         select public.society_create(${JSON.stringify(payload)}::jsonb) as snapshot
       `;
 
-      let rows: readonly Row[];
-      try {
-        rows = await query(tx, statement);
-      } catch (error: unknown) {
-        // The code is minted by the database, so a collision is a race rather
-        // than a bug: another society took the code between the uniqueness check
-        // and the insert. One retry mints a different one (PRD T040).
-        if (!isJoinCodeCollision(error)) {
-          throw error;
+      // `society_create` mints **two** unique values, so a failure here can be a
+      // race rather than a bug: the join code is random (another society took it
+      // between the uniqueness check and the insert — PRD T040's "join-code
+      // collision retries and succeeds"), and the slug is derived from the name
+      // (two people can pick one name at the same instant).
+      //
+      // Each attempt runs in its own **savepoint**, and that is the whole reason
+      // this works. In PostgreSQL a failed statement aborts the surrounding
+      // transaction, so re-issuing the statement directly would fail with `25P02`
+      // (`current transaction is aborted`) rather than minting again — which is
+      // exactly what the single retry added with T040 did: it could never fire, so
+      // the collision it was written for always surfaced as a conflict. A nested
+      // transaction is a savepoint in the postgres-js driver, so a failed attempt
+      // rolls back to just before the INSERT and the outer transaction (and the
+      // caller's RLS identity) survives to try again.
+      //
+      // Bounded, because a third failure means something else is wrong and the
+      // classifier should see it: an exhausted retry keeps the database's own
+      // error, and `societyErrorFromPostgres` answers with `conflict`.
+      let snapshot: SocietySnapshot | undefined;
+      let lastError: unknown;
+      for (
+        let attempt = 1;
+        attempt <= MAX_SOCIETY_MINT_ATTEMPTS && snapshot === undefined;
+        attempt += 1
+      ) {
+        try {
+          snapshot = await tx.transaction(async (inner) => {
+            const rows = await query(inner, statement);
+            return parseSnapshot(
+              firstValue(rows, "snapshot"),
+              "created society",
+            );
+          });
+        } catch (error: unknown) {
+          if (!isJoinCodeCollision(error) && !isSlugCollision(error)) {
+            throw error;
+          }
+          lastError = error;
         }
-        rows = await query(tx, statement);
       }
 
-      const snapshot = parseSnapshot(
-        firstValue(rows, "snapshot"),
-        "created society",
-      );
+      if (snapshot === undefined) {
+        // Unreachable while `MAX_SOCIETY_MINT_ATTEMPTS` is at least one, and it
+        // exists so the types stay honest rather than for the control flow.
+        throw (
+          lastError ??
+          new SocietyError(
+            "unknown",
+            "Something went wrong. Please try again.",
+            { hint: "society_create() was never attempted." },
+          )
+        );
+      }
       if (
         snapshot.membership === null ||
         snapshot.membership.user_id === null
@@ -673,6 +711,18 @@ export class SocietyRepositoryPostgres
 }
 
 type Row = Record<string, unknown>;
+
+/**
+ * How many times `create()` re-runs `society_create()` when the *database-minted*
+ * values collide with a society created a moment earlier.
+ *
+ * Three, not one: the join code is random, so a second attempt almost always
+ * succeeds; the slug is derived from the name, so a retry only helps once the
+ * competitor has committed. A third failure is reported rather than retried,
+ * because at that point the honest answer is the conflict the classifier already
+ * produces.
+ */
+const MAX_SOCIETY_MINT_ATTEMPTS = 3;
 
 /**
  * `execute` resolves to the driver's own row list, whose index signature is

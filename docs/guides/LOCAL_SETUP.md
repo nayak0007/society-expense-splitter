@@ -211,6 +211,76 @@ This is the same assertion CI runs in its `test-db` job. A wrong GUC name or a
 broken policy fails here loudly instead of as an app that "works" but sees an
 empty database.
 
+> The canary is **local-only**. It writes `auth.users` through
+> `auth.create_local_user`, which the bootstrap migration's `auth` shim provides;
+> hosted Supabase has neither (its `auth` schema is real and owned by
+> `supabase_auth_admin`), and the shim deliberately skips itself when it detects
+> that. On hosted, prove the same thing with real Auth users —
+> `scripts/verification/hosted-verify.mjs` (below) — never by weakening policies.
+
+#### Hosted Supabase (staging / production)
+
+The authoritative command is the **same** one as locally: `pnpm db:migrate`
+(ADR-0008). There is no dashboard SQL editor step and no `supabase db push`; the
+ledger in `ses_meta.migrations` is the one history in every environment, so local
+and hosted can be diffed name-by-name and checksum-by-checksum.
+
+Required variables (names only — never commit or print values):
+
+| Variable                    | Role                                                                                                                             |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `MIGRATION_DATABASE_URL`    | Owner connection, used **only** for DDL and `db:*`. On hosted: the pooler in session mode (`:5432`) as `postgres.<project-ref>`. |
+| `DATABASE_URL`              | Runtime connection, pooler in transaction mode (`:6543`), and **never** the owner role (ADR-0007 refuses to start otherwise).    |
+| `SUPABASE_URL`              | Project URL; the JWT issuer is derived from it (`/auth/v1`).                                                                     |
+| `SUPABASE_JWT_ISSUER`       | Expected `iss`; the API also checks `aud` and verifies against the live JWKS.                                                    |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-side only: Supabase Admin API (verification harness), never shipped to the mobile app.                                    |
+| `REDIS_URL`                 | Cache/queue; `/v1/health/ready` reports it independently of postgres, so a red Redis does not mean the database is unreachable.  |
+
+Procedure for a hosted project:
+
+```bash
+pnpm db:status   # audit first: applied vs pending, from the hosted ledger
+pnpm db:migrate  # apply ONLY the pending files, one transaction per file
+pnpm db:check    # exit 0 only when the hosted database matches HEAD
+```
+
+`db:status` has to run with the working directory inside `apps/api` (the CLI
+loads `apps/api/.env` relative to it). It is always safe and read-only, so run it
+before and after any migration.
+
+Environment differences worth knowing before you write a migration:
+
+- **Version.** Hosted Supabase tracks the managed Postgres major (currently 17.x)
+  while local is newer (18.x). Migrations must not depend on a PG18-only feature;
+  if one does, it belongs behind a version check or a different formulation.
+- **`postgres` has `BYPASSRLS`.** The managed superuser bypasses row-level
+  security by design, which is why the request path is load-bearing: `UnitOfWork`
+  pins the transaction to the `authenticated` role and sets the `auth.uid()`
+  claims, and nothing else may query business tables. A direct owner connection
+  will see every row and is not evidence that the policies are wrong.
+- **Soft deletes are not hidden by RLS.** The policies deliberately do not filter
+  `deleted_at` (the business layer does), so a creator keeps seeing their own
+  soft-deleted societies. That is intended; do not "fix" it in a policy.
+
+Hosted round-trips take a few seconds each, so a long serial verification run can
+look stalled while it is merely slow — check progress before concluding a hang.
+
+To verify a hosted project end-to-end (real Auth users, real JWTs, RLS A–G, the
+Phase 3 smoke path), run the harness with the API environment file:
+
+```bash
+VERIFY_RUN_ID=<short-id> PORT=3010 node scripts/verification/hosted-verify.mjs --env-file=apps/api/.env
+```
+
+It creates throwaway users on a `@…verify.ses.test` domain and societies named
+`ZZ-VERIFY-<run-id> …`, exercises the API against hosted, then soft-deletes its own
+business rows. Auth users are left in place for manual cleanup (they are listed at
+the end of the run) because the task forbids resetting Auth.
+
+Recovery: applied migrations are immutable (checksum-enforced) — **fix forward**
+with a new file, never edit one that has been applied. `pnpm db:reset` drops and
+re-applies and deliberately refuses to run outside local development.
+
 ### 5. The contract
 
 `docs/api/OPENAPI.yaml` is generated from the running code, committed, and diffed

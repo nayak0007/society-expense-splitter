@@ -5,6 +5,7 @@ import { SQLSTATE } from "../../../../common/database/postgres-errors";
 import {
   createPayload,
   isJoinCodeCollision,
+  isSlugCollision,
   joinPreviewFromPayload,
   joinPreviewSchema,
   membershipFromRow,
@@ -323,15 +324,57 @@ describe("isJoinCodeCollision", () => {
   });
 
   it("does not treat another unique violation as a collision", () => {
-    // Retrying a slug or membership collision would fail identically and turn
-    // one clear error into two round trips and a generic failure.
+    // A membership collision is refused with a domain error rather than retried:
+    // retrying would fail identically and turn one clear error into two round trips.
     expect(
       isJoinCodeCollision({
         code: SQLSTATE.uniqueViolation,
-        detail: "Key (slug)=(green-meadows) already exists.",
+        constraint: "members_society_user_key",
+        detail: "Key (society_id, user_id)=(…) already exists.",
       }),
     ).toBe(false);
     expect(isJoinCodeCollision(new Error("socket closed"))).toBe(false);
+  });
+});
+
+describe("isSlugCollision", () => {
+  it("recognises the second of two societies created with one name", () => {
+    // The slug is derived from the name by `prepare_society()`, so unlike the random
+    // join code a retry only helps once the competitor has committed — but the first
+    // attempt is exactly the case that must not become a conflict.
+    expect(
+      isSlugCollision({
+        code: SQLSTATE.uniqueViolation,
+        message:
+          'duplicate key value violates unique constraint "societies_slug_key"',
+        detail: "Key (slug)=(green-meadows) already exists.",
+      }),
+    ).toBe(true);
+  });
+
+  it("reads the constraint name when the message and detail are missing", () => {
+    expect(
+      isSlugCollision({
+        code: SQLSTATE.uniqueViolation,
+        constraint: "societies_slug_key",
+      }),
+    ).toBe(true);
+  });
+
+  it("leaves the other unique violations alone", () => {
+    expect(
+      isSlugCollision({
+        code: SQLSTATE.uniqueViolation,
+        detail: "Key (join_code)=(ABC123) already exists.",
+      }),
+    ).toBe(false);
+    expect(
+      isSlugCollision({
+        code: SQLSTATE.uniqueViolation,
+        constraint: "members_society_user_key",
+      }),
+    ).toBe(false);
+    expect(isSlugCollision(new Error("socket closed"))).toBe(false);
   });
 });
 
@@ -384,6 +427,21 @@ describe("Drizzle's error wrapper (live-database regression)", () => {
         asDrizzleWraps({
           code: SQLSTATE.uniqueViolation,
           detail: "Key (join_code)=(ABC123) already exists.",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps the slug retry reachable", () => {
+    // Same narrowing, same consequence: two societies created with one name at the
+    // same moment would answer a conflict instead of both being created.
+    expect(
+      isSlugCollision(
+        asDrizzleWraps({
+          code: SQLSTATE.uniqueViolation,
+          message:
+            'duplicate key value violates unique constraint "societies_slug_key"',
+          detail: "Key (slug)=(green-meadows) already exists.",
         }),
       ),
     ).toBe(true);

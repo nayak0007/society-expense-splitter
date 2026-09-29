@@ -494,6 +494,44 @@ export function isJoinCodeCollision(error: unknown): boolean {
 }
 
 /**
+ * True when the failure was a **slug** collision — two societies created with the
+ * same (or slug-equivalent) name at the same moment.
+ *
+ * `prepare_society()` derives the slug from the name and picks the first free
+ * candidate with a `WHILE EXISTS` loop, so run alone it disambiguates
+ * (`green-valley`, then `green-valley-2`) and two people choosing one name is an
+ * ordinary creation rather than a conflict. Two concurrent inserts both find the
+ * base slug free and the unique index refuses the second — a timing-dependent
+ * refusal for a request that is not a duplicate. The repository retries, exactly
+ * as it does for the join code, so that a race reaches the same answer the
+ * sequential path would have.
+ *
+ * `slug` is matched in `detail` (where the constraint names the column) and in
+ * the constraint name, which is the pair the classifier already reads for its
+ * other cases. A retry cannot promise success here the way it can for the random
+ * join code — the candidate is derived from a name two callers share, and an
+ * uncommitted competitor is invisible to the next scan — so the retry is bounded
+ * and the terminal failure still reaches `societyErrorFromPostgres`, which
+ * answers `conflict` with a sentence a user can act on.
+ */
+export function isSlugCollision(error: unknown): boolean {
+  const candidate = asErrorLike(error);
+  return (
+    candidate.code === SQLSTATE.uniqueViolation &&
+    /slug/i.test(
+      [
+        candidate.message,
+        candidate.detail,
+        candidate.constraint,
+        candidate.constraint_name,
+      ]
+        .filter((part): part is string => typeof part === "string")
+        .join(" "),
+    )
+  );
+}
+
+/**
  * Postgres failure → the domain's error vocabulary.
  *
  * `context` matters for exactly one case and it is the important one: `42501`

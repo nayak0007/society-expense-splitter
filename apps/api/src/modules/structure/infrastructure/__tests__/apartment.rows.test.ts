@@ -3,6 +3,7 @@ import {
   apartmentFromRow,
   apartmentRowSchema,
   APARTMENT_RAISED_EXCEPTION,
+  isApartmentNumberCollision,
 } from "../apartment.rows";
 import { RAISED_EXCEPTION } from "../building.rows";
 import { SQLSTATE } from "../../../../common/database/postgres-errors";
@@ -354,5 +355,90 @@ describe("apartmentErrorFromPostgres", () => {
     );
 
     expect(error.code).toBe("unknown");
+  });
+});
+
+/**
+ * The predicate the bulk create's per-row absorption turns on.
+ *
+ * It is a separate contract from the classifier above, and it was silently wrong:
+ * built on the classifier's *answer* (a sentence of prose and `field:
+ * "apartmentNumber"`) it could never match the constraint it was written for, so
+ * every concurrent duplicate escaped the absorption and failed the whole batch with a
+ * `409`. These cases pin the evidence it must actually read.
+ */
+describe("isApartmentNumberCollision", () => {
+  it("recognises the index from the message Postgres writes", () => {
+    expect(
+      isApartmentNumberCollision({
+        code: SQLSTATE.uniqueViolation,
+        message:
+          'duplicate key value violates unique constraint "uq_apartments_building_number"',
+        detail:
+          "Key (building_id, apartment_number)=(…, A-101) already exists.",
+      }),
+    ).toBe(true);
+  });
+
+  it("reads the constraint name when the message and detail are absent", () => {
+    expect(
+      isApartmentNumberCollision({
+        code: SQLSTATE.uniqueViolation,
+        constraint: "uq_apartments_building_number",
+      }),
+    ).toBe(true);
+  });
+
+  it("sees through the wrapper Drizzle throws", () => {
+    // The shape the repository actually receives: `tx.execute` and `tx.transaction`
+    // throw a `DrizzleQueryError` whose own `code` is absent, so a predicate reading
+    // the wrapper rather than the cause would never fire.
+    expect(
+      isApartmentNumberCollision({
+        name: "DrizzleQueryError",
+        query: "insert into public.apartments …",
+        params: [],
+        cause: {
+          code: SQLSTATE.uniqueViolation,
+          message:
+            'duplicate key value violates unique constraint "uq_apartments_building_number"',
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("does not absorb another unique violation", () => {
+    // A predicate that answered `true` for any `23505` would silently drop a row the
+    // caller never asked to skip.
+    expect(
+      isApartmentNumberCollision({
+        code: SQLSTATE.uniqueViolation,
+        constraint: "uq_buildings_id_society",
+      }),
+    ).toBe(false);
+    expect(isApartmentNumberCollision(new Error("socket closed"))).toBe(false);
+  });
+
+  it("does not treat the classifier's own prose as evidence", () => {
+    // The exact regression: for a real duplicate the classifier answers `conflict`
+    // with `field: "apartmentNumber"` and a sentence — and searching *that* for
+    // `apartment_number` or `uq_apartments` can never match, because the field is
+    // camelCase and the message does not name the index. Only the driver's error does.
+    const error = apartmentErrorFromPostgres(
+      {
+        code: SQLSTATE.uniqueViolation,
+        constraint_name: "uq_apartments_building_number",
+      },
+      "write",
+    );
+    expect(error.code).toBe("conflict");
+
+    const classifiedProse = {
+      code: SQLSTATE.uniqueViolation,
+      message: error.message,
+      detail: JSON.stringify(error.details),
+    };
+    expect(classifiedProse.detail).toContain("apartmentNumber");
+    expect(isApartmentNumberCollision(classifiedProse)).toBe(false);
   });
 });

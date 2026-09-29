@@ -266,6 +266,15 @@ export const RAISED_EXCEPTION = {
   invitationTransitionForbidden: "INVITATION_TRANSITION_FORBIDDEN",
   invitationApartmentInvalid: "INVITATION_APARTMENT_INVALID",
   invitationAcceptDenied: "INVITATION_ACCEPT_DENIED",
+  /**
+   * Raised by `chk_role_caps()` — the members module's own refusal — from inside
+   * `invitation_accept()`. It is listed here because an acceptance *writes a role*: an
+   * invitation created at Treasurer succeeds until the society's second treasurer exists,
+   * and then the same link must be refused with a sentence rather than a 500. Leaving it
+   * out is the failure this list exists to prevent, and it was missing until the
+   * concurrency audit counted the ways the cap can be reached.
+   */
+  societyRoleCapExceeded: "SOCIETY_ROLE_CAP_EXCEEDED",
 } as const;
 
 /** Constraint names worth a specific answer rather than "that conflicts with something". */
@@ -379,6 +388,20 @@ export function invitationErrorFromPostgres(
             ...base,
             hint: "The invitation token collided with an existing row.",
           },
+        );
+      }
+      // `members_society_user_key` — the membership this acceptance would create already
+      // exists. `invitation_accept()` translates this itself (see
+      // `20260928120000_membership_write_concurrency.sql`), so in practice it arrives as the
+      // named `INVITATION_ALREADY_MEMBER` above; this branch is the second line of defence
+      // for the ADR-0008 case where a later migration re-creates the function and forgets the
+      // handler, which is exactly how the join-options ambiguity fix and the seed-society fix
+      // arrived. Answering `already a member` beats answering "something conflicts".
+      if (/members_society_user_key|society_id, user_id/i.test(haystack)) {
+        return new InvitationError(
+          "invitation_already_member",
+          "You are already a member of this society.",
+          base,
         );
       }
       return new InvitationError(
@@ -580,6 +603,14 @@ function raisedError(
       "invitation_accept_denied",
       hint ?? "Sign in as the invited account to accept an invitation.",
       base,
+    );
+  }
+  if (message.includes(RAISED_EXCEPTION.societyRoleCapExceeded)) {
+    return new InvitationError(
+      "invitation_role_unavailable",
+      hint ??
+        "That role is no longer available in this society. Ask an Admin to invite you again.",
+      withField("role"),
     );
   }
   return new InvitationError(

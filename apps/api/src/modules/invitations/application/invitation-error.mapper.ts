@@ -32,6 +32,9 @@ export const ERROR_CODE_BY_INVITATION_CODE: Readonly<
   invitation_not_acceptable: "CONFLICT",
   invitation_expired: "CONFLICT",
   invitation_role_not_assignable: "FORBIDDEN",
+  // The role is not forbidden to the inviter — it is *full* (PRD §2.2). CONFLICT, matching how
+  // the members module answers the same database refusal on a role change.
+  invitation_role_unavailable: "CONFLICT",
   invitation_open_link_role: "FORBIDDEN",
   // The *recipient* is the conflict — an address or a number that already belongs to somebody here.
   invitation_recipient_already_member: "CONFLICT",
@@ -60,6 +63,9 @@ const DETAIL_CODES: Readonly<Partial<Record<InvitationErrorCode, string>>> = {
   invitation_not_acceptable: "INVITATION_NOT_ACCEPTABLE",
   invitation_expired: "INVITATION_EXPIRED",
   invitation_role_not_assignable: "INVITATION_ROLE_NOT_ASSIGNABLE",
+  // The members module's own detail code, reused rather than respelled: "that role is at its
+  // cap" is one situation, and a client should not need two strings for it.
+  invitation_role_unavailable: "ROLE_CAP_EXCEEDED",
   invitation_open_link_role: "INVITATION_OPEN_LINK_ROLE",
   invitation_recipient_already_member: "INVITATION_RECIPIENT_ALREADY_MEMBER",
   invitation_recipient_mismatch: "INVITATION_RECIPIENT_MISMATCH",

@@ -121,6 +121,41 @@ export const APARTMENT_RAISED_EXCEPTION = {
 } as const;
 
 /**
+ * Whether a raw database failure is `uq_apartments_building_number` deciding a
+ * duplicate — the one refusal the bulk create absorbs; everything else is an error.
+ *
+ * It reads the **raw** error, and that is a fix rather than a preference. The
+ * predicate this replaces asked `apartmentErrorFromPostgres` and then looked for the
+ * column or the index in its *answer* — but the classified answer for this violation
+ * is `field: "apartmentNumber"` and a sentence of prose, so neither `apartment_number`
+ * nor `uq_apartments` appeared in what was searched and the predicate could not
+ * recognise the constraint it was written for. Every duplicate therefore escaped the
+ * absorption and failed the whole batch with a `409`: measured against the hosted
+ * project, where a label claimed by a concurrent writer mid-batch answered `409`.
+ *
+ * The constraint's own name is what identifies a unique violation, and it lives on
+ * the driver's error in whichever property the driver happened to fill — the same set
+ * (`message`, `detail`, `constraint`, `constraint_name`) `isJoinCodeCollision` and
+ * `isSlugCollision` in `society.rows.ts` read, and for the same reason.
+ */
+export function isApartmentNumberCollision(error: unknown): boolean {
+  const candidate = asErrorLike(error);
+  if (candidate.code !== SQLSTATE.uniqueViolation) {
+    return false;
+  }
+  return /uq_apartments_building_number|apartment_number/i.test(
+    [
+      candidate.message,
+      candidate.detail,
+      candidate.constraint,
+      candidate.constraint_name,
+    ]
+      .filter((part): part is string => typeof part === "string")
+      .join(" "),
+  );
+}
+
+/**
  * Postgres failure → the module's error vocabulary, for apartment statements.
  *
  * `context` is the same lever `structureErrorFromPostgres` documents: on a **read**,

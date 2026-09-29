@@ -531,6 +531,8 @@
 
 **Tasks:** T036–T055 · **Estimated:** 24 h
 
+> **Deployment status (2026-09-28).** Phase 3 is implemented, and its schema is now live on the hosted Supabase project: `pnpm db:migrate` applied the pending files, `pnpm db:check` reports the database matches HEAD, and the hosted ledger matches local name-for-name and checksum-for-checksum (16 migrations). The concurrency remediation then applied one further forward-only migration through the same runner — `20260928120000_membership_write_concurrency.sql` — so the hosted ledger now stands at 17 applied / 0 pending and `pnpm db:check` still reports the database matches HEAD (see `docs/guides/LOCAL_SETUP.md`). The project was then verified against real Supabase Auth users through the API — the identity bridge (`SET LOCAL ROLE authenticated` + `auth.uid()`), RLS, cross-tenant isolation, the Phase 3 smoke path and the transactional flows — by `scripts/verification/hosted-verify.mjs`. The "migration is pending on the deployed Supabase project" sentences in the T036–T049 status blocks below predate this and are historical. Phase 4 has **not** started.
+
 ### Deliverables
 - Full structure schema: societies, settings, buildings, wings, apartments
 - Society CRUD, settings, join codes, public lookup

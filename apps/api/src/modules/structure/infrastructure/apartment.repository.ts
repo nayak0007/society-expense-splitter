@@ -23,6 +23,7 @@ import {
   apartmentFromRow,
   apartmentRowListSchema,
   apartmentRowSchema,
+  isApartmentNumberCollision,
 } from "./apartment.rows";
 import { unexpectedShapeError } from "./building.rows";
 
@@ -344,7 +345,7 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
    * atomic: any failure the caller does not absorb rolls back every row, which is
    * the property T043's "transactional" names.
    *
-   * ## Duplicates are skipped and reported, not fatal
+   * ## Duplicates are skipped and reported, not fatal — and contained in a savepoint
    *
    * `uq_apartments_building_number` decides a clash — there is no read-then-write
    * check here to race with. A `23505` naming that index (or the apartment_number
@@ -353,6 +354,18 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
    * the skipped labels into report rows, so a concurrent creator between the
    * caller's read and this write lands in the same report instead of failing the
    * request.
+   *
+   * ## Why each row is its own nested transaction
+   *
+   * A refused statement does not just return an error: it **aborts the transaction
+   * it ran in**, and every statement after it in that transaction fails with
+   * `25P02` ("current transaction is aborted") however unrelated. Catching the
+   * refusal and carrying on is therefore only sound if the refusal is contained,
+   * so each row's insert runs in a nested transaction, which Drizzle issues as a
+   * `SAVEPOINT`. Absorbing a duplicate rolls back that row alone and leaves the
+   * batch — and the rows after it — usable. Without this, the concurrent case this
+   * method exists to absorb answered `500` instead of a report line, and the
+   * absorbed duplicate took the whole batch with it.
    */
   async createMany(
     buildingId: BuildingId,
@@ -370,13 +383,18 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
       for (const input of inputs) {
         const { columns, values } = insertParts(input, societyId, buildingId);
         try {
-          const rows = await query(
-            tx,
-            sql`
-              insert into public.apartments (${sql.join(columns, sql`, `)})
-              values (${sql.join(values, sql`, `)})
-              returning ${APARTMENT_COLUMNS}
-            `,
+          // The savepoint: see "Why each row is its own nested transaction" above.
+          // One row per nested transaction, so a refusal costs one row rather than
+          // the batch, and the statement after a refusal still runs.
+          const rows = await tx.transaction(async (inner) =>
+            query(
+              inner,
+              sql`
+                insert into public.apartments (${sql.join(columns, sql`, `)})
+                values (${sql.join(values, sql`, `)})
+                returning ${APARTMENT_COLUMNS}
+              `,
+            ),
           );
           created.push(apartmentFromRow(parseSingleRow(rows, "created flat")));
         } catch (error: unknown) {
@@ -386,7 +404,10 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
           // the transaction body — so the row is classified with the same function
           // `run` would use, and the same predicate decides. Anything else
           // re-throws *raw* and takes the batch (the transaction) with it.
-          if (isDuplicateApartmentNumber(error)) {
+          // The predicate lives in `apartment.rows.ts` with the classifier it is the
+          // counterpart of, and it is unit-tested there: this is the rule that was
+          // silently inert in production while the file stayed green.
+          if (isApartmentNumberCollision(error)) {
             duplicateLabelsSkipped.push(input.apartmentNumber);
             continue;
           }
@@ -536,27 +557,6 @@ function insertParts(
   }
 
   return { columns, values };
-}
-
-/**
- * Whether a raw database failure is `uq_apartments_building_number` deciding a
- * duplicate — the one refusal `createMany` absorbs; everything else is an error.
- *
- * The raw error is classified with `apartmentErrorFromPostgres` — the function
- * `run` would use — rather than matched against SQLSTATE strings here: the
- * constraint name lives in whichever property the driver chose to fill, and a
- * second, narrower matcher would drift from the classification the rest of the
- * module promises. The classified result is a `conflict` naming
- * `apartmentNumber` exactly when that index refused the row.
- */
-function isDuplicateApartmentNumber(error: unknown): boolean {
-  const classified = apartmentErrorFromPostgres(error, "write");
-  if (classified.code !== "conflict") {
-    return false;
-  }
-  const haystack =
-    JSON.stringify(classified.details ?? {}) + " " + classified.message;
-  return /apartment_number|uq_apartments/i.test(haystack);
 }
 
 /** `count(*)` is always an integer, so the coercion is exact rather than lenient. */
