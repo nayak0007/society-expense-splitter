@@ -74,6 +74,20 @@ export const envSchema = z.object({
    */
   MIGRATIONS_DIR: z.string().min(1).optional(),
 
+  // ── Membership cache (SAD §9.4) ──────────────────────────────────────────
+  /**
+   * Where the guard's membership read is cached.
+   *
+   * `redis` is the only value that is correct for more than one API instance, and
+   * the default. `memory` exists for single-process development and for the e2e
+   * suite, which needs the ordering protocol without a Redis deployment. `off`
+   * removes the cache entirely, which is what a build with no Redis should use if
+   * it would rather not pay a failed connection attempt per request.
+   */
+  MEMBERSHIP_CACHE_STORE: z.enum(["redis", "memory", "off"]).default("redis"),
+  /** SAD §9.4's "cached 5 min". Lowered, it shortens the worst case, never raises it. */
+  MEMBERSHIP_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(300),
+
   // ── Supabase (identity + storage) ────────────────────────────────────────
   SUPABASE_URL: z.url(),
   /** Expected `iss` claim on every access token (SAD §9.1). */

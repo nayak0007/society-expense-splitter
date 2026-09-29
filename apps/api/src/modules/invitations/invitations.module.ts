@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 
+import { CacheModule } from "../../infrastructure/cache/cache.module";
 import { DatabaseModule } from "../../infrastructure/database/database.module";
 import { MembersModule } from "../members/members.module";
 import { InvitationsOperations } from "./application/invitations.operations";
@@ -38,7 +39,9 @@ import { InvitationsController } from "./presentation/invitations.controller";
  * consumer, and this module is the first that is not the members module itself.
  */
 @Module({
-  imports: [DatabaseModule, MembersModule],
+  // `CacheModule` because acceptance grants authority (it creates the membership and
+  // assigns the role), so its one write is ordered against the guard's cache read.
+  imports: [DatabaseModule, MembersModule, CacheModule],
   controllers: [InvitationsController],
   providers: [
     InvitationsOperations,

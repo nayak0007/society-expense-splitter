@@ -300,6 +300,38 @@ export function isScopedAction(action: Action): boolean {
   return SCOPED_ACTIONS.has(action);
 }
 
+/**
+ * How a role holds an action: not at all, outright, or only on its own records.
+ *
+ * This is the distinction the PRD's own legend draws (`✅ full · 🟡 own/assigned
+ * records only · ⬜ none`) and the one `can()` deliberately erases, because a
+ * guard sees a role and an action and never a row. `canOnResource` needs it back:
+ * a **full** grant needs no narrowing at all, a **scoped** one does, and the two
+ * arrive at the same `true` from `can()`.
+ *
+ * It exists so the resource layer never has to special-case a role. The obvious
+ * alternative — `if (member.role === "admin")` — would be a second grant list
+ * maintained by hand, and it would be wrong the first time a cell changes: an
+ * action whose 🟡 cell is granted to Admin as well (none today, but the shape is
+ * one edit away) would take the override path and skip its own rule.
+ *
+ * Exported as a union rather than a boolean pair so the caller's own `switch` is
+ * exhaustive over the three answers a matrix cell can give.
+ */
+export type GrantKind = "full" | "scoped" | "none";
+
+/** The cell `(role × action)` in the matrix, told apart by kind. */
+export function grantKind(role: MemberRole, action: Action): GrantKind {
+  const grants = MATRIX_SOURCE[action];
+  if (grants.full.includes(role)) {
+    return "full";
+  }
+  if (grants.scoped?.includes(role) === true) {
+    return "scoped";
+  }
+  return "none";
+}
+
 /** Narrowing helper for a value that arrived from a decorator or the wire. */
 export function isAction(value: unknown): value is Action {
   return typeof value === "string" && ACTION_SET.has(value);

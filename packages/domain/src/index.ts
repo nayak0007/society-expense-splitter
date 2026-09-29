@@ -58,4 +58,5 @@ export * from "./member/member-rules";
 export * from "./member/member-value-objects";
 export * from "./member/permission-evaluator";
 export * from "./member/ports";
+export * from "./member/resource-authorization";
 export * from "./member/role-rules";

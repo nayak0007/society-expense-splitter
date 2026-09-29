@@ -14,6 +14,8 @@ import type {
   UserId,
 } from "@ses/domain";
 
+import type { MembershipWriteScope } from "../../../common/authorization/membership-invalidation";
+import { MembershipInvalidation } from "../../../common/authorization/membership-invalidation";
 import {
   UnitOfWork,
   type TransactionActor,
@@ -62,7 +64,16 @@ import {
  */
 @Injectable()
 export class InvitationRepositoryPostgres implements InvitationRepository {
-  constructor(private readonly unitOfWork: UnitOfWork) {}
+  constructor(
+    private readonly unitOfWork: UnitOfWork,
+    /**
+     * Acceptance is the one write in this file that grants authority — it creates the
+     * membership and assigns the role — so it is fenced like every other membership
+     * write. The society is not known until `invitation_accept()` has resolved the token,
+     * which is exactly why the scope may be a function of the result.
+     */
+    private readonly invalidation: MembershipInvalidation,
+  ) {}
 
   /** Insert one invitation. `status` is the column's default (`sent`), and `invited_by` is the trigger's. */
   async create(
@@ -268,19 +279,24 @@ export class InvitationRepositoryPostgres implements InvitationRepository {
     tokenHash: string,
     actor: UserId,
   ): Promise<InvitationAcceptance> {
-    return this.run(actor, "accept", async (tx) => {
-      const rows = await query_(
-        tx,
-        sql`select public.invitation_accept(${tokenHash}, ${actor}::uuid) as accepted`,
-      );
-      const parsed = invitationAcceptanceRowSchema.safeParse(
-        (rows[0] as { accepted?: unknown } | undefined)?.accepted,
-      );
-      if (!parsed.success) {
-        throw unexpectedShapeError("invitation acceptance");
-      }
-      return invitationAcceptanceFromRow(parsed.data);
-    });
+    return this.run(
+      actor,
+      "accept",
+      async (tx) => {
+        const rows = await query_(
+          tx,
+          sql`select public.invitation_accept(${tokenHash}, ${actor}::uuid) as accepted`,
+        );
+        const parsed = invitationAcceptanceRowSchema.safeParse(
+          (rows[0] as { accepted?: unknown } | undefined)?.accepted,
+        );
+        if (!parsed.success) {
+          throw unexpectedShapeError("invitation acceptance");
+        }
+        return invitationAcceptanceFromRow(parsed.data);
+      },
+      (accepted) => ({ societyId: accepted.societyId, userIds: [actor] }),
+    );
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
@@ -289,15 +305,23 @@ export class InvitationRepositoryPostgres implements InvitationRepository {
     actor: UserId,
     context: "read" | "write" | "accept",
     work: (tx: TransactionContext) => Promise<T>,
+    /** Present on the one write that changes a membership, absent on every other call. */
+    cacheScope?: (result: T) => MembershipWriteScope,
   ): Promise<T> {
     const identity: TransactionActor = { kind: "user", userId: actor };
-    try {
-      return await this.unitOfWork.transaction(identity, work);
-    } catch (error: unknown) {
-      throw isInvitationError(error)
-        ? error
-        : invitationErrorFromPostgres(error, context);
-    }
+    const perform = async (): Promise<T> => {
+      try {
+        return await this.unitOfWork.transaction(identity, work);
+      } catch (error: unknown) {
+        throw isInvitationError(error)
+          ? error
+          : invitationErrorFromPostgres(error, context);
+      }
+    };
+
+    return cacheScope === undefined
+      ? perform()
+      : this.invalidation.around(cacheScope, perform);
   }
 }
 

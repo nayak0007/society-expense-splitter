@@ -51,6 +51,26 @@ export class RedisService implements OnApplicationShutdown {
     return this.client.ping();
   }
 
+  /**
+   * Runs a Lua script. The membership cache's four operations are all scripts,
+   * because each is a read-modify-write over several keys and every split version
+   * of one has a window the authorization ordering depends on not existing. See
+   * `membership-cache.redis.ts`.
+   *
+   * The narrow signature is deliberate: `keys` and `args` are separate because
+   * Redis's own API separates them, and passing a key through `args` would put it
+   * in a non-key slot where a Redis Cluster deployment could not route it. Nothing
+   * here interprets either.
+   */
+  async evalScript(
+    script: string,
+    keys: readonly string[],
+    args: readonly (string | number)[],
+  ): Promise<unknown> {
+    await this.ensureConnected();
+    return this.client.eval(script, keys.length, ...keys, ...args);
+  }
+
   /** Undefined when Redis has been reachable for the whole life of the process. */
   get connectionError(): Error | undefined {
     return this.lastError;

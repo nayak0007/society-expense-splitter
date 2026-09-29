@@ -77,6 +77,17 @@ export class AppConfig {
     return this.config.getOrThrow<string>("REDIS_URL");
   }
 
+  /** `redis` (default), `memory` (single process) or `off`. See the schema's note. */
+  get membershipCacheStore(): "redis" | "memory" | "off" {
+    return this.config.getOrThrow<"redis" | "memory" | "off">(
+      "MEMBERSHIP_CACHE_STORE",
+    );
+  }
+
+  get membershipCacheTtlSeconds(): number {
+    return this.config.getOrThrow<number>("MEMBERSHIP_CACHE_TTL_SECONDS");
+  }
+
   get supabaseUrl(): string {
     return this.config.getOrThrow<string>("SUPABASE_URL");
   }

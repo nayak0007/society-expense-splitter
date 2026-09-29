@@ -2,8 +2,17 @@ import { Module } from "@nestjs/common";
 import { systemClock } from "@ses/domain";
 import type { Clock } from "@ses/domain";
 
+import { CachedSocietyAuthorizationReader } from "../../common/authorization/cached-society-authorization.reader";
+import {
+  MEMBERSHIP_CACHE,
+  type MembershipCache,
+} from "../../common/authorization/membership-cache";
 import { MEMBERSHIP_READER } from "../../common/authorization/membership-reader";
-import { SOCIETY_AUTHORIZATION_READER } from "../../common/authorization/society-authorization";
+import {
+  SOCIETY_AUTHORIZATION_READER,
+  type SocietyAuthorizationReader,
+} from "../../common/authorization/society-authorization";
+import { CacheModule } from "../../infrastructure/cache/cache.module";
 import { DatabaseModule } from "../../infrastructure/database/database.module";
 import { SocietyOperations } from "./application/society.operations";
 import {
@@ -42,7 +51,7 @@ import { SocietiesController } from "./presentation/societies.controller";
  * in this module whose outcome depends on "now", and it is otherwise untestable.
  */
 @Module({
-  imports: [DatabaseModule],
+  imports: [DatabaseModule, CacheModule],
   controllers: [SocietiesController],
   providers: [
     SocietyOperations,
@@ -56,7 +65,22 @@ import { SocietiesController } from "./presentation/societies.controller";
     // guard context from the same fake instead of a half-real chain.
     {
       provide: SOCIETY_AUTHORIZATION_READER,
-      useExisting: SocietyRepositoryPostgres,
+      inject: [
+        SocietyRepositoryPostgres,
+        { token: MEMBERSHIP_CACHE, optional: true },
+      ],
+      // The adapter itself when there is no cache, and the adapter *wrapped* when
+      // there is: the guard asks the same question either way, and the read that
+      // answers it is still this module's one `society_snapshot()` call. A factory
+      // rather than `useExisting` because the binding is now conditional, which
+      // `useExisting` cannot express.
+      useFactory: (
+        inner: SocietyRepositoryPostgres,
+        cache: MembershipCache | undefined,
+      ): SocietyAuthorizationReader =>
+        cache === undefined
+          ? inner
+          : new CachedSocietyAuthorizationReader(inner, cache),
     },
     // T042's one read of a `members` row, satisfied by the same instance. The
     // building module consumes it through this module's exported surface rather

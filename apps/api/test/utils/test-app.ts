@@ -1,4 +1,5 @@
 import { Test } from "@nestjs/testing";
+import { DiscoveryModule } from "@nestjs/core";
 import type { Type } from "@nestjs/common";
 import type { NestFastifyApplication } from "@nestjs/platform-fastify";
 import type { HealthIndicatorResult } from "@nestjs/terminus";
@@ -177,7 +178,12 @@ export async function createTestApp(
   options: TestAppOptions = {},
 ): Promise<NestFastifyApplication> {
   const builder = Test.createTestingModule({
-    imports: [AppModule],
+    // `DiscoveryModule` is not `@Global()`, so the route-inventory suite has to
+    // ask for it: it is how that suite enumerates every controller the real
+    // `AppModule` registered rather than a list maintained by hand — which is the
+    // whole point of an inventory (a controller nobody remembered to list is
+    // exactly the one it must catch). Nothing else reads it.
+    imports: [DiscoveryModule, AppModule],
     controllers: [...(options.controllers ?? [])],
   })
     .overrideProvider(PostgresIndicator)

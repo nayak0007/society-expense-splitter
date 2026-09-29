@@ -20,6 +20,10 @@ import type {
   UserId,
 } from "@ses/domain";
 
+import {
+  MembershipInvalidation,
+  type MembershipWriteScope,
+} from "../../../common/authorization/membership-invalidation";
 import type {
   SocietyAuthorizationContext,
   SocietyAuthorizationReader,
@@ -91,7 +95,16 @@ export class SocietyRepositoryPostgres
     SocietyAuthorizationReader,
     StructureMembershipReader
 {
-  constructor(private readonly unitOfWork: UnitOfWork) {}
+  constructor(
+    private readonly unitOfWork: UnitOfWork,
+    /**
+     * Every write in this file changes something the guard's cached read holds —
+     * the society row itself, or the caller's membership in it — so every write in
+     * this file names a cache scope. See `MembershipInvalidation` for why the
+     * ordering can only be expressed as a wrapper.
+     */
+    private readonly invalidation: MembershipInvalidation,
+  ) {}
 
   // ── read ────────────────────────────────────────────────────────────────────
 
@@ -330,86 +343,94 @@ export class SocietyRepositoryPostgres
     readonly society: Society;
     readonly membership: SocietyMembership;
   }> {
-    return this.run(actor, "write", async (tx) => {
-      const payload = createPayload(input);
-      const statement = sql`
+    // The society id does not exist until `society_create()` has minted it, so the
+    // cache scope is read off the result — and the creator's own entry goes with
+    // it, because the row this write created is the one their next request reads.
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const payload = createPayload(input);
+        const statement = sql`
         select public.society_create(${JSON.stringify(payload)}::jsonb) as snapshot
       `;
 
-      // `society_create` mints **two** unique values, so a failure here can be a
-      // race rather than a bug: the join code is random (another society took it
-      // between the uniqueness check and the insert — PRD T040's "join-code
-      // collision retries and succeeds"), and the slug is derived from the name
-      // (two people can pick one name at the same instant).
-      //
-      // Each attempt runs in its own **savepoint**, and that is the whole reason
-      // this works. In PostgreSQL a failed statement aborts the surrounding
-      // transaction, so re-issuing the statement directly would fail with `25P02`
-      // (`current transaction is aborted`) rather than minting again — which is
-      // exactly what the single retry added with T040 did: it could never fire, so
-      // the collision it was written for always surfaced as a conflict. A nested
-      // transaction is a savepoint in the postgres-js driver, so a failed attempt
-      // rolls back to just before the INSERT and the outer transaction (and the
-      // caller's RLS identity) survives to try again.
-      //
-      // Bounded, because a third failure means something else is wrong and the
-      // classifier should see it: an exhausted retry keeps the database's own
-      // error, and `societyErrorFromPostgres` answers with `conflict`.
-      let snapshot: SocietySnapshot | undefined;
-      let lastError: unknown;
-      for (
-        let attempt = 1;
-        attempt <= MAX_SOCIETY_MINT_ATTEMPTS && snapshot === undefined;
-        attempt += 1
-      ) {
-        try {
-          snapshot = await tx.transaction(async (inner) => {
-            const rows = await query(inner, statement);
-            return parseSnapshot(
-              firstValue(rows, "snapshot"),
-              "created society",
-            );
-          });
-        } catch (error: unknown) {
-          if (!isJoinCodeCollision(error) && !isSlugCollision(error)) {
-            throw error;
+        // `society_create` mints **two** unique values, so a failure here can be a
+        // race rather than a bug: the join code is random (another society took it
+        // between the uniqueness check and the insert — PRD T040's "join-code
+        // collision retries and succeeds"), and the slug is derived from the name
+        // (two people can pick one name at the same instant).
+        //
+        // Each attempt runs in its own **savepoint**, and that is the whole reason
+        // this works. In PostgreSQL a failed statement aborts the surrounding
+        // transaction, so re-issuing the statement directly would fail with `25P02`
+        // (`current transaction is aborted`) rather than minting again — which is
+        // exactly what the single retry added with T040 did: it could never fire, so
+        // the collision it was written for always surfaced as a conflict. A nested
+        // transaction is a savepoint in the postgres-js driver, so a failed attempt
+        // rolls back to just before the INSERT and the outer transaction (and the
+        // caller's RLS identity) survives to try again.
+        //
+        // Bounded, because a third failure means something else is wrong and the
+        // classifier should see it: an exhausted retry keeps the database's own
+        // error, and `societyErrorFromPostgres` answers with `conflict`.
+        let snapshot: SocietySnapshot | undefined;
+        let lastError: unknown;
+        for (
+          let attempt = 1;
+          attempt <= MAX_SOCIETY_MINT_ATTEMPTS && snapshot === undefined;
+          attempt += 1
+        ) {
+          try {
+            snapshot = await tx.transaction(async (inner) => {
+              const rows = await query(inner, statement);
+              return parseSnapshot(
+                firstValue(rows, "snapshot"),
+                "created society",
+              );
+            });
+          } catch (error: unknown) {
+            if (!isJoinCodeCollision(error) && !isSlugCollision(error)) {
+              throw error;
+            }
+            lastError = error;
           }
-          lastError = error;
         }
-      }
 
-      if (snapshot === undefined) {
-        // Unreachable while `MAX_SOCIETY_MINT_ATTEMPTS` is at least one, and it
-        // exists so the types stay honest rather than for the control flow.
-        throw (
-          lastError ??
-          new SocietyError(
+        if (snapshot === undefined) {
+          // Unreachable while `MAX_SOCIETY_MINT_ATTEMPTS` is at least one, and it
+          // exists so the types stay honest rather than for the control flow.
+          throw (
+            lastError ??
+            new SocietyError(
+              "unknown",
+              "Something went wrong. Please try again.",
+              { hint: "society_create() was never attempted." },
+            )
+          );
+        }
+        if (
+          snapshot.membership === null ||
+          snapshot.membership.user_id === null
+        ) {
+          // `seed_society()` guarantees this row. If it is missing, the database
+          // is in a state this layer cannot fix, and reporting success would lie.
+          throw new SocietyError(
             "unknown",
             "Something went wrong. Please try again.",
-            { hint: "society_create() was never attempted." },
-          )
-        );
-      }
-      if (
-        snapshot.membership === null ||
-        snapshot.membership.user_id === null
-      ) {
-        // `seed_society()` guarantees this row. If it is missing, the database
-        // is in a state this layer cannot fix, and reporting success would lie.
-        throw new SocietyError(
-          "unknown",
-          "Something went wrong. Please try again.",
-          {
-            hint: "society_create() returned a snapshot without the creator membership.",
-          },
-        );
-      }
+            {
+              hint: "society_create() returned a snapshot without the creator membership.",
+            },
+          );
+        }
 
-      return {
-        society: societyFromSnapshot(snapshot),
-        membership: membershipFromRow(snapshot.membership),
-      };
-    });
+        return {
+          society: societyFromSnapshot(snapshot),
+          membership: membershipFromRow(snapshot.membership),
+        };
+      },
+      (created) => ({ societyId: created.society.id, userIds: [actor] }),
+    );
   }
 
   /** Patch the society and/or its settings atomically. Admin-only, in SQL. */
@@ -418,35 +439,49 @@ export class SocietyRepositoryPostgres
     input: UpdateSocietyInput,
     actor: UserId,
   ): Promise<Society> {
-    return this.run(actor, "write", async (tx) => {
-      const patch = updatePayload(input);
-      const rows = await query(
-        tx,
-        sql`
+    // The society row is half of what the guard's read returns, so a rename is an
+    // invalidation too — not because a name is a privilege, but because a cached
+    // name that outlives its edit is the kind of wrongness that makes people stop
+    // trusting the cache, and then the revocation guarantee with it.
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const patch = updatePayload(input);
+        const rows = await query(
+          tx,
+          sql`
           select public.society_update(
             ${id}::uuid, ${JSON.stringify(patch)}::jsonb
           ) as snapshot
         `,
-      );
-      return societyFromSnapshot(
-        parseSnapshot(firstValue(rows, "snapshot"), "updated society"),
-      );
-    });
+        );
+        return societyFromSnapshot(
+          parseSnapshot(firstValue(rows, "snapshot"), "updated society"),
+        );
+      },
+      { societyId: id },
+    );
   }
 
   /** Admin-only join-code rotation. The new code is minted server-side. */
   async regenerateJoinCode(id: SocietyId, actor: UserId): Promise<Society> {
-    return this.run(actor, "write", async (tx) => {
-      const rows = await query(
-        tx,
-        sql`
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const rows = await query(
+          tx,
+          sql`
           select public.society_rotate_join_code(${id}::uuid) as snapshot
         `,
-      );
-      return societyFromSnapshot(
-        parseSnapshot(firstValue(rows, "snapshot"), "rotated society"),
-      );
-    });
+        );
+        return societyFromSnapshot(
+          parseSnapshot(firstValue(rows, "snapshot"), "rotated society"),
+        );
+      },
+      { societyId: id },
+    );
   }
 
   /**
@@ -455,9 +490,14 @@ export class SocietyRepositoryPostgres
    * code stops resolving. Admin-only, checked inside the function.
    */
   async remove(id: SocietyId, actor: UserId): Promise<void> {
-    await this.run(actor, "write", async (tx) => {
-      await query(tx, sql`select public.society_soft_delete(${id}::uuid)`);
-    });
+    await this.run(
+      actor,
+      "write",
+      async (tx) => {
+        await query(tx, sql`select public.society_soft_delete(${id}::uuid)`);
+      },
+      { societyId: id },
+    );
   }
 
   /**
@@ -503,96 +543,99 @@ export class SocietyRepositoryPostgres
     input: JoinSocietyInput,
     actor: UserId,
   ): Promise<SocietyMembership> {
-    return this.run(actor, "write", async (tx) => {
-      const previewRows = await query(
-        tx,
-        sql`select public.society_join_preview(${input.code}) as preview`,
-      );
-      const preview = firstValue(previewRows, "preview");
-      if (preview === null || preview === undefined) {
-        // One message for "no such code" and "code belongs to a deleted
-        // society": a probe must not be able to enumerate societies.
-        throw new SocietyError(
-          "join_code_invalid",
-          "That join code does not match any society.",
-        );
-      }
-
-      const parsedPreview = joinPreviewSchema.safeParse(preview);
-      if (!parsedPreview.success) {
-        throw unexpectedShapeError("join preview");
-      }
-      const societyId = asSocietyId(parsedPreview.data.id);
-
-      const occupancy = occupancyToRow(input.occupancyType);
-
-      // The two facts a requester cannot read for themselves, resolved by definer functions:
-      // the flat is a live flat of this society, and this person is not already recorded here
-      // as a shadow occupant. Both are refused *before* anything is written, so a request is
-      // never accepted and then found to be a duplicate.
-      if (input.apartmentId !== null) {
-        const flatRows = await query(
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const previewRows = await query(
           tx,
-          sql`select public.is_live_society_apartment(
+          sql`select public.society_join_preview(${input.code}) as preview`,
+        );
+        const preview = firstValue(previewRows, "preview");
+        if (preview === null || preview === undefined) {
+          // One message for "no such code" and "code belongs to a deleted
+          // society": a probe must not be able to enumerate societies.
+          throw new SocietyError(
+            "join_code_invalid",
+            "That join code does not match any society.",
+          );
+        }
+
+        const parsedPreview = joinPreviewSchema.safeParse(preview);
+        if (!parsedPreview.success) {
+          throw unexpectedShapeError("join preview");
+        }
+        const societyId = asSocietyId(parsedPreview.data.id);
+
+        const occupancy = occupancyToRow(input.occupancyType);
+
+        // The two facts a requester cannot read for themselves, resolved by definer functions:
+        // the flat is a live flat of this society, and this person is not already recorded here
+        // as a shadow occupant. Both are refused *before* anything is written, so a request is
+        // never accepted and then found to be a duplicate.
+        if (input.apartmentId !== null) {
+          const flatRows = await query(
+            tx,
+            sql`select public.is_live_society_apartment(
                 ${input.apartmentId}::uuid,
                 ${societyId}::uuid
               ) as ok`,
-        );
-        if (firstValue(flatRows, "ok") !== true) {
-          throw new SocietyError(
-            "validation",
-            "That flat is not an available flat of this society.",
-            { field: "apartmentId" },
           );
+          if (firstValue(flatRows, "ok") !== true) {
+            throw new SocietyError(
+              "validation",
+              "That flat is not an available flat of this society.",
+              { field: "apartmentId" },
+            );
+          }
         }
-      }
 
-      const shadowRows = await query(
-        tx,
-        sql`select public.join_request_blocking_shadow(
+        const shadowRows = await query(
+          tx,
+          sql`select public.join_request_blocking_shadow(
               ${societyId}::uuid,
               ${actor}::uuid
             ) as shadow`,
-      );
-      if (firstValue(shadowRows, "shadow") != null) {
-        throw new SocietyError(
-          "already_member",
-          "An occupant is already recorded for your number in this society. Ask an Admin for an invitation link.",
-          { field: "phone" },
         );
-      }
+        if (firstValue(shadowRows, "shadow") != null) {
+          throw new SocietyError(
+            "already_member",
+            "An occupant is already recorded for your number in this society. Ask an Admin for an invitation link.",
+            { field: "phone" },
+          );
+        }
 
-      const existingRows = await query(
-        tx,
-        sql`
+        const existingRows = await query(
+          tx,
+          sql`
           select id, society_id, user_id, role, status, occupancy, joined_at
             from public.members
            where society_id = ${societyId}::uuid
              and user_id = ${actor}::uuid
         `,
-      );
-      const [existing] = parseMemberRows(existingRows);
+        );
+        const [existing] = parseMemberRows(existingRows);
 
-      if (existing !== undefined) {
-        if (existing.status === "active" || existing.status === "inactive") {
-          throw new SocietyError(
-            "already_member",
-            "You are already a member of this society.",
-          );
-        }
-        if (existing.status === "pending") {
-          throw new SocietyError(
-            "already_member",
-            "You have already asked to join this society. An Admin has to approve it.",
-          );
-        }
-        // `removed` (left or withdrew) and `rejected` (refused, asking again): the row is history
-        // and is re-asked, never re-created. `chk_member_self_change()` allows exactly these two
-        // transitions, and it is also what refuses a self-approval if a caller tried to write
-        // `active` here instead.
-        const reasked = await query(
-          tx,
-          sql`
+        if (existing !== undefined) {
+          if (existing.status === "active" || existing.status === "inactive") {
+            throw new SocietyError(
+              "already_member",
+              "You are already a member of this society.",
+            );
+          }
+          if (existing.status === "pending") {
+            throw new SocietyError(
+              "already_member",
+              "You have already asked to join this society. An Admin has to approve it.",
+            );
+          }
+          // `removed` (left or withdrew) and `rejected` (refused, asking again): the row is history
+          // and is re-asked, never re-created. `chk_member_self_change()` allows exactly these two
+          // transitions, and it is also what refuses a self-approval if a caller tried to write
+          // `active` here instead.
+          const reasked = await query(
+            tx,
+            sql`
             update public.members
                set status = 'pending',
                    occupancy = ${occupancy},
@@ -602,13 +645,13 @@ export class SocietyRepositoryPostgres
              where id = ${existing.id}::uuid
             returning id, society_id, user_id, role, status, occupancy, joined_at
           `,
-        );
-        return membershipFromRow(parseMemberRowList(reasked));
-      }
+          );
+          return membershipFromRow(parseMemberRowList(reasked));
+        }
 
-      const inserted = await query(
-        tx,
-        sql`
+        const inserted = await query(
+          tx,
+          sql`
           insert into public.members (
             society_id, user_id, occupancy, apartment_id, request_note
           )
@@ -621,9 +664,13 @@ export class SocietyRepositoryPostgres
           )
           returning id, society_id, user_id, role, status, occupancy, joined_at
         `,
-      );
-      return membershipFromRow(parseMemberRowList(inserted));
-    });
+        );
+        return membershipFromRow(parseMemberRowList(inserted));
+        // The scope off the result, not off a local: the society is resolved *inside*
+        // this transaction (from the join code), so it is not in scope at the call.
+      },
+      (joined) => ({ societyId: joined.societyId, userIds: [actor] }),
+    );
   }
 
   /**
@@ -637,10 +684,13 @@ export class SocietyRepositoryPostgres
    * question first; this is what happens when a stale client skips it).
    */
   async leave(societyId: SocietyId, actor: UserId): Promise<void> {
-    await this.run(actor, "write", async (tx) => {
-      const rows = await query(
-        tx,
-        sql`
+    await this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const rows = await query(
+          tx,
+          sql`
           update public.members
              set status = 'removed'
            where society_id = ${societyId}::uuid
@@ -648,15 +698,17 @@ export class SocietyRepositoryPostgres
              and status <> 'removed'
           returning id
         `,
-      );
-      if (rows.length === 0) {
-        // Nothing to leave: no live membership for this caller.
-        throw new SocietyError(
-          "not_found",
-          "That society is not available to you.",
         );
-      }
-    });
+        if (rows.length === 0) {
+          // Nothing to leave: no live membership for this caller.
+          throw new SocietyError(
+            "not_found",
+            "That society is not available to you.",
+          );
+        }
+      },
+      { societyId, userIds: [actor] },
+    );
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
@@ -676,6 +728,22 @@ export class SocietyRepositoryPostgres
     actor: UserId | "anonymous",
     context: "read" | "write",
     work: (tx: TransactionContext) => Promise<T>,
+    /**
+     * What this write changes, for the membership cache — omitted by every read.
+     *
+     * The fourth argument rather than a `cache.invalidate()` line at the end of each
+     * method because the *ordering* is the correctness argument and a wrapper is the
+     * only thing that can express all of it: gate raised before the transaction,
+     * version bumped and entry dropped after the commit, gate lowered and nothing
+     * bumped when it rolled back. A trailing call gets the first two and forgets the
+     * third, and the third is what makes a rollback harmless.
+     *
+     * A function of the result, for `create`: the society id is minted inside the
+     * transaction, so the cache scope cannot be known until the transaction has
+     * answered.
+     */
+    cacheScope?:
+      MembershipWriteScope | ((result: T) => MembershipWriteScope | undefined),
   ): Promise<T> {
     // One place translates the port's `UserId` into the transaction's identity
     // union, so no call site can build an actor shape of its own — a second
@@ -685,13 +753,19 @@ export class SocietyRepositoryPostgres
         ? { kind: "anonymous" }
         : { kind: "user", userId: actor };
 
-    try {
-      return await this.unitOfWork.transaction(identity, work);
-    } catch (error: unknown) {
-      throw isSocietyError(error)
-        ? error
-        : societyErrorFromPostgres(error, context);
-    }
+    const perform = async (): Promise<T> => {
+      try {
+        return await this.unitOfWork.transaction(identity, work);
+      } catch (error: unknown) {
+        throw isSocietyError(error)
+          ? error
+          : societyErrorFromPostgres(error, context);
+      }
+    };
+
+    return cacheScope === undefined
+      ? perform()
+      : this.invalidation.around(cacheScope, perform);
   }
 
   /** `society_snapshot()`, parsed; `null` when the caller is not a member. */

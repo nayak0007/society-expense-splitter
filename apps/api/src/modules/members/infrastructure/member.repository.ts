@@ -19,6 +19,10 @@ import type {
 } from "@ses/domain";
 
 import {
+  MembershipInvalidation,
+  type MembershipWriteScope,
+} from "../../../common/authorization/membership-invalidation";
+import {
   UnitOfWork,
   type TransactionActor,
   type TransactionContext,
@@ -66,7 +70,15 @@ import {
  */
 @Injectable()
 export class MemberRepositoryPostgres implements MemberRepository {
-  constructor(private readonly unitOfWork: UnitOfWork) {}
+  constructor(
+    private readonly unitOfWork: UnitOfWork,
+    /**
+     * Every write in this file can change the caller's *or* another member's cached
+     * authorization context — a suspension, a removal, a role change, or the row
+     * behind a pending approval — so every write in this file names a cache scope.
+     */
+    private readonly invalidation: MembershipInvalidation,
+  ) {}
 
   // ── read ────────────────────────────────────────────────────────────────────
 
@@ -308,10 +320,13 @@ export class MemberRepositoryPostgres implements MemberRepository {
     input: CreateMemberInput,
     actor: UserId,
   ): Promise<Member> {
-    return this.run(actor, "write", async (tx) => {
-      const rows = await query_(
-        tx,
-        sql`
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const rows = await query_(
+          tx,
+          sql`
           insert into public.members (
             society_id, display_name, phone, email, occupancy,
             apartment_id, is_primary, lease_start, lease_end, share_contact, status
@@ -343,9 +358,11 @@ export class MemberRepositoryPostgres implements MemberRepository {
           )
           returning ${memberColumns("")}
         `,
-      );
-      return memberFromRow(parseSingleRow(rows, "created member"));
-    });
+        );
+        return memberFromRow(parseSingleRow(rows, "created member"));
+      },
+      { societyId },
+    );
   }
 
   /**
@@ -364,79 +381,82 @@ export class MemberRepositoryPostgres implements MemberRepository {
     input: UpdateMemberInput,
     actor: UserId,
   ): Promise<Member> {
-    return this.run(actor, "write", async (tx) => {
-      const assignments: SQL[] = [];
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const assignments: SQL[] = [];
 
-      const set = (column: string, value: SQL): void => {
-        assignments.push(sql`${sql.raw(column)} = ${value}`);
-      };
+        const set = (column: string, value: SQL): void => {
+          assignments.push(sql`${sql.raw(column)} = ${value}`);
+        };
 
-      if (input.displayName !== undefined) {
-        set("display_name", sql`${input.displayName}`);
-      }
-      if (input.phone !== undefined) {
-        set(
-          "phone",
-          input.phone === null
-            ? sql`null::varchar`
-            : sql`${input.phone}::varchar`,
-        );
-      }
-      if (input.email !== undefined) {
-        set(
-          "email",
-          input.email === null
-            ? sql`null::citext`
-            : sql`${input.email}::citext`,
-        );
-      }
-      if (input.occupancy !== undefined) {
-        set("occupancy", sql`${input.occupancy}::public.occupancy_type`);
-      }
-      if (input.apartmentId !== undefined) {
-        set(
-          "apartment_id",
-          input.apartmentId === null
-            ? sql`null::uuid`
-            : sql`${input.apartmentId}::uuid`,
-        );
-      }
-      if (input.isPrimary !== undefined) {
-        set("is_primary", sql`${input.isPrimary}::boolean`);
-      }
-      if (input.leaseStart !== undefined) {
-        set(
-          "lease_start",
-          input.leaseStart === null
-            ? sql`null::date`
-            : sql`${input.leaseStart}::date`,
-        );
-      }
-      if (input.leaseEnd !== undefined) {
-        set(
-          "lease_end",
-          input.leaseEnd === null
-            ? sql`null::date`
-            : sql`${input.leaseEnd}::date`,
-        );
-      }
-      if (input.shareContact !== undefined) {
-        set("share_contact", sql`${input.shareContact}::boolean`);
-      }
+        if (input.displayName !== undefined) {
+          set("display_name", sql`${input.displayName}`);
+        }
+        if (input.phone !== undefined) {
+          set(
+            "phone",
+            input.phone === null
+              ? sql`null::varchar`
+              : sql`${input.phone}::varchar`,
+          );
+        }
+        if (input.email !== undefined) {
+          set(
+            "email",
+            input.email === null
+              ? sql`null::citext`
+              : sql`${input.email}::citext`,
+          );
+        }
+        if (input.occupancy !== undefined) {
+          set("occupancy", sql`${input.occupancy}::public.occupancy_type`);
+        }
+        if (input.apartmentId !== undefined) {
+          set(
+            "apartment_id",
+            input.apartmentId === null
+              ? sql`null::uuid`
+              : sql`${input.apartmentId}::uuid`,
+          );
+        }
+        if (input.isPrimary !== undefined) {
+          set("is_primary", sql`${input.isPrimary}::boolean`);
+        }
+        if (input.leaseStart !== undefined) {
+          set(
+            "lease_start",
+            input.leaseStart === null
+              ? sql`null::date`
+              : sql`${input.leaseStart}::date`,
+          );
+        }
+        if (input.leaseEnd !== undefined) {
+          set(
+            "lease_end",
+            input.leaseEnd === null
+              ? sql`null::date`
+              : sql`${input.leaseEnd}::date`,
+          );
+        }
+        if (input.shareContact !== undefined) {
+          set("share_contact", sql`${input.shareContact}::boolean`);
+        }
 
-      // The use case rejects an empty patch, and so does the contract at the edge. Reaching
-      // here with nothing would mean an `UPDATE` with an empty `SET`, which is not valid SQL —
-      // so it is reported as the caller mistake it is rather than surfacing as a syntax error
-      // the classifier calls `unknown`.
-      if (assignments.length === 0) {
-        throw new MemberError("validation", "Nothing to update.", {
-          field: "displayName",
-        });
-      }
+        // The use case rejects an empty patch, and so does the contract at the edge. Reaching
+        // here with nothing would mean an `UPDATE` with an empty `SET`, which is not valid SQL —
+        // so it is reported as the caller mistake it is rather than surfacing as a syntax error
+        // the classifier calls `unknown`.
+        if (assignments.length === 0) {
+          throw new MemberError("validation", "Nothing to update.", {
+            field: "displayName",
+          });
+        }
 
-      const rows = await query_(
-        tx,
-        sql`
+        const rows = await query_(
+          tx,
+          sql`
           update public.members
              set ${sql.join(assignments, sql`, `)}
            where id = ${id}::uuid
@@ -444,21 +464,23 @@ export class MemberRepositoryPostgres implements MemberRepository {
              and status <> 'removed'
           returning ${memberColumns("")}
         `,
-      );
-
-      const [row] = parseRows(rows);
-      if (row === undefined) {
-        // The caller is an active member of this society — `SocietyGuard` ran before the
-        // handler — so zero rows means the member is not in it, or has been removed. One
-        // answer, because distinguishing them would let an Admin of one society enumerate
-        // another's membership ids.
-        throw new MemberError(
-          "not_found",
-          "That member is not available to you.",
         );
-      }
-      return memberFromRow(row);
-    });
+
+        const [row] = parseRows(rows);
+        if (row === undefined) {
+          // The caller is an active member of this society — `SocietyGuard` ran before the
+          // handler — so zero rows means the member is not in it, or has been removed. One
+          // answer, because distinguishing them would let an Admin of one society enumerate
+          // another's membership ids.
+          throw new MemberError(
+            "not_found",
+            "That member is not available to you.",
+          );
+        }
+        return memberFromRow(row);
+      },
+      { societyId },
+    );
   }
 
   /**
@@ -476,10 +498,13 @@ export class MemberRepositoryPostgres implements MemberRepository {
     status: MemberActivation,
     actor: UserId,
   ): Promise<Member> {
-    return this.run(actor, "write", async (tx) => {
-      const rows = await query_(
-        tx,
-        sql`
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const rows = await query_(
+          tx,
+          sql`
           update public.members
              set status = ${status}::public.member_status
            where id = ${id}::uuid
@@ -487,16 +512,18 @@ export class MemberRepositoryPostgres implements MemberRepository {
              and status <> 'removed'
           returning ${memberColumns("")}
         `,
-      );
-      const [row] = parseRows(rows);
-      if (row === undefined) {
-        throw new MemberError(
-          "not_found",
-          "That member is not available to you.",
         );
-      }
-      return memberFromRow(row);
-    });
+        const [row] = parseRows(rows);
+        if (row === undefined) {
+          throw new MemberError(
+            "not_found",
+            "That member is not available to you.",
+          );
+        }
+        return memberFromRow(row);
+      },
+      { societyId },
+    );
   }
 
   /**
@@ -519,10 +546,13 @@ export class MemberRepositoryPostgres implements MemberRepository {
     role: MemberRole,
     actor: UserId,
   ): Promise<Member> {
-    return this.run(actor, "write", async (tx) => {
-      const rows = await query_(
-        tx,
-        sql`
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const rows = await query_(
+          tx,
+          sql`
           update public.members
              set role = ${roleToDatabase(role)}::public.member_role
            where id = ${id}::uuid
@@ -530,16 +560,18 @@ export class MemberRepositoryPostgres implements MemberRepository {
              and status <> 'removed'
           returning ${memberColumns("")}
         `,
-      );
-      const [row] = parseRows(rows);
-      if (row === undefined) {
-        throw new MemberError(
-          "not_found",
-          "That member is not available to you.",
         );
-      }
-      return memberFromRow(row);
-    });
+        const [row] = parseRows(rows);
+        if (row === undefined) {
+          throw new MemberError(
+            "not_found",
+            "That member is not available to you.",
+          );
+        }
+        return memberFromRow(row);
+      },
+      { societyId },
+    );
   }
 
   /**
@@ -708,27 +740,32 @@ export class MemberRepositoryPostgres implements MemberRepository {
     input: JoinApprovalInput,
     actor: UserId,
   ): Promise<Member> {
-    return this.run(actor, "write", async (tx) => {
-      const payload: Record<string, unknown> = {};
-      if (input.role !== undefined) payload.role = input.role;
-      if (input.occupancy !== undefined) payload.occupancy = input.occupancy;
-      if (input.apartmentId !== undefined) {
-        payload.apartment_id = input.apartmentId;
-      }
-      if (input.isPrimary !== undefined) payload.is_primary = input.isPrimary;
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const payload: Record<string, unknown> = {};
+        if (input.role !== undefined) payload.role = input.role;
+        if (input.occupancy !== undefined) payload.occupancy = input.occupancy;
+        if (input.apartmentId !== undefined) {
+          payload.apartment_id = input.apartmentId;
+        }
+        if (input.isPrimary !== undefined) payload.is_primary = input.isPrimary;
 
-      await query_(
-        tx,
-        sql`select public.member_approve_join(
+        await query_(
+          tx,
+          sql`select public.member_approve_join(
               ${id}::uuid,
               ${societyId}::uuid,
               ${actor}::uuid,
               ${JSON.stringify(payload)}::jsonb
             )`,
-      );
+        );
 
-      return readMember(tx, id, societyId);
-    });
+        return readMember(tx, id, societyId);
+      },
+      { societyId },
+    );
   }
 
   /**
@@ -745,19 +782,24 @@ export class MemberRepositoryPostgres implements MemberRepository {
     reason: string,
     actor: UserId,
   ): Promise<Member> {
-    return this.run(actor, "write", async (tx) => {
-      await query_(
-        tx,
-        sql`select public.member_reject_join(
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        await query_(
+          tx,
+          sql`select public.member_reject_join(
               ${id}::uuid,
               ${societyId}::uuid,
               ${actor}::uuid,
               ${reason}
             )`,
-      );
+        );
 
-      return readMember(tx, id, societyId);
-    });
+        return readMember(tx, id, societyId);
+      },
+      { societyId },
+    );
   }
 
   async remove(
@@ -765,10 +807,13 @@ export class MemberRepositoryPostgres implements MemberRepository {
     societyId: SocietyId,
     actor: UserId,
   ): Promise<void> {
-    await this.run(actor, "write", async (tx) => {
-      const rows = await query_(
-        tx,
-        sql`
+    await this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const rows = await query_(
+          tx,
+          sql`
           update public.members
              set status = 'removed'::public.member_status
            where id = ${id}::uuid
@@ -776,36 +821,55 @@ export class MemberRepositoryPostgres implements MemberRepository {
              and status <> 'removed'
           returning id
         `,
-      );
-      if (rows.length === 0) {
-        throw new MemberError(
-          "not_found",
-          "That member is not available to you.",
         );
-      }
-    });
+        if (rows.length === 0) {
+          throw new MemberError(
+            "not_found",
+            "That member is not available to you.",
+          );
+        }
+      },
+      { societyId },
+    );
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
 
-  /** Runs `work` as `actor` and classifies any failure into the module's vocabulary. */
+  /**
+   * Runs `work` as `actor` and classifies any failure into the module's vocabulary.
+   *
+   * `cacheScope` is supplied by every **write** and by no read, and the version bump
+   * it triggers is what makes a revocation take effect immediately: an entry stored
+   * under the previous version is a miss on the next lookup, which is why this can
+   * pass a bare `societyId` rather than the affected member's id. See
+   * `MembershipInvalidation` — the third argument's absence in a future write would
+   * be the one mistake this design cannot detect at compile time, which is why writes
+   * and reads are the only two shapes and a write is the one that takes it.
+   */
   private async run<T>(
     actor: UserId,
     context: "read" | "write",
     work: (tx: TransactionContext) => Promise<T>,
+    cacheScope?: MembershipWriteScope,
   ): Promise<T> {
     const identity: TransactionActor = { kind: "user", userId: actor };
 
-    try {
-      return await this.unitOfWork.transaction(identity, work);
-    } catch (error: unknown) {
-      // A `MemberError` thrown inside — the not-found and empty-patch branches — passes
-      // through untouched: re-classifying it would replace a precise answer with a generic
-      // `unknown`.
-      throw isMemberError(error)
-        ? error
-        : memberErrorFromPostgres(error, context);
-    }
+    const perform = async (): Promise<T> => {
+      try {
+        return await this.unitOfWork.transaction(identity, work);
+      } catch (error: unknown) {
+        // A `MemberError` thrown inside — the not-found and empty-patch branches — passes
+        // through untouched: re-classifying it would replace a precise answer with a generic
+        // `unknown`.
+        throw isMemberError(error)
+          ? error
+          : memberErrorFromPostgres(error, context);
+      }
+    };
+
+    return cacheScope === undefined
+      ? perform()
+      : this.invalidation.around(cacheScope, perform);
   }
 }
 

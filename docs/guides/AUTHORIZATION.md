@@ -318,21 +318,115 @@ guarded route — a narrowed `member` (`membershipId`, `societyId`, `role`,
 `status`). It is entered by an interceptor, which runs _after_ guards, so the
 guards write to the request object and the interceptor copies it in. One
 verification and one membership read per request; the guards memoise on the
-request, so a second application costs zero reads.
+request, so a second application costs zero reads.### The membership cache, and its ordering
 
-There is **no global cache.** A membership is cached for the lifetime of the
-request and no longer, which is the only lifetime that is automatically correct
-when a role changes mid-session. (The Roadmap's "cached 5 minutes, invalidated on
-any membership write" is deliberately not implemented — see the T038 status note.)
+A membership is memoised on the request, so a second guard application in one
+request costs zero reads. Since the T038 follow-up (2026-09-29) it is _also_ cached
+across requests, in Redis,
+keyed `ses:authz:ctx:{societyId}:{userId}` — two immutable UUIDs, never a slug or a
+join code, because a key that can be reassigned is a key that can be made to collide.
+The value is what `SocietyAuthorizationReader.load()` returned: a society and a
+membership. It is **not** a decision — `can(role, action)` is still evaluated per
+request and `canOnResource` still reads the record.
+
+SAD §9.4's "cached 5 min; invalidated on any membership write" is now implemented,
+and the invalidation is where the design lives. `delete`-after-commit has a window:
+
+```
+writer  ── commit ────────────────────────────────► delete        (a few ms later)
+reader                    read cache → HIT the old role
+```
+
+and a reader that captured the pre-commit value can _repopulate_ the entry after
+the delete. Both are closed by three mechanisms, in `common/authorization/membership-cache.ts`:
+
+| Mechanism                                                  | Closes                                                                                                                                       |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gate` — raised **before** the transaction, counted, TTL'd | the post-commit/pre-invalidation window: while any membership write is in flight, every read bypasses the cache                              |
+| `version` — a per-society counter bumped after commit      | repopulation: a store is refused if the version moved, and an entry carries the version it was stored under, so a bump alone makes it a miss |
+| `DEL` of the touched entries                               | memory, not correctness — the bump has already invalidated the whole society                                                                 |
+
+Consequences worth internalising:
+
+- **Correctness is the version bump, not the delete.** A failed delete cannot leave
+  a revoked privilege visible; the next lookup misses on the version.
+- **Every write is wrapped, never followed.** `MembershipInvalidation.around(...)`
+  raises the gate, runs the transaction, invalidates on success and lowers the gate
+  on failure — so a rollback bumps nothing, which a trailing `invalidate()` call
+  would get wrong.
+- **A failed invalidation is safe and loud.** The gate was raised before commit and
+  the failed script never lowers it, so reads keep going to the database until its
+  60-second TTL; the API logs a warning naming the society. A leaked gate is a cold
+  cache, never a stale one.
+- **The cache is optional.** `MEMBERSHIP_CACHE_STORE=off` binds nothing, and every
+  consumer takes it with `@Optional()`; a Redis that is unreachable makes `lookup`
+  answer `bypass` and the request is served exactly as before, one query slower.
+- **In `MEMBERSHIP_CACHE_STORE=memory` the store is per process.** Correct for one
+  instance (development, the probe) and _wrong_ for two: instance A's invalidation is
+  invisible to B, which keeps serving the old role until its entries expire. `redis`
+  is the default for that reason.
 
 ---
 
-## 6. What is not built yet
+## 6. Resource-level authorization — `canOnResource`
 
-- **The 5-minute membership cache** (SAD §9.4, T038 acceptance). Request-scoped
-  only, today. A cross-request cache needs an invalidation path on every
-  membership write, and without one a removed member keeps their old role for up
-  to five minutes.
+`can(role, action)` answers _may this role ever perform this action?_, and that is all
+a guard can answer: a guard sees a role and an action, never a row. The PRD's matrix
+has three kinds of cell — ✅ full, 🟡 own/assigned records only, ⬜ none — and `can()`
+deliberately collapses the first two into `true`, because encoding 🟡 as denial would
+refuse things the PRD plainly grants.
+
+`canOnResource(member, action, resource)` (`packages/domain/src/member/resource-authorization.ts`)
+restores the distinction for the six 🟡 cells of PRD §2.1 and nothing else. It is a
+**decision function, not a layer**: it does not replace authentication,
+`SocietyGuard`, `PermissionGuard` or RLS, and each stage may still only narrow.
+
+| 🟡 cell (PRD §2.1)                          | Fact the rule reads                                                  |
+| ------------------------------------------- | -------------------------------------------------------------------- |
+| Create expense — Committee                  | `expense.published` (the intended state: the row does not exist yet) |
+| Edit/delete expense — Committee, own drafts | `createdBy` + `published`                                            |
+| Assign complaint — Committee, to self       | `assignee`                                                           |
+| Resolve complaint — assigned / own (close)  | `assignee` / `raisedBy`, per role                                    |
+| View reports — Resident/Tenant, summary     | `report.scope`                                                       |
+| View audit log — Treasurer, financial only  | `audit.category`                                                     |
+
+`grantKind(role, action)` tells the three kinds of cell apart (`full` / `scoped` /
+`none`), so no rule ever special-cases a role: a ✅ holder never reaches a rule. The
+`ResourceSnapshot` union has one variant per resource kind, each carrying only the
+facts its rule reads; the four resources that do not exist yet carry only what their
+PRD cell names, and **no aggregate, table or repository is introduced for them**.
+
+It fails closed in every direction: an inactive membership, a resource in another
+society, an action outside the matrix, a snapshot kind a rule does not cover, and a
+🟡 action with no rule registered all answer `false`. `false` is a decision, not a
+status code — the caller maps it to the answer that leaks least, which for a row the
+caller may not see is the established 404-not-403.
+
+### Where it is enforced, and why no shipped route calls it yet
+
+**The authoritative enforcement point is the application layer**, where the resource
+is loaded: a use case resolves the resource _within_ the society the guard resolved,
+and a resource id belonging to another tenant is `not_found`. That is how
+`loadBuildingContext` and `loadApartmentContext` already work, and it is why no
+shipped controller contains business authorization.
+
+No shipped _route_ calls `canOnResource` today, and that is a finding rather than an
+omission: all six 🟡 cells belong to modules that do not exist (expenses, complaints,
+reports, audit), and every resource that does exist — society, building, apartment,
+member, invitation, join request — has only the tenant question, which the SQL's
+required `societyId` and RLS already answer. Two tests make the gap impossible to
+ship past:
+
+- `membership-cache-ordering`'s sibling in the domain package asserts `SCOPED_RULES`
+  covers `SCOPED_ACTIONS` exactly, so a new 🟡 cell without a rule fails the build;
+- `apps/api/test/route-inventory.e2e-spec.ts` walks every controller the real
+  `AppModule` registered and fails on a guarded route that declares no permission, or
+  on a route naming a 🟡 action that is not in its `NARROWED_ROUTES` list.
+
+---
+
+## 7. What is not built yet
+
 - **Audit rows for role changes and join decisions** (T050), and **notifications** to the
   affected member and the other Admins. A role change is still reconstructible (the trigger
   stamps `updated_at` and the API logs the operation), and a join decision carries its own
@@ -348,13 +442,14 @@ any membership write" is deliberately not implemented — see the T038 status no
 - **The unverified-account eligibility rule** (PRD §3.1: an unverified account
   cannot hold Admin or Treasurer — T021). Noted in
   `docs/guides/AUTH_E2E_CHECKLIST.md` as outstanding.
-- **`canOnResource`** (SAD §9.3) — the resource-level half of the matrix. It
-  belongs with the first module that owns a resource, since its `ResourceSnapshot`
-  is shaped by whichever aggregate lands first (expenses).
 - **`ThrottleGuard` and `PlanGuard`** — stages 1 and 5 of SAD §9.4. Rate limiting
-  and entitlements are their own tasks.
-- **A route inventory test** that fails the build when a non-public route lacks
-  `@RequirePermission` (SAD §17.3). It becomes meaningful once the first
-  header-scoped module exists; enforcing it today would require annotating the
-  path-scoped society routes, which are addressed by `:societyId` and have no
-  header to resolve.
+  and entitlements are their own tasks; neither is a prerequisite for authorization
+  correctness, which is why they are still absent.
+- **A resource whose 🟡 cell is enforced end to end.** The domain half is built (see
+  §6); the first expense or complaint route is what will call it, and the inventory
+  test makes adding one without a narrowing site fail the build.
+- **Redis-backed cache verification in CI.** No Redis server exists in the
+  development environment this task ran in, so the four Lua scripts in
+  `membership-cache.redis.ts` are pinned by invariant tests rather than executed;
+  the in-memory adapter implements the identical protocol and _is_ executed, and the
+  hosted probe measures the ordering through the real API.

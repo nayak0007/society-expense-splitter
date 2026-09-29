@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 
+import { CacheModule } from "../../infrastructure/cache/cache.module";
 import { DatabaseModule } from "../../infrastructure/database/database.module";
 import { StructureModule } from "../structure/structure.module";
 import { IMPORT_FLAT_READER } from "./application/csv-import.tokens";
@@ -49,7 +50,12 @@ import { PermissionsController } from "./presentation/permissions.controller";
   // this module (for MEMBER_REPOSITORY), and a second edge would be a module cycle that
   // dependency-cruiser correctly refuses; the invitation list is bound at the composition
   // root (app.module.ts) instead, which is where cross-cutting wiring belongs.
-  imports: [DatabaseModule, StructureModule],
+  // `CacheModule` is imported because every write in this module can revoke
+  // authority — see `MemberRepositoryPostgres`'s constructor. It is imported
+  // explicitly rather than reached for globally, following `DatabaseModule`'s own
+  // note: the reader of this file should be able to see that this module's writes
+  // are ordered against a cache.
+  imports: [DatabaseModule, StructureModule, CacheModule],
   // Two controllers, one use-case class: the role catalogue and the permission reads answer the
   // same questions as the member routes and read the same port (`findViewer`, `findById`,
   // `countActiveByRole`), so splitting the *operations* would split one implementation of a rule
