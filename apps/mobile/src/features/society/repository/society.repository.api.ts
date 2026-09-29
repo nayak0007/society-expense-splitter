@@ -17,6 +17,7 @@ import {
   asUserId,
   JOIN_CODE_PATTERN,
   normalizeJoinCode,
+  paise,
   SocietyError,
 } from '@ses/domain';
 import type {
@@ -89,7 +90,14 @@ function societyFromDto(dto: SocietyDto): Society {
     createdAt: dto.createdAt,
     updatedAt: dto.updatedAt,
     deletedAt: dto.deletedAt,
-    settings: dto.settings,
+    // The wire carries money as a JSON integer (there is no bigint in JSON) and
+    // the domain holds it as `bigint` paise (ADR-0005), so the DTO→domain step is
+    // where the two meet. One field today; the money fields Phase 4 adds cross
+    // the same way.
+    settings: {
+      ...dto.settings,
+      approvalThresholdPaise: paise(dto.settings.approvalThresholdPaise),
+    },
     memberCount: dto.memberCount,
   };
 }

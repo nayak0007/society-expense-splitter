@@ -11,6 +11,7 @@ import {
   asSocietyId,
   asUserId,
   evaluateSocietyCapabilities,
+  paise,
 } from "@ses/domain";
 import type {
   Society,
@@ -64,7 +65,7 @@ const SOCIETY: Society = {
     billingDay: 1,
     dueDay: 10,
     graceDays: 5,
-    approvalThresholdPaise: 1_000_000,
+    approvalThresholdPaise: paise(1_000_000),
     billVacantFlats: false,
     allowPartialPayments: true,
     defaulterListPublic: false,

@@ -7,6 +7,8 @@ import {
   asSocietyId,
   asUserId,
   isSocietyType,
+  paise,
+  paiseToWire,
 } from "@ses/domain";
 import type {
   CreateSocietyInput,
@@ -74,8 +76,21 @@ import {
 // when the building module needed the identical behaviour. Two copies of either
 // would drift, and the error half is a bug fix this module paid for once.
 
-/** Bigint columns arrive as JSON numbers; coerced so a string never slips through. */
-const paiseSchema = z.coerce.number().int().min(0);
+/**
+ * A money column.
+ *
+ * `bigint` in Postgres and `bigint` in the domain (ADR-0005); the RPCs return
+ * `jsonb`, where `postgres.js` renders a large integer as a JSON number, so the
+ * value arrives as a JS `number` and is re-branded here. A value beyond
+ * `Number.MAX_SAFE_INTEGER` cannot reach this function through a JSON document
+ * at all (JSON numbers are IEEE-754 doubles), so coercing is sound — the guard
+ * that matters is `paiseToWire` on the way back out.
+ */
+const paiseSchema = z.coerce
+  .number()
+  .int()
+  .min(0)
+  .transform((value) => paise(value));
 const countSchema = z.coerce.number().int().min(0);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -408,7 +423,9 @@ export function createPayload(
     pincode: input.pincode ?? null,
     billingDay: input.billingDay,
     dueDay: input.dueDay,
-    approvalThresholdPaise: input.approvalThresholdPaise,
+    // `society_create()` takes `jsonb`, and JSON has no bigint — `JSON.stringify`
+    // throws on one — so money crosses the boundary here, explicitly.
+    approvalThresholdPaise: paiseToWire(input.approvalThresholdPaise),
   };
 }
 
@@ -427,7 +444,12 @@ export function updatePayload(
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input)) {
-    payload[key] = value ?? null;
+    // Every `bigint` in a patch is paise (SAD §18.1: money fields are suffixed
+    // `Paise`), and `JSON.stringify` throws on one — so this converts by *type*
+    // rather than by a list of names, and a monetary field added later cannot
+    // quietly break the update path.
+    payload[key] =
+      typeof value === "bigint" ? paiseToWire(paise(value)) : (value ?? null);
   }
   return payload;
 }

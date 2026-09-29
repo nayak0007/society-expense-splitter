@@ -1,6 +1,8 @@
 import { Stack, useRouter } from 'expo-router';
 import { ScrollView, View } from 'react-native';
 
+import { type Paise, Money } from '@ses/domain';
+
 import { ErrorScreen } from '@/components/ui/ErrorScreen';
 import { LoadingIndicator } from '@/components/ui/LoadingIndicator';
 import { Button } from '@/components/ui/Button';
@@ -165,7 +167,13 @@ function DetailRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-/** Paise → ₹ display (PRD §18: money is stored in paise, rendered in ₹). */
-function formatRupees(paise: number): string {
-  return `₹${Math.round(paise / 100).toLocaleString('en-IN')}`;
+/**
+ * Paise → ₹ display (PRD §7: money is stored in paise, rendered in ₹).
+ *
+ * The domain's own formatter, not a local `/ 100` + `toLocaleString`: the UI must
+ * not be a second place that decides how money renders, and `toLocaleString`
+ * differs between Hermes and Node for `en-IN`.
+ */
+function formatRupees(amount: Paise): string {
+  return Money.fromPaise(amount).format();
 }

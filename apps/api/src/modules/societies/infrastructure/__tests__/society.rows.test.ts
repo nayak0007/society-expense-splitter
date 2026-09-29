@@ -1,4 +1,4 @@
-import { asSocietyId, asUserId, isSocietyError } from "@ses/domain";
+import { asSocietyId, asUserId, isSocietyError, paise } from "@ses/domain";
 import type { CreateSocietyInput, UpdateSocietyInput } from "@ses/domain";
 
 import { SQLSTATE } from "../../../../common/database/postgres-errors";
@@ -264,7 +264,7 @@ describe("createPayload", () => {
       state: "MH",
       billingDay: 1,
       dueDay: 10,
-      approvalThresholdPaise: 500_000,
+      approvalThresholdPaise: paise(500_000),
     };
 
     const payload = createPayload(input);

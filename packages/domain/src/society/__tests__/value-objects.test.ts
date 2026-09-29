@@ -1,3 +1,4 @@
+import { paise } from "../../shared/money";
 import { DEFAULT_SOCIETY_SETTINGS, slugify } from "../rules";
 import type { OccupancyType } from "../society";
 import {
@@ -215,10 +216,17 @@ describe("createSocietySettings", () => {
   });
 
   it("keeps the approval threshold an integer number of paise", () => {
+    // Both shapes money arrives in: a JSON integer off the wire and an already
+    // branded `Paise` from another domain call. Both end up `bigint`.
     expect(
       expectOk(createSocietySettings({ approvalThresholdPaise: 500_000 }))
         .approvalThresholdPaise,
-    ).toBe(500_000);
+    ).toBe(500_000n);
+    expect(
+      expectOk(
+        createSocietySettings({ approvalThresholdPaise: paise(500_000) }),
+      ).approvalThresholdPaise,
+    ).toBe(500_000n);
     expect(
       expectErr(createSocietySettings({ approvalThresholdPaise: 10.5 }))
         .details,
@@ -227,6 +235,10 @@ describe("createSocietySettings", () => {
     });
     expect(
       expectErr(createSocietySettings({ approvalThresholdPaise: -1 })).code,
+    ).toBe("validation");
+    expect(
+      expectErr(createSocietySettings({ approvalThresholdPaise: paise(-1) }))
+        .code,
     ).toBe("validation");
   });
 

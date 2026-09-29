@@ -5,10 +5,12 @@ import type {
 } from '@ses/contracts';
 import {
   JOIN_NOTE_MAX_LENGTH,
+  Money,
   OCCUPANCY_TYPES,
   SOCIETY_TYPES,
   isValidJoinCode,
   normalizeJoinCode,
+  paiseToWire,
 } from '@ses/domain';
 import type { Society } from '@ses/domain';
 import { z } from 'zod';
@@ -52,6 +54,11 @@ export const societyFormSchema = z.object({
     }),
   billingDay: dayField('Billing day'),
   dueDay: dayField('Due day'),
+  /**
+   * Whole rupees only, and the same field the domain parses exactly — the regex
+   * states the *form* rule (no decimals), and `commonFields` hands the string to
+   * `Money.fromRupees` rather than multiplying it by 100 as a float.
+   */
   approvalThresholdRupees: z
     .string()
     .trim()
@@ -91,7 +98,11 @@ export function societyToFormValues(society: Society): SocietyFormValues {
     pincode: society.pincode ?? '',
     billingDay: String(society.settings.billingDay),
     dueDay: String(society.settings.dueDay),
-    approvalThresholdRupees: String(Math.round(society.settings.approvalThresholdPaise / 100)),
+    // `toRupeesString` is the exact inverse of `fromRupees`, so prefill → submit
+    // cannot lose paise the way a `/ 100` round-trip can.
+    approvalThresholdRupees: Money.fromPaise(
+      society.settings.approvalThresholdPaise,
+    ).toRupeesString(),
   };
 }
 
@@ -177,6 +188,18 @@ export function deleteConfirmSchema(societyName: string) {
 export type DeleteConfirmValues = z.infer<ReturnType<typeof deleteConfirmSchema>>;
 
 function commonFields(values: SocietyFormValues) {
+  // Exactly parsed by the domain, not multiplied by a float. The previous
+  // `Math.round(Number(x) * 100)` happened to be exact for a whole number of
+  // rupees and would have started rounding the day the field accepted decimals —
+  // silently, and in the direction that loses paise (Roadmap T012, T021 audit).
+  const threshold = Money.fromRupees(values.approvalThresholdRupees);
+  if (!threshold.ok) {
+    // `societyFormSchema` rejects an unparseable amount before a mapper sees it,
+    // so reaching here means validation was skipped. Throwing keeps that loud
+    // rather than sending an amount the user never typed.
+    throw threshold.error;
+  }
+
   return {
     registrationNumber: optional(values.registrationNumber),
     addressLine1: optional(values.addressLine1),
@@ -184,7 +207,7 @@ function commonFields(values: SocietyFormValues) {
     pincode: optional(values.pincode),
     billingDay: Number(values.billingDay),
     dueDay: Number(values.dueDay),
-    approvalThresholdPaise: Math.round(Number(values.approvalThresholdRupees) * 100),
+    approvalThresholdPaise: paiseToWire(threshold.value.paise),
   };
 }
 

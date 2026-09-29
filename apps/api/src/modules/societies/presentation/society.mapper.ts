@@ -18,6 +18,10 @@ import type {
   SocietyProfileResponseDto,
   SocietySummaryDto,
 } from "@ses/contracts";
+// The one conversion that is not a mapping: the domain holds paise as `bigint`
+// (ADR-0005) and the wire is an integer, so money is narrowed explicitly rather
+// than handed to Zod and rejected at runtime.
+import { paiseToWire } from "@ses/domain";
 import type {
   Society,
   SocietyCapabilities,
@@ -71,7 +75,9 @@ export function societyToDto(society: Society): SocietyDto {
       billingDay: society.settings.billingDay,
       dueDay: society.settings.dueDay,
       graceDays: society.settings.graceDays,
-      approvalThresholdPaise: society.settings.approvalThresholdPaise,
+      approvalThresholdPaise: paiseToWire(
+        society.settings.approvalThresholdPaise,
+      ),
       billVacantFlats: society.settings.billVacantFlats,
       allowPartialPayments: society.settings.allowPartialPayments,
       defaulterListPublic: society.settings.defaulterListPublic,

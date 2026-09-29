@@ -334,24 +334,26 @@ function toThresholdPaise(
   value: number | Paise | undefined,
 ): Result<Paise, SocietyError> {
   const amount = value ?? DEFAULT_SOCIETY_SETTINGS.approvalThresholdPaise;
-  if (
-    typeof amount !== "number" ||
-    !Number.isSafeInteger(amount) ||
-    amount < 0
-  ) {
-    return err(
-      societyError(
-        "validation",
-        "Approval threshold must be a whole number of paise.",
-        {
-          field: "approvalThresholdPaise",
-        },
-      ),
-    );
+  const invalid = err(
+    societyError(
+      "validation",
+      "Approval threshold must be a whole number of paise.",
+      {
+        field: "approvalThresholdPaise",
+      },
+    ),
+  );
+
+  // A `number` here came off the wire, where money is an integer (SAD §7.9), so
+  // anything fractional or beyond the safe range is a client bug rather than
+  // input to round. A `Paise` is already exact and already branded — only the
+  // sign is this field's business.
+  if (typeof amount === "number") {
+    if (!Number.isSafeInteger(amount) || amount < 0) return invalid;
+    return ok(paise(amount));
   }
-  // `paise()` only throws for values just rejected above; the call documents the
-  // branding step and keeps every construction of a Paise in one place.
-  return ok(paise(amount));
+  if (amount < 0n) return invalid;
+  return ok(amount);
 }
 
 function stripUndefined(input: SocietySettingsInput): SocietySettingsInput {

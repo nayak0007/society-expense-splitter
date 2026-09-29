@@ -3,7 +3,7 @@ import type {
   JoinSocietyPayload,
   UpdateSocietyPayload,
 } from '@ses/contracts';
-import { SocietyError } from '@ses/domain';
+import { paise, SocietyError } from '@ses/domain';
 import type { Society, SocietyMembership, SocietySummary } from '@ses/domain';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
@@ -99,8 +99,13 @@ function applySocietyPatch(society: Society, patch: UpdateSocietyPayload): Socie
       ...society.settings,
       billingDay: patch.billingDay ?? society.settings.billingDay,
       dueDay: patch.dueDay ?? society.settings.dueDay,
+      // The patch is wire-shaped (a JSON integer), the cached society is domain
+      // shaped (bigint paise) — so the patch is branded on the way in rather than
+      // the two being merged as if they were the same type.
       approvalThresholdPaise:
-        patch.approvalThresholdPaise ?? society.settings.approvalThresholdPaise,
+        patch.approvalThresholdPaise === undefined
+          ? society.settings.approvalThresholdPaise
+          : paise(patch.approvalThresholdPaise),
     },
   };
 }

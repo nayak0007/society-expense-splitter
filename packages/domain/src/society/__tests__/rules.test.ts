@@ -62,7 +62,7 @@ describe("defaultSocietySettings", () => {
   });
 
   it("defaults to a ₹10,000 approval threshold and an April financial year", () => {
-    expect(DEFAULT_SOCIETY_SETTINGS.approvalThresholdPaise).toBe(1_000_000);
+    expect(DEFAULT_SOCIETY_SETTINGS.approvalThresholdPaise).toBe(1_000_000n);
     expect(DEFAULT_SOCIETY_SETTINGS.financialYearStartMonth).toBe(4);
   });
 });

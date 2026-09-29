@@ -5,6 +5,7 @@ import type {
   SocietyId,
   UserId,
 } from "../shared/ids";
+import type { Paise } from "../shared/money";
 
 /**
  * Society entity + value unions (PRD §3.2, SAD §8.2 `societies` /
@@ -53,8 +54,16 @@ export interface SocietySettings {
   readonly billingDay: number;
   readonly dueDay: number;
   readonly graceDays: number;
-  /** ₹10,000 in paise (PRD §2: expenses above this need an Admin). */
-  readonly approvalThresholdPaise: number;
+  /**
+   * ₹10,000 in paise (PRD §2: expenses above this need an Admin).
+   *
+   * `Paise` — a branded `bigint` — and not a `number`, because it is money and
+   * the domain has exactly one way to say that (ADR-0005, Roadmap T012). The
+   * column is `bigint`, so the value survives the trip from Postgres to here
+   * without passing through a float; the JSON wire still carries an integer, and
+   * `paiseToWire` is the single place that conversion happens.
+   */
+  readonly approvalThresholdPaise: Paise;
   readonly billVacantFlats: boolean;
   readonly allowPartialPayments: boolean;
   readonly defaulterListPublic: boolean;
@@ -139,7 +148,7 @@ export interface CreateSocietyInput {
   readonly pincode?: string | undefined;
   readonly billingDay: number;
   readonly dueDay: number;
-  readonly approvalThresholdPaise: number;
+  readonly approvalThresholdPaise: Paise;
 }
 
 /**

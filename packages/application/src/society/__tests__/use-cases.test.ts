@@ -1,10 +1,4 @@
-import {
-  SocietyError,
-  asSocietyId,
-  asUserId,
-  fixedClock,
-  rupeesToPaise,
-} from "@ses/domain";
+import { SocietyError, asSocietyId, asUserId, fixedClock } from "@ses/domain";
 import type { OccupancyType, SocietyType } from "@ses/domain";
 import {
   createSociety,
@@ -78,7 +72,8 @@ describe("createSociety", () => {
         pincode: "411045",
         billingDay: 5,
         dueDay: 20,
-        approvalThresholdPaise: rupeesToPaise(5000),
+        // A wire-shaped JSON integer, which is what the create route sends.
+        approvalThresholdPaise: 500_000,
       }),
     );
 
@@ -91,7 +86,7 @@ describe("createSociety", () => {
     expect(created.society.memberCount).toBe(1);
     expect(created.society.settings.billingDay).toBe(5);
     expect(created.society.settings.dueDay).toBe(20);
-    expect(created.society.settings.approvalThresholdPaise).toBe(500_000);
+    expect(created.society.settings.approvalThresholdPaise).toBe(500_000n);
     expect(created.membership.role).toBe("admin");
     expect(created.membership.status).toBe("active");
     expect(created.membership.userId).toBe(ADMIN);
@@ -105,7 +100,7 @@ describe("createSociety", () => {
     expect(created.society.settings.billingDay).toBe(1);
     expect(created.society.settings.dueDay).toBe(10);
     expect(created.society.settings.graceDays).toBe(5);
-    expect(created.society.settings.approvalThresholdPaise).toBe(1_000_000);
+    expect(created.society.settings.approvalThresholdPaise).toBe(1_000_000n);
     expect(created.society.settings.timezone).toBe("Asia/Kolkata");
   });
 

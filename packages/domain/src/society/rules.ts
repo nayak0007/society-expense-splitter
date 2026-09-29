@@ -1,4 +1,5 @@
 import type { SocietyId, UserId } from "../shared/ids";
+import { paise } from "../shared/money";
 
 import { SOCIETY_TYPES } from "./society";
 import type {
@@ -32,7 +33,8 @@ export const DEFAULT_SOCIETY_SETTINGS: SocietySettings = {
   billingDay: 1,
   dueDay: 10,
   graceDays: 5,
-  approvalThresholdPaise: 1_000_000,
+  // ₹10,000, branded through the one constructor so no literal is a raw bigint.
+  approvalThresholdPaise: paise(1_000_000),
   billVacantFlats: true,
   allowPartialPayments: true,
   defaulterListPublic: false,
