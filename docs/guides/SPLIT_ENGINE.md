@@ -9,7 +9,9 @@ Source: [`packages/split-engine/src/types.ts`](../../packages/split-engine/src/t
 (the contract and the errors),
 [`engine.ts`](../../packages/split-engine/src/engine.ts) (`computeSplit` and the
 ordering), [`rounding.ts`](../../packages/split-engine/src/rounding.ts) (the rule's
-seam), and [`strategies/`](../../packages/split-engine/src/strategies).
+seam), [`strategies/`](../../packages/split-engine/src/strategies) and
+[`bases/`](../../packages/split-engine/src/bases) (the apartment bases and the facts
+they read).
 
 ## 1. One entry point, and it cannot fail silently
 
@@ -106,6 +108,7 @@ Allocations come back ordered **ascending by `apartmentNumber`**, compared
 | `equal`      | `1`                              | T056  |
 | `percentage` | the participant's basis points   | T056  |
 | `shares`     | share units                      | T057  |
+| `apartment`  | an apartment attribute           | T058  |
 | `custom`     | explicit per-participant amounts | T057  |
 
 `SplitStrategy` lists only what is implemented, so an unimplemented strategy is a
@@ -163,6 +166,86 @@ the 20 residual paise to the 1-share tier, whose remainder is the largest. The P
 prints the 2-share tier as ₹1,333.34, which cannot be right — that ledger adds up to
 ₹60,000.20 — so the printed figure is a display rounding of
 `60000 × 2 ÷ 90`, and the rule that conserves is the one implemented.
+
+### Apartment — one strategy, six bases
+
+`apartment` is not six strategies. The database has **two columns** —
+`split_strategy` and `apartment_basis` (`20260920130000_society_core.sql`) — so
+`planSplit` switches on the strategy and the apartment arm switches on the basis.
+The six basis values are the `apartment_basis` enum, whole and in its order:
+
+| Basis              | Weight given to each flat                     | Read from                                        | If not recorded                  |
+| ------------------ | --------------------------------------------- | ------------------------------------------------ | -------------------------------- |
+| `per_flat`         | `1`                                           | nothing                                          | —                                |
+| `per_sqft_carpet`  | carpet area, in hundredths of a sq ft         | `apartments.carpet_area_sqft` (`numeric(8, 2)`)  | `MISSING_AREA`                   |
+| `per_sqft_builtup` | built-up area, in hundredths of a sq ft       | `apartments.builtup_area_sqft` (`numeric(8, 2)`) | `MISSING_AREA`                   |
+| `per_bhk`          | configuration, in tenths of a BHK             | `apartments.bhk` (`numeric(3, 1)`)               | `MISSING_BHK`                    |
+| `per_floor_band`   | the matched band's multiplier, in thousandths | `apartments.floor` + the configured bands        | `MISSING_FLOOR`, `NO_FLOOR_BAND` |
+| `per_parking_slot` | allotted slots                                | `apartments.parking_slots` (`smallint NOT NULL`) | —                                |
+
+Bases are pure functions from the ordered participants and their own configuration
+to `{ included, weights, warnings }` (`bases/outcome.ts`). They share the fact
+readers in `bases/facts.ts` and, like every other strategy, hand their weights to
+`Money.allocateByWeights` — no basis computes an amount, so there is still exactly
+one residual algorithm.
+
+`per_flat` is "identical to equal, but scoped to flats not people" (PRD §3.5.4), and
+it is _structurally_ equal: it reuses the equal strategy's `equalWeights`, so the two
+cannot drift. It reads no apartment attribute, so a per-flat split of a building
+whose flats have no recorded area, floor, configuration or parking slot is exactly
+that building's per-flat split — with `warnings: []` and no invented data.
+
+**Weights are exact integers, and the scale is the column's.** A decimal column is
+scaled by _reading the number's own text_ (`exactUnits`), not by multiplying it:
+`720.5` is `"720.5"` → `72050` hundredths, so `720.5 × 100` never happens and cannot
+round. Areas are hundredths (`numeric(8, 2)`), BHK is tenths (`numeric(3, 1)`), a
+band multiplier is thousandths (three decimal places, the PRD's `1.5×` is `1500`),
+and parking slots are whole numbers. The scale cancels inside
+`Money.allocateByWeights`, so only the _ratios_ matter: `600 : 900 : 1500` sq ft and
+`60000 : 90000 : 150000` hundredths allocate byte-identically.
+
+**Floor bands are configuration, and they are inclusive.**
+`floorBands: [{ from, to, mult }]` is matched against `apartments.floor`
+(PRD §3.5.4: "lift charges: ground floor 0×, floors 1–3 1×, floors 4+ 1.5×"), with
+**both ends inclusive** and no requirement that the table be sorted or contiguous —
+the flat's floor selects the band, which supplies the multiplier. A table that could
+not mean anything is a field error _before_ any flat is weighed, with
+`details.field: "floorBands"`:
+
+- empty — a per-floor-band split with no band has no weight for anyone;
+- a bound that is not a whole floor between `-5` and `200` (`chk_apartments_floor`);
+- a reversed band (`from > to`), which could never match a floor;
+- a multiplier that is negative or has more than three decimal places;
+- overlapping bands, because a floor must match **at most one** band — including
+  two bands that merely touch at an end (`0–3` and `3–5`), where the overlap is a
+  coin flip rather than a decision anyone can audit.
+
+**A zero multiplier is an exemption, not an exclusion.** The roadmap's own case: a
+ground-floor flat in a lift charge is _in_ the split with an amount of exactly ₹0,
+because a resident reading the table must see that the flat was considered and owes
+nothing. The engine refuses a split in which _every_ weight is zero — `Σ 0` leaves
+nothing to divide by, and inventing an answer for it is not this package's job —
+with a `validation` error rather than an arbitrary allocation.
+
+A flat whose fact is **not recorded** is the opposite case: it is **not in the
+allocations** and is named in a warning, because there is no defensible weight for
+it — ₹0 would be a policy nobody chose and a ratio would have to be invented. That
+is the roadmap's "apartments missing the required attribute are excluded and
+reported as a warning, never silently dropped". A _present but impossible_ value
+(an area of `0`, a BHK of `2.25`, a floor of `-9`) is a different thing again: the
+column `CHECK` and the domain's own `createArea`/`createBhk`/`createFloor` refuse it,
+so reaching one means the input was hand-built or a decimal point moved in transit —
+a field error, not a data-quality note, because computing a plausible bill from an
+impossible fact is exactly the failure the distinction exists to prevent.
+
+**Vacancy is not a basis.** The PRD §3.5.4 bullet list also names `occupied_only`
+("skip vacant flats") and the roadmap's `Create` line lists an `occupied-only.ts`,
+but it is not in the `apartment_basis` enum, so no expense could ever store it; and
+"who participates" belongs to participant resolution (**T063**), whose selector owns
+`occupancy`/`includeVacant`/`bill_vacant_flats`. T058 therefore implements the six
+bases and leaves a vacant flat to be left out of the participant list by T063 — the
+same boundary that keeps this package from resolving participants itself. A test
+pins the six _and_ the absence, so the decision is visible rather than implied.
 
 ### Custom
 
@@ -236,19 +319,73 @@ set is refused, because a split with nothing to divide by has no answer.
   amount is refused — there is no reading of “this flat owes ₹0.00 from a shares
   split” that a participant list cannot express more clearly by leaving the flat
   out.
+- **An apartment fact must be one a column could hold.** An area of `0` or above
+  `100000` sq ft, a configuration outside `0.5`–`20` BHK or with more than one
+  decimal place, a floor that is not a whole number between `-5` and `200`, a
+  parking slot count outside `0`–`20`, or a value that is `NaN`, infinite or so
+  large its own text is in exponent form — each is refused with `validation` and
+  `details.apartmentId`, never substituted with `area = 1`, `floor = 0` or
+  `multiplier = 1`.
+- **An apartment split with nothing to divide by.** A `0` weight is a legal exempt
+  row (a ground-floor flat in a lift charge), but a split in which _every_ weight is
+  `0` — every flat in a `0×` band, every flat with no allotted parking slot — is
+  refused rather than answered with an arbitrary allocation. The checks are ordered
+  so the more specific one wins: an empty participant list is refused first by the
+  shared check, then an all-excluded set, then an all-zero result.
 
 ## 8. Errors
 
-| Code         | When                                                                                                                                                                                                                                                                               |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `validation` | zero or negative amount; no participants; a percentage outside 0–100; a fractional percentage; percentages not totalling 100% within tolerance; a share that is zero, negative, fractional or above 10,000; a negative custom amount; custom amounts that do not sum to the amount |
-| `conflict`   | the same member and flat appears twice                                                                                                                                                                                                                                             |
-| `invariant`  | allocations do not sum to the amount (a bug; thrown)                                                                                                                                                                                                                               |
+| Code         | When                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `validation` | zero or negative amount; no participants; a percentage outside 0–100; a fractional percentage; percentages not totalling 100% within tolerance; a share that is zero, negative, fractional or above 10,000; a negative custom amount; custom amounts that do not sum to the amount; an apartment fact no column could hold; a malformed floor-band table; every weight in an apartment split zero, or every flat excluded from it |
+| `conflict`   | the same member and flat appears twice                                                                                                                                                                                                                                                                                                                                                                                            |
+| `invariant`  | allocations do not sum to the amount (a bug; thrown)                                                                                                                                                                                                                                                                                                                                                                              |
 
 `details.field` is `"amount"`, `"participants"`, `"participants.percentage"`,
-`"participants.share"` or `"participants.amount"`, so the API maps it to a `422`
-whose `field` the form can highlight (SAD §7). A custom sum failure also carries
-`details.shortfallPaise` — signed, as a string, because it is a bigint.
+`"participants.share"`, `"participants.amount"`, `"participants.floor"`,
+`"participants.bhk"`, `"participants.carpetAreaSqft"`,
+`"participants.builtupAreaSqft"`, `"participants.parkingSlots"` or `"floorBands"`,
+so the API maps it to a `422` whose `field` the form can highlight (SAD §7). A custom
+sum failure also carries `details.shortfallPaise` — signed, as a string, because it
+is a bigint — and an apartment fact failure carries `details.apartmentId` alongside
+`details.field`, which is what lets the preview endpoint (T064) point at the
+offending flat rather than at the whole request.
+
+### Warnings
+
+An **error** means the computation cannot validly proceed; a **warning** means it
+proceeded and the caller should know something about the data quality. `SplitResult`
+carries `warnings: readonly SplitWarning[]`, present on _every_ result — the four
+strategies that predate it return the shared, frozen empty list, so there is one
+result shape rather than a strategy-specific one.
+
+| Code            | Raised by           | Meaning                                                         |
+| --------------- | ------------------- | --------------------------------------------------------------- |
+| `MISSING_AREA`  | both per-sqft bases | the flat's carpet or built-up area is not recorded              |
+| `MISSING_BHK`   | `per_bhk`           | the flat's configuration is not recorded                        |
+| `MISSING_FLOOR` | `per_floor_band`    | the flat's floor is not recorded                                |
+| `NO_FLOOR_BAND` | `per_floor_band`    | the floor _is_ recorded; the configured table does not reach it |
+
+Warnings are machine-readable and deterministic. One warning per **code** — not per
+flat — with the affected `apartmentIds`, which is the shape the PRD's wire example
+already uses:
+
+```json
+{
+  "code": "MISSING_AREA",
+  "message": "3 apartments have no carpet area and were excluded",
+  "apartmentIds": ["ap-58", "ap-59", "ap-60"]
+}
+```
+
+Ordering is part of the contract rather than an accident of the walk: the codes come
+out in `SPLIT_WARNING_CODES` order, and the ids inside a warning follow the engine's
+participant order (§4), so two callers who passed the same flats in different orders
+receive **byte-identical** warnings — an assertion the suite makes alongside the
+identical allocations. A `Map`'s iteration order (insertion order) is deliberately
+not what decides it. `MISSING_FLOOR` and `NO_FLOOR_BAND` are two codes where one
+would do, because "the society never recorded the floor" and "the society's table
+stops below this flat" are different next actions for a treasurer.
 
 ## 9. Ordering, determinism, and what is _not_ covered
 
@@ -257,14 +394,25 @@ equal splits each re-run reversed, 300 random percentage splits, 300 random shar
 splits (300 more, re-run reversed), 200 randomly partitioned custom amounts (also
 re-run reversed), and an exhaustive sweep of every amount from 1 to 200 paise
 across 1 to 12 participants (2,400 splits) — the last one because a systematic
-off-by-one at a particular divisor is what a random sample walks past.
+off-by-one at a particular divisor is what a random sample walks past. Every
+exemption case is covered the same way: one exempt flat, several, a mixture of `0×`
+and positive multipliers, and a whole building in a `0×` band (refused), each
+conserving the total exactly.
 
 Equivalence between strategies is asserted on exact paise, per allocation and per
 participant id: `equal` and `shares` at one share each, `shares 1 : 2 : 1` and
 `percentage 25 : 50 : 25`, and a `custom` split typed to the amounts an `equal` or
 `shares` split produced. A strategy that rounded its own remainder could still pass
 its own conservation test — a total can be conserved by the wrong rule — but it
-could not agree with another strategy on the same input.
+could not agree with another strategy on the same input. The apartment bases are
+checked the same way, in the cases where the basis and the money are genuinely the
+same claim: `per_flat` and `equal` are the same allocation for the same flats and
+amount, `per_sqft_carpet` at equal areas is `per_flat`, `per_sqft_builtup` over
+`built : carpet` at a fixed ratio is the same money as `per_sqft_carpet`, and a
+floor-band split whose bands all carry the same multiplier is `per_flat`. Where the
+semantics differ they are _not_ forced together: a `per_bhk` split of 3 : 2 : 1 BHK
+flats allocates 3 : 2 : 1 and the suite pins that ledger, because "every weight is
+positive" is not the same claim as "every weight is equal".
 
 These properties are deterministic (a seeded xorshift, so a failure reproduces from
 its seed) rather than `fast-check`. **The 10,000-iteration `fast-check` invariant
@@ -277,7 +425,7 @@ Adding a strategy means:
 
 1. a new variant in `SplitInput` (`types.ts`), with the strategy's per-participant
    value on the participant — the shape `shares` and `custom` both use, and the one
-   `apartment` will need;
+   `apartment` needs;
 2. a module in `strategies/` that turns an ordered participant list into
    `Result<readonly Weight[], SplitError>` (a strategy that needs the total, as
    `custom` does to check its sum, receives it as a second argument);
@@ -289,6 +437,22 @@ that pins it will make you look at the change. The `switch` in `planSplit` has n
 `default`: an arm per variant is what makes a missing one a compile error
 (`TS2366`, measured by deleting the `shares` arm) instead of a runtime throw that
 no test can reach.
+
+There is a second dimension once `apartment` exists. Adding a **basis** means:
+
+1. a new value in `APARTMENT_BASES` (`types.ts`), which is the `apartment_basis`
+   enum, and the freedom to extend `ApartmentParticipant` with the one fact it
+   reads;
+2. a module in `bases/` returning a `BasisOutcome` — normally a one-liner over
+   `collect(participants, read)` with its own reader in `facts.ts`;
+3. one `case` in `basisOutcome`, which is also exhaustive with no `default`.
+
+Two things make `apartment` different from the other four strategies, and both live
+in `planApartment`: it is the only arm that can **shorten** the participant list
+(the excluded flats are not in the allocations), and therefore the only arm that
+has to refuse a set that became empty or all-zero after exclusion. Everything else —
+ordering, the allocator, the residual, conservation — is shared, which is why a
+basis is five lines rather than a strategy.
 
 ## 11. Coverage, and how to measure it
 
@@ -302,10 +466,14 @@ non-zero. `global` rather than a path pattern because the package _is_ the SAD
 pnpm --filter @ses/split-engine test:coverage   # or, repo-wide, pnpm test:coverage
 ```
 
-Measured 2026-09-30 (T057): **100% statements, branches, functions and lines** on
-all nine source files — `engine.ts`, `rounding.ts`, `types.ts`, `index.ts` and the
-four strategies — 88 tests. Thresholds, proofs and the (currently red) API row are
-documented in `docs/guides/TEST_COVERAGE.md`.
+Measured 2026-09-30 (T058): **100% statements, branches, functions and lines** on
+all fifteen source files — `engine.ts`, `rounding.ts`, `types.ts`, `index.ts`, the
+four strategies, and the seven modules under `bases/` — 155 tests in 15 suites.
+`bases/outcome.ts` is where the threshold was actually felt: the empty-warnings list
+is a shared frozen array, and a helper that is exported but never read from outside
+its own module leaves an uncovered binding behind, so `buildWarnings` is
+module-private. The threshold is a design check, not a formality. Thresholds, proofs
+and the (currently red) API row are documented in `docs/guides/TEST_COVERAGE.md`.
 
 ## 12. Architecture boundary
 

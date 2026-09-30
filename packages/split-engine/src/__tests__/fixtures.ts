@@ -3,7 +3,9 @@ import { Money, asApartmentId, asMemberId, type Result } from "@ses/domain";
 import {
   basisPoints,
   shareUnits,
+  type ApartmentParticipant,
   type CustomParticipant,
+  type FloorBand,
   type PercentageParticipant,
   type ShareParticipant,
   type SplitAllocation,
@@ -101,6 +103,68 @@ export function shareTier(
 ): readonly ShareParticipant[] {
   return Array.from({ length: count }, (_, index) =>
     shareFlat(String(first + index), share),
+  );
+}
+
+/**
+ * The PRD's lift bands: ground floor `0×`, floors 1–3 `1×`, floors 4–8 `1.5×`.
+ *
+ * Frozen, because it is shared: a test that measured "the caller's bands are not
+ * mutated" by mutating this one would poison every other test in the run.
+ */
+export const LIFT_BANDS: readonly FloorBand[] = Object.freeze([
+  { from: 0, to: 0, mult: 0 },
+  { from: 1, to: 3, mult: 1 },
+  { from: 4, to: 8, mult: 1.5 },
+]);
+
+/**
+ * A participant in an apartment split, with the flat's attributes.
+ *
+ * Every fact has a default, so a test states only the one it is about — and `null`
+ * is passed through rather than defaulted, because "not recorded" is a fact the
+ * engine acts on and is the case most of these tests exist for.
+ */
+export function apartmentFlat(
+  apartmentNumber: string,
+  facts: {
+    readonly floor?: number | null;
+    readonly carpetAreaSqft?: number | null;
+    readonly builtupAreaSqft?: number | null;
+    readonly bhk?: number | null;
+    readonly parkingSlots?: number;
+  } = {},
+  options: {
+    readonly memberId?: string;
+    readonly apartmentId?: string;
+  } = {},
+): ApartmentParticipant {
+  return {
+    ...flat(apartmentNumber, options),
+    floor: facts.floor === undefined ? 1 : facts.floor,
+    carpetAreaSqft:
+      facts.carpetAreaSqft === undefined ? 600 : facts.carpetAreaSqft,
+    builtupAreaSqft:
+      facts.builtupAreaSqft === undefined ? 750 : facts.builtupAreaSqft,
+    bhk: facts.bhk === undefined ? 2 : facts.bhk,
+    parkingSlots: facts.parkingSlots ?? 1,
+  };
+}
+
+/** `count` flats with the same attributes, numbered from `first` upwards. */
+export function apartmentFlats(
+  count: number,
+  facts: {
+    readonly floor?: number | null;
+    readonly carpetAreaSqft?: number | null;
+    readonly builtupAreaSqft?: number | null;
+    readonly bhk?: number | null;
+    readonly parkingSlots?: number;
+  } = {},
+  first = 101,
+): readonly ApartmentParticipant[] {
+  return Array.from({ length: count }, (_, index) =>
+    apartmentFlat(String(first + index), facts),
   );
 }
 

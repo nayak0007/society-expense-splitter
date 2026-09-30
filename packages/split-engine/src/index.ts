@@ -19,10 +19,12 @@
  * path to the rounding rule — the one piece of arithmetic that must never be
  * reimplemented.
  *
- * ## Four of five strategies
+ * ## All five strategies
  *
- * `equal` and `percentage` (T056), `shares` and `custom` (T057). The apartment
- * bases arrive with T058, and `SplitStrategy` grows with them.
+ * `equal` and `percentage` (T056), `shares` and `custom` (T057), and `apartment`
+ * (T058) with its six bases — the database's `split_strategy` enum, whole. A
+ * result may also carry typed `warnings` (T058) when an apartment split had to
+ * leave a flat out because the attribute it weighs was never recorded.
  *
  * @example
  * ```ts
@@ -39,12 +41,14 @@
 export { computeSplit } from "./engine";
 
 export {
+  APARTMENT_BASES,
   MAX_SHARE_UNITS,
   ONE_SHARE,
   PERCENT_TOLERANCE_BASIS_POINTS,
   PERCENT_TOTAL_BASIS_POINTS,
   SPLIT_ERROR_CODES,
   SPLIT_STRATEGIES,
+  SPLIT_WARNING_CODES,
   SplitError,
   basisPoints,
   isSplitError,
@@ -53,10 +57,17 @@ export {
 } from "./types";
 
 export type {
+  ApartmentAttributeBasis,
+  ApartmentAttributeSplitInput,
+  ApartmentBasis,
+  ApartmentFloorBandSplitInput,
+  ApartmentParticipant,
+  ApartmentSplitInput,
   BasisPoints,
   CustomParticipant,
   CustomSplitInput,
   EqualSplitInput,
+  FloorBand,
   PercentageParticipant,
   PercentageSplitInput,
   ShareParticipant,
@@ -68,4 +79,6 @@ export type {
   SplitParticipant,
   SplitResult,
   SplitStrategy,
+  SplitWarning,
+  SplitWarningCode,
 } from "./types";

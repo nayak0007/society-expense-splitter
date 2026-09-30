@@ -121,6 +121,20 @@ describe("computeSplit validation", () => {
     );
     expect(custom.code).toBe("validation");
     expect(custom.details?.field).toBe("participants");
+
+    // T058's apartment arm too. It has its own emptiness check (an all-excluded
+    // apartment set is also refused), but an empty list never reaches the basis:
+    // the shared check refuses it first, exactly like the other four.
+    const apartment = expectErr(
+      computeSplit({
+        strategy: "apartment",
+        basis: "per_sqft_carpet",
+        amount: rupees("100"),
+        participants: [],
+      }),
+    );
+    expect(apartment.code).toBe("validation");
+    expect(apartment.details?.field).toBe("participants");
   });
 
   it("refuses the same member and flat twice", () => {
@@ -305,12 +319,14 @@ describe("computeSplit ordering", () => {
   it("implements exactly the strategies it declares", () => {
     // Pinned because the database enum already holds all five
     // (`equal, percentage, shares, apartment, custom`) and the names have to match
-    // it exactly; T057 extends this list by two, and that edit should be visible
-    // in a diff rather than discovered by a stored value failing to dispatch.
+    // it exactly; T058 extends this list by the last one, and that edit should be
+    // visible in a diff rather than discovered by a stored value failing to
+    // dispatch.
     expect(SPLIT_STRATEGIES).toEqual([
       "equal",
       "percentage",
       "shares",
+      "apartment",
       "custom",
     ]);
   });

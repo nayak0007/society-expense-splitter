@@ -1,5 +1,11 @@
 import { err, ok, type Money, type Result, type Weight } from "@ses/domain";
 
+import { floorBandWeights } from "./bases/floor-band";
+import { NO_WARNINGS, type BasisOutcome } from "./bases/outcome";
+import { perBhkWeights } from "./bases/per-bhk";
+import { perFlatWeights } from "./bases/per-flat";
+import { perParkingSlotWeights } from "./bases/per-parking-slot";
+import { perSqftWeights } from "./bases/per-sqft";
 import { distribute, undistributedPaise } from "./rounding";
 import { customWeights } from "./strategies/custom";
 import { equalWeights } from "./strategies/equal";
@@ -7,11 +13,14 @@ import { percentageWeights } from "./strategies/percentage";
 import { shareWeights } from "./strategies/shares";
 import {
   splitError,
+  type ApartmentParticipant,
+  type ApartmentSplitInput,
   type SplitAllocation,
   type SplitError,
   type SplitInput,
   type SplitParticipant,
   type SplitResult,
+  type SplitWarning,
 } from "./types";
 
 /**
@@ -124,19 +133,23 @@ export function computeSplit(
 interface SplitPlan {
   readonly ordered: readonly SplitParticipant[];
   readonly weights: readonly Weight[];
+  /** Always empty except for an `apartment` split whose facts were incomplete. */
+  readonly warnings: readonly SplitWarning[];
 }
 
 /**
  * Dispatch on the strategy: one arm per variant, no `default`.
  *
- * The switch is exhaustive over `SplitInput` and TypeScript knows it, so a fifth
- * strategy added to the union is a compile error until it has a branch of its own.
- * A `default` that threw would be strictly worse than that error — it would move
- * the mistake from the compiler to production, and its never-taken branch would
- * sit in the coverage report as the one line no test can reach.
+ * The switch is exhaustive over `SplitInput` and TypeScript knows it, so a
+ * strategy added to the union is a compile error until it has a branch of its own
+ * — which is how `apartment` arrived in T058. A `default` that threw would be
+ * strictly worse than that error: it would move the mistake from the compiler to
+ * production, and its never-taken branch would sit in the coverage report as the
+ * one line no test can reach.
  *
- * Every arm delegates its ordering to {@link planFrom}; the dispatch itself
- * decides nothing beyond which strategy resolves the weights.
+ * The four weight-per-participant strategies delegate their ordering to
+ * {@link planFrom}; `apartment` has its own arm ({@link planApartment}) because it
+ * can also hold a participant back.
  */
 function planSplit(input: SplitInput): Result<SplitPlan, SplitError> {
   switch (input.strategy) {
@@ -152,6 +165,85 @@ function planSplit(input: SplitInput): Result<SplitPlan, SplitError> {
       return planFrom(input.participants, (ordered) =>
         customWeights(ordered, input.amount),
       );
+    case "apartment":
+      return planApartment(input);
+  }
+}
+
+/**
+ * The apartment strategy: order, weigh, hold back what cannot be weighed.
+ *
+ * Structurally different from the four above, and necessarily so. They answer one
+ * weight per participant; an apartment basis answers the *flats that took a
+ * share* — because a flat whose attribute was never recorded cannot be given a
+ * defensible weight, and Roadmap T058 requires it to be excluded and reported
+ * rather than dropped or defaulted. So this arm produces a plan directly instead
+ * of going through {@link planFrom}, and it is the only place in the engine that
+ * can *shorten* the participant list.
+ *
+ * The two guards at the end are the arithmetic's price for that: `distribute`
+ * needs at least one positive weight, since an amount with nothing to divide it by
+ * has no answer. Both are `validation` failures rather than silent zero splits,
+ * and both are reachable only through apartment splits — every other strategy has
+ * already refused a zero weight of its own (`shares`) or cannot produce one.
+ */
+function planApartment(
+  input: ApartmentSplitInput,
+): Result<SplitPlan, SplitError> {
+  const ordered = orderParticipants(input.participants);
+  const outcome = basisOutcome(input, ordered);
+  if (!outcome.ok) return outcome;
+
+  const { included, weights, warnings } = outcome.value;
+
+  if (included.length === 0) {
+    return err(
+      splitError(
+        "validation",
+        "A split needs at least one apartment that can take a share; every participant was excluded from this one.",
+        { field: "participants" },
+      ),
+    );
+  }
+
+  if (!weights.some((candidate) => candidate > 0n)) {
+    return err(
+      splitError(
+        "validation",
+        `A split needs at least one apartment with a positive weight; every apartment in this ${input.basis} split weighs zero.`,
+        { field: "participants" },
+      ),
+    );
+  }
+
+  return ok({ ordered: included, weights, warnings });
+}
+
+/**
+ * Dispatch on the basis — the apartment strategy's second dimension.
+ *
+ * Exhaustive over `ApartmentBasis`, like the strategy `switch` above and for the
+ * same reason: a basis added to the union without a branch of its own is a compile
+ * error rather than a split that silently weighs nothing. The two `per_sqft` bases
+ * share one function because they are one rule over two columns.
+ */
+function basisOutcome(
+  input: ApartmentSplitInput,
+  ordered: readonly ApartmentParticipant[],
+): Result<BasisOutcome, SplitError> {
+  switch (input.basis) {
+    case "per_flat":
+      return perFlatWeights(ordered);
+    case "per_sqft_carpet":
+      return perSqftWeights(ordered, "carpetAreaSqft");
+    case "per_sqft_builtup":
+      return perSqftWeights(ordered, "builtupAreaSqft");
+    case "per_bhk":
+      return perBhkWeights(ordered);
+    case "per_floor_band":
+      return floorBandWeights(ordered, input.floorBands);
+    case "per_parking_slot":
+      return perParkingSlotWeights(ordered);
   }
 }
 
@@ -176,7 +268,9 @@ function planFrom<TParticipant extends SplitParticipant>(
 ): Result<SplitPlan, SplitError> {
   const ordered = orderParticipants(participants);
   const weights = weightsFor(ordered);
-  return weights.ok ? ok({ ordered, weights: weights.value }) : weights;
+  return weights.ok
+    ? ok({ ordered, weights: weights.value, warnings: NO_WARNINGS })
+    : weights;
 }
 
 /**
@@ -299,5 +393,6 @@ function buildResult(
     total,
     allocations: Object.freeze<readonly SplitAllocation[]>(allocations),
     residualPaise: undistributedPaise(total, parts),
+    warnings: plan.warnings,
   });
 }
