@@ -135,6 +135,29 @@ jobs:
       - name: Tests with per-path coverage thresholds (SAD §15.2)
         run: pnpm test:coverage
 
+      # ── The property-based invariant suite (Roadmap T059, SAD §15.2) ────────
+      # "Property-based tests (fast-check) are mandatory on the split engine ...
+      # Run with 10,000 iterations in CI" (SAD §15.2). The coverage run above
+      # already executes this file, so the step is deliberately redundant on a
+      # healthy run — and deliberately kept as its own named signal, because
+      # "all four invariants green across 10,000 cases per strategy" is the
+      # single most important test in the product and its failure should read as
+      # its own step, with fast-check's seed, path and shrunk counterexample in
+      # the log rather than buried in an Istanbul summary.
+      #
+      # It fails the job, not warns: there is no `continue-on-error`. And it
+      # cannot pass by finding nothing — `jest properties` selects only
+      # `properties.test.ts`, and Jest exits non-zero when a pattern matches no
+      # test file, so a rename that stranded the suite would go red here.
+      #
+      # `if: always()` for the same reason as the e2e step below: the coverage
+      # gate can fail on the API's number, which must not hide this signal.
+      # Nothing here needs Docker or a database — the split engine is pure and
+      # depends only on `packages/domain`.
+      - name: Split-engine property suite (fast-check · 10,000 cases per strategy/basis)
+        if: always()
+        run: pnpm --filter @ses/split-engine test:property
+
       # The API's e2e suite boots the real Nest application (no database — the
       # readiness probe is asserted in its degraded state) and needs no container
       # runtime. The unified run above already executes these 333 tests, so this

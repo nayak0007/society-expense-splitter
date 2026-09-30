@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:coverage": "jest --coverage",
+    "test:property": "jest properties",
     "test:watch": "jest --watch"
   },
   "dependencies": {
@@ -19,6 +20,7 @@
     "@swc/core": "^1.16.2",
     "@swc/jest": "^0.2.39",
     "@types/jest": "^30.0.0",
+    "fast-check": "^4.10.2",
     "jest": "^30.5.2",
     "typescript": "~6.0.3"
   }

@@ -415,9 +415,34 @@ flats allocates 3 : 2 : 1 and the suite pins that ledger, because "every weight 
 positive" is not the same claim as "every weight is equal".
 
 These properties are deterministic (a seeded xorshift, so a failure reproduces from
-its seed) rather than `fast-check`. **The 10,000-iteration `fast-check` invariant
-suite is Roadmap T059**, which owns its CI wiring; adding a second property-testing
-toolchain now would be two things to keep green for one invariant.
+its seed) — and since Roadmap T059 those seeded suites are the _example_ layer
+rather than the only one. Beside them,
+[`packages/split-engine/src/__tests__/properties.test.ts`](../../packages/split-engine/src/__tests__/properties.test.ts)
+is the mandatory `fast-check` invariant suite (SAD §15.2): **10,000 generated cases
+per strategy and per basis**, asserting on every one conservation (exact paise, no
+epsilon), determinism (a deeply equal outcome), non-negativity, and
+`residualPaise === 0n` — the four Roadmap T059 invariants — plus two that decide
+whether a _published_ bill is stable: order invariance compared by
+`apartmentNumber → paise` identity rather than array position, and warning
+stability. The examples stay: an example pins the ledger a requirement names, and
+the property layer speaks for the input nobody thought of.
+
+The suite is a second layer, not a replacement, and it is not satisfied by the
+engine agreeing with itself: every basis's weight is checked against the
+documented column as an **oracle computed independently of the engine**, so a
+weight that drifted would fail even though it still conserved the total.
+
+A failure reproduces from its own report — fast-check prints the seed, the path and
+the shrunk counterexample — and the suite reads `FC_SEED` so the whole file replays
+the failing sequence without editing anything:
+
+```bash
+FC_SEED=1681903501 pnpm --filter @ses/split-engine test:property
+```
+
+That command needs no database and no container runtime of its own; `ci.yml` runs
+it as its own named step, so a fast-check failure reads as its own red step with the
+seed and counterexample in the log rather than inside an Istanbul summary.
 
 ## 10. The extension point
 
@@ -466,9 +491,14 @@ non-zero. `global` rather than a path pattern because the package _is_ the SAD
 pnpm --filter @ses/split-engine test:coverage   # or, repo-wide, pnpm test:coverage
 ```
 
-Measured 2026-09-30 (T058): **100% statements, branches, functions and lines** on
+Measured 2026-09-30 (T059): **100% statements, branches, functions and lines** on
 all fifteen source files — `engine.ts`, `rounding.ts`, `types.ts`, `index.ts`, the
-four strategies, and the seven modules under `bases/` — 155 tests in 15 suites.
+four strategies, and the seven modules under `bases/` — **194 tests in 16 suites**
+(155 → 194). The property suite lives under `src/__tests__/` and
+`coveragePathIgnorePatterns` excludes that directory, so it adds execution without
+moving the denominator: it raises confidence in the existing 100% rather than
+buying it with extra cases, and no threshold was relaxed and no bare ignore
+directive was added for it.
 `bases/outcome.ts` is where the threshold was actually felt: the empty-warnings list
 is a shared frozen array, and a helper that is exported but never read from outside
 its own module leaves an uncovered binding behind, so `buildWarnings` is

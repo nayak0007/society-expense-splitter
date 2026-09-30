@@ -63,6 +63,17 @@ module.exports = {
   // `coverage-final.json` at ~1 MB per package on every run.
   coverageReporters: ["text", "json-summary", "lcov"],
 
+  // WHY A TEST TIMEOUT (Roadmap T059): the split engine's property suite
+  // (`packages/split-engine/src/__tests__/properties.test.ts`) runs 10,000
+  // generated cases per strategy and basis inside a single `it`, so one test takes
+  // seconds where the 5 s default assumes an example-based one. The budget is
+  // raised once here rather than per assertion, and it stays a ceiling on an
+  // unresponsive test rather than a target: a genuinely hung async test still
+  // fails, just later. A synchronous test that overruns is unaffected either way —
+  // the timer cannot pre-empt the event loop — which is why the property suite's
+  // individual runtimes are measured and reported rather than relied on to trip.
+  testTimeout: 60_000,
+
   // Nothing here is a threshold: the gate is per package (`packages/*/jest.config.js`
   // and `apps/api/jest.config.cjs`), because the required numbers differ per path
   // (SAD §15.2) and a shared number cannot express that.
