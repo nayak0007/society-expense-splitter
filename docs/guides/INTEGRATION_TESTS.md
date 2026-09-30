@@ -61,10 +61,11 @@ jest --config jest-integration.config.cjs
 ```
 
 **Measured** (2026-09-30, `pnpm --filter @ses/api test:integration`, warm images):
-postgres ready 3.1–4.0 s · redis ready 0.4 s · 17 migrations applied 0.4 s · 20 tests in
-7.9–14.5 s · containers removed 0.6–0.8 s · **wall clock 14–20 s** — the “under 3
-minutes” budget is met with an order of magnitude of headroom. A cold run adds the
-image pulls (the first run measured `postgres ready in 23.5s`, pull included).
+postgres ready ~3–4 s · redis ready 0.4 s · 17 migrations applied 0.4 s · **107 tests
+in ~40 s** · containers removed 0.7 s · **wall clock ~48 s** — the “under 3 minutes”
+budget still has ample headroom with the repository specs added. A cold run adds
+the image pulls (the first run ever measured `postgres ready in 23.5s`, pull
+included).
 
 Two details are load-bearing:
 
@@ -109,14 +110,21 @@ them.
 
 ## 5. What the suite covers today
 
-| Spec                               | Subject                                                                                                                                                                                                                                                                        |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `schema.integration-spec.ts`       | the chain applied cleanly: nothing pending/edited/missing, one ledger row per file, filenames ordered, re-apply a no-op, the Supabase interface present, RLS enabled on every tenant table                                                                                     |
-| `unit-of-work.integration-spec.ts` | the identity bridge (`auth.uid()` resolves; anonymous has none; system actor does not switch roles), commit persists, a thrown error rolls back, a database error rolls back, no identity leaks into the next pooled transaction, the connection returns after a failure       |
-| `rls.integration-spec.ts`          | member sees only its own society, stranger sees none (an empty set, never a refusal that confirms existence), anonymous sees none, a cross-tenant UPDATE matches zero rows, a pending membership is excluded, `invitations.token_hash` is unreadable while the row is readable |
+| Spec                                        | Subject                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema.integration-spec.ts`                | the chain applied cleanly: nothing pending/edited/missing, one ledger row per file, filenames ordered, re-apply a no-op, the Supabase interface present, RLS enabled on every tenant table                                                                                                                                                               |
+| `unit-of-work.integration-spec.ts`          | the identity bridge (`auth.uid()` resolves; anonymous has none; system actor does not switch roles), commit persists, a thrown error rolls back, a database error rolls back, no identity leaks into the next pooled transaction, the connection returns after a failure                                                                                 |
+| `rls.integration-spec.ts`                   | member sees only its own society, stranger sees none (an empty set, never a refusal that confirms existence), anonymous sees none, a cross-tenant UPDATE matches zero rows, a pending membership is excluded, `invitations.token_hash` is unreadable while the row is readable                                                                           |
+| `member-repository.integration-spec.ts`     | the member adapter: shadow create and the column defaults, the directory's filters/search/ordering/paging-with-total, the write patch's “absent means leave, `null` means clear”, suspend/reactivate without restamping the join date, the role spelling round trip, soft removal, the join queue and its claims, and the translated constraint refusals |
+| `society-repository.integration-spec.ts`    | the society adapter: the RPC-backed create (settings + creator Admin), read scoping (`null` for a non-member, never an empty roster), join preview/options over a live join code, update/rotate/soft-delete, and the join/leave state machine incl. the re-ask and the last-admin guard                                                                  |
+| `apartment-repository.integration-spec.ts`  | the flat adapter: floor/number ordering with nulls last, the assembled create/update column lists, duplicate-label conflict translation, policy refusals, soft delete, and `createMany`'s duplicate-skipping savepoints with batch rollback                                                                                                              |
+| `invitation-repository.integration-spec.ts` | the invitation adapter: the sent row with its unjoined labels, role spelling, RLS on the manager reads, revoke and its terminal state, the public preview's mask and `sent → opened` funnel step, and atomic single-use acceptance incl. expiry and recipient mismatch                                                                                   |
+| `building-repository.integration-spec.ts`   | the building adapter (adjacent, same module): display-order listing, `coalesce` patching, the per-society name conflict, floors-bound translation, policy refusals and soft delete                                                                                                                                                                       |
 
-The tests that do **not** exist yet are the ones that need the repository
-interfaces — see `docs/guides/TEST_COVERAGE.md` §4 for the gap and its size.
+The repository specs that were the gap are now written; `docs/guides/
+TEST_COVERAGE.md` §4 records what the suite still does not reach (the error
+translators' rarer branches, the Redis and migration infrastructure, the process
+shell).
 
 ## 6. Relationship to the other suites, and to the hosted project
 
@@ -136,17 +144,26 @@ development project — see `docs/guides/TEST_COVERAGE.md` §4.
 
 ## 7. Verified, and not
 
-Verified in the environment that wrote this suite:
+**Verified by execution (2026-09-30).** The suite has run against real containers
+repeatedly. It started at 3 suites / 20 tests green (14–20 s wall clock); the
+repository-integration remediation added five specs, so it now stands at **8 suites
+/ 107 tests green, ~48 s wall clock** (Postgres ready 3.1–4.0 s warm, Redis 0.4 s,
+the migration chain 0.4–0.5 s, teardown 0.6–0.8 s). A stock
+`postgres:18-alpine` image served PostgreSQL 18.6; the committed migration chain
+was applied by the project runner; the teardown removed the containers and no
+leftovers were observed. The same suite runs in CI (`test-integration`) and
+inside the unified API coverage gate (`docs/guides/TEST_COVERAGE.md` §4).
+
+Also verified in the environment that wrote this suite:
 
 - `pnpm --filter @ses/api typecheck` clean, `eslint` clean;
-- the config is accepted and discovers exactly the three specs
+- the config discovers exactly the eight specs
   (`jest --config jest-integration.config.cjs --listTests`);
-- the multi-project coverage config resolves both projects (3 integration + 21 unit
-  test files);
-- the no-Docker failure path was _executed_ and prints the staged message above.
+- the multi-project coverage config resolves all three projects (8 integration +
+  21 unit + 11 e2e test files);
+- the no-Docker failure path was _executed_ and prints the staged message above
+  instead of falling back to mocks.
 
-**Not verified: every assertion in every spec, and the container lifecycle itself.**
-The authoring environment has no Docker (`docker: command not found`), so the
-suite has never run against a server. Nothing here should be reported as passing
-until `pnpm --filter @ses/api test:integration` has been executed on a machine with
-a container runtime.
+**Not verified:** the suite against a hosted Supabase project. It is deliberately
+runnable without one — no secret, no network dependency — and the hosted project
+remains the platform-compatibility proof rather than a routine gate.

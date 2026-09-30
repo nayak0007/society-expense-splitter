@@ -12,6 +12,10 @@
  * (the mistake `packages/split-engine/jest.config.js` records having avoided).
  * Read the table as measurement; read the job status as the verdict.
  *
+ * The `@ses/api` row is the **merged** unit + integration + e2e number
+ * (`apps/api/jest-coverage.config.cjs`), i.e. the number the API's threshold row
+ * is actually checked against — not the unit suite alone.
+ *
  * WHY IT STILL RUNS WHEN THE GATE FAILS. That is when a comment is worth having —
  * `apps/api` is below its threshold today (see `docs/guides/TEST_COVERAGE.md`),
  * so a comment that only appeared on green runs would never appear at all.
@@ -116,9 +120,9 @@ const jobStatus = process.env.COVERAGE_JOB_STATUS ?? "unknown";
 
 const lines = [
   MARKER,
-  "## Unit test coverage",
+  "## Test coverage",
   "",
-  `SAD §15.2 thresholds are enforced per path by \`coverageThreshold\` in each package's Jest config — **the gate is the exit code of \`pnpm test:coverage\`, which this run reports as \`${jobStatus}\`.** The tables below are the measurements from that run; a missed threshold is named in the job log (\`Jest: ... coverage threshold ... not met\`).`,
+  `SAD §15.2 thresholds are enforced per path by \`coverageThreshold\` in each package's Jest config — **the gate is the exit code of \`pnpm test:coverage\`, which this run reports as \`${jobStatus}\`.** The tables below are the measurements from that run; a missed threshold is named in the job log (\`Jest: ... coverage threshold ... not met\`). \`@ses/api\` is measured over its complete automated test surface — unit + integration (Testcontainers) + e2e, merged from the raw Istanbul maps by Jest's native multi-project coverage, so a line executed by any layer counts as covered.`,
   "",
   "| Package | Statements | Branches | Functions | Lines | Covered |",
   "|---|---:|---:|---:|---:|---|",
@@ -132,7 +136,7 @@ const lines = [
   "",
   "`packages/split-engine/**` is pinned at 100% too; its package total *is* that row (the package is the path).",
   "",
-  "<sub>Reproduce locally: `pnpm test:coverage`. `@ses/api` is below its global threshold on purpose — see `docs/guides/TEST_COVERAGE.md` §4.</sub>",
+  "<sub>Reproduce locally: `pnpm test:coverage` (requires a container runtime for `@ses/api`'s integration layer; `pnpm --filter @ses/api test:coverage:unit` is the lightweight, no-Docker run). `@ses/api` is below its global threshold on purpose — see `docs/guides/TEST_COVERAGE.md` §4.</sub>",
   "",
 ];
 

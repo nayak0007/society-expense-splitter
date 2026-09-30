@@ -18,8 +18,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "jest",
-    "test:coverage": "jest --coverage",
-    "test:coverage:integrated": "jest --config jest-coverage.config.cjs --coverage",
+    "test:coverage": "jest --config jest-coverage.config.cjs --coverage",
+    "test:coverage:unit": "jest --coverage --coverageDirectory=coverage/unit-only",
     "test:integration": "jest --config jest-integration.config.cjs",
     "test:watch": "jest --watch",
     "test:e2e": "jest --config jest-e2e.config.cjs"

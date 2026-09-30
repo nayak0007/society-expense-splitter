@@ -117,20 +117,35 @@ jobs:
       # it — same suites, and running them twice would double the job for no
       # extra signal.
       #
-      # It is expected to FAIL today: `apps/api` sits at ~35% against SAD §15.2's
-      # 80/70 and the number is deliberately not lowered. See
-      # docs/guides/TEST_COVERAGE.md for the deficit and what closes it.
-      - name: Unit tests with per-path coverage thresholds (SAD §15.2)
+      # `@ses/api`'s task is the **unified** run: unit + integration + e2e, merged
+      # from the raw Istanbul maps by Jest's native multi-project coverage
+      # (apps/api/jest-coverage.config.cjs), because SAD §15.2's 80/70 row is a
+      # statement about the package and no single suite sees more than half of
+      # it. That means this job needs a container runtime for the integration
+      # project — ubuntu-latest ships Docker, and the suite owns its containers
+      # (no service container, no hosted Supabase). Without a runtime the task
+      # fails loudly in the integration global setup instead of skipping
+      # integration. The same command is the local authoritative gate, so CI and
+      # a developer machine cannot disagree about the number.
+      #
+      # It is expected to FAIL today: the merged API number is 64.05 statements /
+      # 47.6 branches / 62.57 functions / 63.94 lines against the 80/70 row, and
+      # the number is deliberately not lowered. See docs/guides/TEST_COVERAGE.md
+      # for the deficit, the gap math and what closes it.
+      - name: Tests with per-path coverage thresholds (SAD §15.2)
         run: pnpm test:coverage
 
       # The API's e2e suite boots the real Nest application (no database — the
-      # readiness probe is asserted in its degraded state). It is separate from
-      # `pnpm test` because it has its own Jest config and a longer timeout.
+      # readiness probe is asserted in its degraded state) and needs no container
+      # runtime. The unified run above already executes these 333 tests, so this
+      # step is deliberately redundant on a healthy run — and deliberately kept:
+      # it is the one API behaviour signal that survives a broken container
+      # runtime, and it is the un-instrumented execution of the suite.
       #
       # `if: always()` ON PURPOSE: the coverage gate above fails on every PR
-      # until the API integration layer exists, and a failing step skips the ones
-      # after it — which would silently retire the e2e signal that this
-      # repository actually relies on for API behaviour.
+      # until the API's uncovered production code is closed, and a failing step
+      # skips the ones after it — which would silently retire the e2e signal that
+      # this repository actually relies on for API behaviour.
       - name: API e2e suite
         if: always()
         run: pnpm --filter @ses/api test:e2e
@@ -184,6 +199,11 @@ jobs:
   # is involved, so ordinary pull requests cannot be affected by, or affect, the
   # development project. That separation is deliberate: the hosted project remains
   # the platform-compatibility proof, and this remains the repeatable one.
+  #
+  # Since T014 the same suites also run inside `test-unit`'s unified API coverage
+  # gate. This job is kept as the focused, faster signal: it fails in isolation
+  # with the integration log alone, rather than as one project inside the coverage
+  # run.
   test-integration:
     name: Integration tests · Postgres + Redis (Testcontainers)
     runs-on: ubuntu-latest

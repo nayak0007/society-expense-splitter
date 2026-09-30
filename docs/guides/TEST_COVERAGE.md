@@ -4,18 +4,28 @@ Roadmap **T014** · SAD §15.2 (unit tests) and §16.2 (the CI job). The gate is
 [`coverageThreshold`](https://jestjs.io/docs/configuration#coveragethreshold-object)
 in each package's Jest config, enforced by Jest's exit code.
 
-## 1. The command
+## 1. The commands
 
 ```bash
-pnpm test:coverage                       # every package, from the repo root
-pnpm --filter @ses/domain test:coverage  # one package, while iterating
-pnpm --filter @ses/domain test           # the same suite with no coverage
+pnpm test:coverage                          # authoritative: every package, from the root
+pnpm --filter @ses/api test:coverage:unit   # lightweight: the API unit suite, no Docker
+pnpm --filter @ses/api test:integration     # the API integration suite alone (needs Docker)
+pnpm --filter @ses/api test:e2e             # the API e2e suite alone (needs nothing)
+pnpm --filter @ses/domain test:coverage     # one package, while iterating
+pnpm --filter @ses/domain test              # the same suite with no coverage
 ```
 
-`pnpm test:coverage` is `turbo run test:coverage`, and every package's
-`test:coverage` is `jest --coverage`. There is no wrapper script and no second
-config: **the number CI compares is the number a developer sees locally**, because
-it is the same command in the same package directory.
+`pnpm test:coverage` is `turbo run test:coverage`. The three pure packages run
+`jest --coverage`; `@ses/api` runs the **unified** measurement — unit +
+integration + e2e merged from the raw Istanbul maps by Jest's native
+multi-project coverage (`apps/api/jest-coverage.config.cjs`; no `istanbul-merge`,
+no averaging of percentages). Because the integration project is part of that run,
+the authoritative command **requires a container runtime**: without one the
+integration `globalSetup` fails with its staged message and Jest exits non-zero
+before any test runs, so a partial number cannot be mistaken for the gate.
+There is no wrapper script and no second config: **the number CI compares is the
+number a developer sees locally**, because it is the same command in the same
+package directory.
 
 **Exit code is the gate.** Non-zero means at least one threshold was missed; Jest
 prints one line per missing metric, e.g.
@@ -54,11 +64,16 @@ open behind the two that are named.
 | `@ses/domain`       |      89.70 |    91.27 |     84.83 | 91.23 | **pass**          |
 | `@ses/application`  |      88.18 |    82.21 |     94.44 | 90.48 | **pass**          |
 | `@ses/split-engine` |        100 |      100 |       100 |   100 | **pass**          |
-| `@ses/api`          |      35.37 |    35.95 |     24.52 | 34.44 | **fail** — see §4 |
+| `@ses/api`          |      82.08 |    70.01 |     87.26 | 81.95 | **pass** — see §4 |
 
-So `pnpm test:coverage` exits non-zero today, and the CI job `Unit tests with
-coverage` is red. That is the honest state of the repository, not a broken gate:
-`@ses/api` is measured at what it is, and its threshold is not lowered to match.
+So `pnpm test:coverage` exits 0 today and the CI test job is green. `@ses/api` is
+measured over its complete automated test surface (unit + integration + e2e, §4);
+the row was not lowered, scoped or excluded to get there — the missing coverage
+was real unreached production behaviour, and it was closed with the repository
+integration tests §4 describes. One number is worth watching: branches clear the
+70% floor by **two counters** (1,069 of the 1,067 required), so a refactor that
+removes a handful of covered branches would flip the gate red. That is recorded
+rather than pre-empted by padding assertions.
 
 The `@ses/domain` figure is not the number its `global` row is checked against.
 Jest excludes any file matched by a more specific row from `global`, so the
@@ -69,8 +84,7 @@ domain's enforced global covers 26 of its 29 files: **87.99 / 89.96 / 81.29 /
 
 Exactly the four that own a unit suite: `@ses/domain`, `@ses/application`,
 `@ses/split-engine` and `@ses/api`. `pnpm test:coverage` runs `test:coverage` in
-every workspace that defines it — Turbo reports `3 successful, 4 total` today
-because the fourth, `@ses/api`, fails.
+every workspace that defines it — Turbo reports `4 successful, 4 total`.
 
 Three packages are **not** in the gate, and none of them is excluded to make a
 number look better:
@@ -108,15 +122,125 @@ Two behaviours cost time to discover and are worth writing down:
 - **`global` excludes files claimed by another row.** A file matched by
   `./src/shared/money*` is checked against that row only.
 
-## 4. The `@ses/api` deficit
+## 4. The `@ses/api` measurement
 
-Measured: **35.37 statements / 35.95 branches / 24.52 functions / 34.44 lines**
-(818 of 2,375 lines). The four threshold lines above are the only reason this run
-fails — there is no configuration artifact left in it (an earlier glob that
-matched nothing, `./src/modules/**/use-cases/**`, produced a _second_,
-differently-shaped failure and was removed in T014; see §5).
+### The unified measurement (executed 2026-09-30, T014)
 
-This is genuine uncovered production code, in three groups:
+`@ses/api`'s gate is the **merged** unit + integration + e2e run
+(`apps/api/jest-coverage.config.cjs`): Jest reads each project's raw Istanbul
+counters and merges them by file, so a statement executed by any layer counts as
+covered — no averaging, no `istanbul-merge`. It has been executed repeatedly with
+identical results: **40 suites / 735 tests green** (295 unit + 107 integration +
+333 e2e), ~65 s wall clock. Before the repository-integration remediation the same
+run read 35 suites / 648 tests (295 unit + 20 integration + 333 e2e); the 87 added
+tests are the repository specs in §4.1.
+
+| Metric     |     Merged (authoritative) | SAD §15.2 | Result          |
+| ---------- | -------------------------: | --------: | --------------- |
+| Statements | **82.08%** (2,363 / 2,879) |       80% | **met**, +2.08p |
+| Branches   | **70.01%** (1,069 / 1,527) |       70% | **met**, +0.01p |
+| Functions  |     **87.26%** (555 / 636) |       80% | **met**, +7.26p |
+| Lines      | **81.95%** (2,248 / 2,743) |       80% | **met**, +1.95p |
+
+Per layer, each measured with the same declared file set
+(`<rootDir>/src/**/*.ts`, minus `*.d.ts` and `__tests__/`):
+
+| Layer                    | Statements |  Branches | Functions |     Lines | Files reported |
+| ------------------------ | ---------: | --------: | --------: | --------: | -------------: |
+| unit (no infrastructure) |      35.37 |     35.95 |     24.53 |     34.44 |             92 |
+| integration (T034)       |      56.32 |     39.57 |     48.93 |     56.36 |             91 |
+| e2e                      |      48.74 |     24.10 |     48.85 |     49.98 |             92 |
+| **merged**               |  **82.08** | **70.01** | **87.26** | **81.95** |        **100** |
+
+The integration row moved from 30.22 / 6.46 / 14.99 / 30.52 to the figures above —
+the single largest change in the history of this gate, and the reason the merged
+row now clears it. Nothing else about the model changed.
+
+Each layer was measured with its own run and its own output directory, so no
+layer can overwrite another's report:
+
+```bash
+pnpm --filter @ses/api test:coverage:unit   # unit → coverage/unit-only (no Docker)
+pnpm --filter @ses/api exec jest --config jest-integration.config.cjs \
+  --coverage --coverageDirectory=coverage/integration   # needs Docker
+pnpm --filter @ses/api exec jest --config jest-e2e.config.cjs \
+  --coverage --coverageDirectory=coverage/e2e
+```
+
+The per-layer denominators differ because Jest enumerates “untested” files from
+each project's own haste map (`roots`), not from the declared glob alone: only the
+unit project (roots = `src`) enumerates files no suite imports, so
+`tools/migrate.ts` and the other entrypoints appear in the unit report and not in
+the e2e one; several `*.module.ts` files run the other way (loaded by the
+integration and e2e projects, never enumerated by the unit project). The **merge
+is the union of every layer's map** — 100 files with counters, per-file statement
+totals equal to the maximum across layers (verified on all 100 files, no phantom
+entries).
+
+**File-set proof.** The declared universe on disk is 101 files. The merged report
+contains 100 files and zero files outside that universe. The single absent file
+is `src/infrastructure/database/schema.ts` — a `export * from "@ses/db-schema"`
+re-export with no executable statements of its own, for which Istanbul produces no
+counters in any layer, so its absence changes no metric. Every other declared file
+is present, including the ones **no** suite executes: eight files sit in the
+merged report at **0 covered lines** — `main.ts` (0/12), `worker.ts` (0/19),
+`common/paths.ts` (0/7), `config/migration-env.ts` (0/9), `config/tool-env.ts`
+(0/8), `tools/export-openapi.ts` (0/18), `tools/migrate.ts` (0/83) and
+`tools/reset.ts` (0/20). A merge that dropped unloaded files would have inflated
+every percentage above; this one counts them in the denominator.
+
+### What closed it (T014's remediation)
+
+The ruling from the first merged measurement held: the deficit was real unreached
+production behaviour, concentrated in the persistence boundary, and the right
+instrument was the **T034 Testcontainers stack**, not more assertions against
+fakes. Five repository specs were added against real PostgreSQL 18, the real
+17-migration chain, the real `UnitOfWork` and real RLS — no mocked driver, SQL,
+transaction manager or cache:
+
+| Adapter                             |    New tests |
+| ----------------------------------- | -----------: |
+| `member.repository.ts`              |           29 |
+| `society.repository.ts`             |           18 |
+| `apartment.repository.ts`           |           20 |
+| `invitation.repository.ts`          |           11 |
+| `building.repository.ts` (adjacent) |            9 |
+| **integration suite**               | **20 → 107** |
+
+They assert adapter _behaviour_: the directory's filters, search, ordering and
+totals; the join queue and its claims; `create`/`update` where an absent field
+means “column default” and `null` means “clear”; `createMany`'s savepoint-per-row
+batch that skips a duplicate label and rolls the whole batch back on anything
+else; the guard reads; the join/leave state machine; the invitation funnel and its
+single-use acceptance; and every database refusal read as the module's own error
+code, never as a driver message. The change, in covered counters:
+
+| Metric     | Before | After | Gain |
+| ---------- | -----: | ----: | ---: |
+| Statements |  1,844 | 2,363 | +519 |
+| Branches   |    727 | 1,069 | +342 |
+| Functions  |    398 |   555 | +157 |
+| Lines      |  1,754 | 2,248 | +494 |
+
+**What is still uncovered, ranked, so the next task can pick it up honestly.**
+Uncovered lines: `invitation.rows.ts` (33) and `member.rows.ts` (31) — error
+translators only reached through the paths that happen to raise;
+`tools/migrate.ts` (83, process shell), `building.repository.ts` (35),
+`membership-cache.redis.ts` (31), `migrations/runner.ts` (27),
+`tools/reset.ts` (20), `worker.ts` (19), `config/validation.schema.ts` (18),
+`tools/export-openapi.ts` (18), then small remainders in `society.rows.ts` (16),
+`society.repository.ts` (18) and `apartment.repository.ts` (13). Uncovered branches
+follow the same shape — translators first, then the Redis and migration
+infrastructure, then the process shell. None of it is a rule the gate needs
+lowered to survive: the row passes, and a second campaign would be about running
+_new_ infrastructure (Redis, the migration CLI) rather than turning assertions on
+for their own sake.
+
+### The unit-only measurement
+
+`pnpm --filter @ses/api test:coverage:unit` runs the unit suite alone, against the
+same declared file set, and is still what the three groups below describe. Its
+numbers are **35.37 / 35.95 / 24.53 / 34.44**:
 
 1. **The SAD §15.4 integration surface.** Repositories
    (`src/modules/*/infrastructure/*.repository.ts`, `*.rows.ts`),
@@ -124,8 +248,8 @@ This is genuine uncovered production code, in three groups:
    (`membership-cache.redis.ts`, `redis.service.ts`), `database.service.ts`, the
    migration runner and `src/config/**` validation. These need a real Postgres
    and a real Redis — the Testcontainers layer SAD §15.4 specifies and Roadmap
-   **T034** owns. Mocking them would test the mock, which is why they are not
-   unit-tested now.
+   **T034** owns (and which now exists and runs in the gate above). Mocking them
+   would test the mock, which is why they are not unit-tested.
 2. **The request pipeline's outer shell** — `main.ts`, `bootstrap.ts`,
    `worker.ts`, `swagger.ts`, `api-exception.filter.ts`,
    `request-context.interceptor.ts`, `ctx.decorator.ts`. These run once per
@@ -134,68 +258,31 @@ This is genuine uncovered production code, in three groups:
    (`*.controller.ts`, `src/modules/*/application/*.operations.ts`,
    `*.mapper.ts`), covered by the 333-test e2e suite and the live matrix.
 
-**What would turn it green:** the integration-test surface, not more assertions
-against fakes. Concretely: Testcontainers Postgres + Redis in the CI job SAD
-§16.2 calls `test-integration`, fixtures that apply the real migration set, and
-Nest testing modules that boot the real repositories — then the unit and
-integration coverage figures are read together, or the API's row is scoped to
-what its unit suite can honestly own. Either way it is a decision that belongs
-with T034, not a number to lower here.
-
 **What was deliberately not done:** no `collectCoverageFrom` narrowing, no
 `/* istanbul ignore */`, no exclusion of the API from the gate, and no threshold
 change.
 
-### The arithmetic, once the integration layer exists (updated 2026-09-30)
+### History of this gate
 
-The infrastructure half of T034 has landed — see
-`docs/guides/INTEGRATION_TESTS.md` — so "add integration tests" is no longer a
-plan, and the honest question is whether the 80% row is reachable at all. By line
-count from the measured report above:
+The gate was unit-only when T014 first wired it, which is why the earlier
+iteration of this section read 35.37 and argued about reachability. T034 then
+executed the integration suite and the unit + integration merge (**50.76 / 41.25 /
+35.84 / 50.14**, 24 suites / 315 tests) and found two real defects in the merged
+config, both fixed: Jest ignores project-level options the root must own, so (1)
+the integration specs ran in parallel and truncated each other's fixtures — four
+`rls` failures, a 52 s lock-contention run — until `maxWorkers: 1` sat at the
+root, and (2) the denominator was “whatever the suites loaded”, which pulled six
+`test/**` helpers in and omitted every source no test imports, until the same
+`collectCoverageFrom` the unit gate uses was declared at the root. The first
+merged figure (55.18) was measured before (2) and is not comparable with the gate.
 
-| Category                                                                    |     Lines | Covered now | Ceiling if a suite owned it |
-| --------------------------------------------------------------------------- | --------: | ----------: | --------------------------: |
-| B — integration surface (repositories, cache, runner, `UnitOfWork`, health) |     1,342 |         398 |                       1,342 |
-| A — unit-testable boundary (common, config, observability)                  |       572 |         382 |                         572 |
-| C — presentation (controllers, mappers, route metadata)                     |       273 |          38 |                   273 (e2e) |
-| D — process shell (entrypoints, CLI tools, CLI env)                         |       188 |           0 |               0 (by nature) |
-| **total**                                                                   | **2,375** |     **818** |                           — |
-
-So `unit + integration`, both at **complete** coverage of A and B and nothing
-else, tops out at **82.2%** — passing, but with no room: the row would be green
-only while _every_ non-presentation, non-bootstrap file stayed almost fully
-covered, and the first untested branch in a repository would put it back under.
-Adding the e2e suite's controller coverage (C) lifts the same ceiling to **92%**,
-which is the comfortable shape. Two conclusions follow, and neither is a threshold
-change:
-
-1. **`@ses/api` coverage must eventually be measured over unit + integration +
-   e2e**, because the 80% row is a statement about the package and no single suite
-   sees more than about half of it.
-2. **The default gate is still unit-only today**, deliberately. The merged
-   measurement exists as `pnpm --filter @ses/api test:coverage:integrated`
-   (`apps/api/jest-coverage.config.cjs`, Jest's native multi-project coverage —
-   no `istanbul-merge`), and it is **not** wired into `test:coverage`, for one
-   recorded reason: it would make the gate require a container runtime, and the
-   gate must stay runnable (and meaningful) without Docker.
-   **The merge itself has now been executed** (2026-09-30, T034): 24 suites / 315
-   tests green, `@ses/api` **50.76 statements / 41.25 branches / 35.84 functions /
-   50.14 lines** — a 15.4-point statements lift over the unit-only 35.37, still
-   below the 80/70 row. Executing it found two real defects in that config, both
-   fixed: Jest ignores project-level options the root must own, so (1) the
-   integration specs ran in parallel and truncated each other's fixtures — four
-   `rls` failures, a 52 s lock-contention run — until `maxWorkers: 1` sat at the
-   root, and (2) the denominator was “whatever the suites loaded”, which pulled six
-   `test/**` helpers in and omitted every source no test imports, until the same
-   `collectCoverageFrom` the unit gate uses was declared at the root. The first
-   merged figure (55.18) was measured before (2) and is not comparable with the
-   gate; 50.76 is the number on the gate's own file set.
-
-Consequence for the numbers above: the API figures in §2 are the **unit** suite's,
-and remain what the gate computes. The integration suite has now run (and the merged
-figure is 50.76/41.25/35.84/50.14), so the next step is measured rather than planned:
-the row needs the e2e suite's controller coverage in the merge (conclusion 1) before
-it can pass.
+T014 then added the e2e project to the same merge and made it the package's
+authoritative `test:coverage` (and therefore the root command's API row). The
+measured result was then 64.05 / 47.60 / 62.57 / 63.94 — red on the real number
+rather than scoped to a suite the row was never about — and it stayed that way
+until the repository-integration remediation above closed the gap with real
+database tests. The row now reads **82.08 / 70.01 / 87.26 / 81.95** and the root
+command exits 0.
 
 ### Still not covered, and why (T034's own scope)
 
@@ -247,17 +334,18 @@ recorded rather than done silently.
 Configured numbers are not evidence. Each shape was made to fail on purpose, and
 every one of these exits was non-zero:
 
-| Proof                 | Method                                                                                                               | Result                                                               |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `global` row          | `pnpm --filter @ses/domain exec jest --coverage --coverageThreshold='{"global":{...,"lines":95}}'` (domain is 91.23) | `Coverage for lines (92.37%) does not meet "global" threshold (95%)` |
-| path/glob row         | same command, adding `"./src/shared/result*": {"lines":100,"branches":100}` (result.ts is 22.22 lines / 0 branches)  | named the resolved absolute path of `result.ts`, both metrics        |
-| 100% package row      | a temporary uncovered `packages/split-engine/src/threshold-probe.ts` (deleted immediately after)                     | all four metrics reported against the 100% row                       |
-| real, current failure | `pnpm --filter @ses/api test:coverage`                                                                               | four `does not meet "global" threshold` lines                        |
-| satisfied             | the real `test:coverage` runs for domain, application and split-engine                                               | exit 0 with the thresholds in place                                  |
+| Proof                    | Method                                                                                                               | Result                                                                            |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `global` row             | `pnpm --filter @ses/domain exec jest --coverage --coverageThreshold='{"global":{...,"lines":95}}'` (domain is 91.23) | `Coverage for lines (92.37%) does not meet "global" threshold (95%)`              |
+| path/glob row            | same command, adding `"./src/shared/result*": {"lines":100,"branches":100}` (result.ts is 22.22 lines / 0 branches)  | named the resolved absolute path of `result.ts`, both metrics                     |
+| 100% package row         | a temporary uncovered `packages/split-engine/src/threshold-probe.ts` (deleted immediately after)                     | all four metrics reported against the 100% row                                    |
+| real failure, raised bar | a temporary `statements: 95` in `apps/api/jest.config.cjs`, then `pnpm --filter @ses/api test:coverage`              | `Coverage for statements (82.07%) does not meet "global" threshold (95%)`, exit 1 |
+| satisfied                | the real `test:coverage` runs for every package, and at the root                                                     | exit 0 with the thresholds in place                                               |
 
-The `--coverageThreshold` flag overrides the config for one run only, which is why
-these proofs left no trace in the tree. The planted file was the single exception
-and is gone; `git status` is the check.
+The `--coverageThreshold` flag overrides the config for one run only. The
+temporary `statements: 95` edit was reverted immediately after the run, so the
+row enforced today is the documented 80/70/80/80; `git diff` on the config is the
+check. The planted split-engine file was the other single exception and is gone.
 
 ## 7. Where the outputs go
 
