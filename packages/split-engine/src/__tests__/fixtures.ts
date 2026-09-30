@@ -2,7 +2,10 @@ import { Money, asApartmentId, asMemberId, type Result } from "@ses/domain";
 
 import {
   basisPoints,
+  shareUnits,
+  type CustomParticipant,
   type PercentageParticipant,
+  type ShareParticipant,
   type SplitAllocation,
   type SplitParticipant,
 } from "../types";
@@ -64,6 +67,56 @@ export function flats(count: number, first = 101): readonly SplitParticipant[] {
   return Array.from({ length: count }, (_, index) =>
     flat(String(first + index)),
   );
+}
+
+/**
+ * A participant with a share count, in thousandths (`3_000` is three shares).
+ *
+ * The unit is spelled out in every call — `shareUnits` refuses a float, and the
+ * `numeric(8, 3)` scale is the schema's — so a test that writes `3_000` is
+ * writing exactly what a society with a `share_units` of `3.000` would send.
+ */
+export function shareFlat(
+  apartmentNumber: string,
+  share: number | bigint,
+  options: {
+    readonly memberId?: string;
+    readonly apartmentId?: string;
+  } = {},
+): ShareParticipant {
+  return { ...flat(apartmentNumber, options), share: shareUnits(share) };
+}
+
+/**
+ * `count` flats sharing one share count, numbered from `first` upwards.
+ *
+ * The shape a BHK tier has: ten 3-share flats in a row, then twenty 2-share flats,
+ * and so on. Written as a builder rather than a literal so the roadmap's own
+ * example reads as the tiers it names rather than as fifty constructor calls.
+ */
+export function shareTier(
+  count: number,
+  share: number | bigint,
+  first: number,
+): readonly ShareParticipant[] {
+  return Array.from({ length: count }, (_, index) =>
+    shareFlat(String(first + index), share),
+  );
+}
+
+/**
+ * A participant with an exact custom amount, given as rupee text through the real
+ * parser — the same door a treasurer's typed figure comes through.
+ */
+export function customFlat(
+  apartmentNumber: string,
+  amountText: string,
+  options: {
+    readonly memberId?: string;
+    readonly apartmentId?: string;
+  } = {},
+): CustomParticipant {
+  return { ...flat(apartmentNumber, options), amount: rupees(amountText) };
 }
 
 /**

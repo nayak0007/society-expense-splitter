@@ -79,7 +79,7 @@ describe("computeSplit validation", () => {
     expect(error.details?.field).toBe("amount");
   });
 
-  it("refuses an empty participant list, for either strategy", () => {
+  it("refuses an empty participant list, for every strategy", () => {
     const equal = expectErr(
       computeSplit({
         strategy: "equal",
@@ -99,6 +99,28 @@ describe("computeSplit validation", () => {
     );
     expect(percentage.code).toBe("validation");
     expect(percentage.details?.field).toBe("participants");
+
+    // T057's two as well: a shares or custom split with nobody in it is refused
+    // by the same check, before any strategy is asked for weights.
+    const shares = expectErr(
+      computeSplit({
+        strategy: "shares",
+        amount: rupees("100"),
+        participants: [],
+      }),
+    );
+    expect(shares.code).toBe("validation");
+    expect(shares.details?.field).toBe("participants");
+
+    const custom = expectErr(
+      computeSplit({
+        strategy: "custom",
+        amount: rupees("100"),
+        participants: [],
+      }),
+    );
+    expect(custom.code).toBe("validation");
+    expect(custom.details?.field).toBe("participants");
   });
 
   it("refuses the same member and flat twice", () => {
@@ -283,9 +305,14 @@ describe("computeSplit ordering", () => {
   it("implements exactly the strategies it declares", () => {
     // Pinned because the database enum already holds all five
     // (`equal, percentage, shares, apartment, custom`) and the names have to match
-    // it exactly; T057 and T058 extend this list, and that edit should be visible
+    // it exactly; T057 extends this list by two, and that edit should be visible
     // in a diff rather than discovered by a stored value failing to dispatch.
-    expect(SPLIT_STRATEGIES).toEqual(["equal", "percentage"]);
+    expect(SPLIT_STRATEGIES).toEqual([
+      "equal",
+      "percentage",
+      "shares",
+      "custom",
+    ]);
   });
 });
 

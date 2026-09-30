@@ -1,8 +1,10 @@
 import { err, ok, type Money, type Result, type Weight } from "@ses/domain";
 
 import { distribute, undistributedPaise } from "./rounding";
+import { customWeights } from "./strategies/custom";
 import { equalWeights } from "./strategies/equal";
 import { percentageWeights } from "./strategies/percentage";
+import { shareWeights } from "./strategies/shares";
 import {
   splitError,
   type SplitAllocation,
@@ -125,21 +127,55 @@ interface SplitPlan {
 }
 
 /**
+ * Dispatch on the strategy: one arm per variant, no `default`.
+ *
+ * The switch is exhaustive over `SplitInput` and TypeScript knows it, so a fifth
+ * strategy added to the union is a compile error until it has a branch of its own.
+ * A `default` that threw would be strictly worse than that error — it would move
+ * the mistake from the compiler to production, and its never-taken branch would
+ * sit in the coverage report as the one line no test can reach.
+ *
+ * Every arm delegates its ordering to {@link planFrom}; the dispatch itself
+ * decides nothing beyond which strategy resolves the weights.
+ */
+function planSplit(input: SplitInput): Result<SplitPlan, SplitError> {
+  switch (input.strategy) {
+    case "equal":
+      return planFrom(input.participants, (ordered) =>
+        ok(equalWeights(ordered)),
+      );
+    case "percentage":
+      return planFrom(input.participants, percentageWeights);
+    case "shares":
+      return planFrom(input.participants, shareWeights);
+    case "custom":
+      return planFrom(input.participants, (ordered) =>
+        customWeights(ordered, input.amount),
+      );
+  }
+}
+
+/**
  * Order the participants, then ask the strategy for a weight each.
  *
  * Ordering happens first and the weights are produced *from the ordered list*, so
  * the two arrays are index-aligned by construction — `weights[i]` belongs to
  * `ordered[i]` because the strategy was handed `ordered`. Nothing downstream has
  * to trust a parallel array that a caller built.
+ *
+ * Generic in the participant type so each strategy's own value survives the round
+ * trip: a percentage split's `BasisPoints`, a shares split's `ShareUnits` and a
+ * custom split's `Money` all reach the strategy that understands them without a
+ * cast.
  */
-function planSplit(input: SplitInput): Result<SplitPlan, SplitError> {
-  if (input.strategy === "equal") {
-    const ordered = orderParticipants(input.participants);
-    return ok({ ordered, weights: equalWeights(ordered) });
-  }
-
-  const ordered = orderParticipants(input.participants);
-  const weights = percentageWeights(ordered);
+function planFrom<TParticipant extends SplitParticipant>(
+  participants: readonly TParticipant[],
+  weightsFor: (
+    ordered: readonly TParticipant[],
+  ) => Result<readonly Weight[], SplitError>,
+): Result<SplitPlan, SplitError> {
+  const ordered = orderParticipants(participants);
+  const weights = weightsFor(ordered);
   return weights.ok ? ok({ ordered, weights: weights.value }) : weights;
 }
 

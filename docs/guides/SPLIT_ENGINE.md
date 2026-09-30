@@ -1,9 +1,9 @@
 # Split engine
 
-The rules `packages/split-engine` enforces, written for whoever adds the `shares`,
-`custom` and apartment-based strategies (T057/T058), the expense aggregate (T061)
-or the live preview endpoint (T064). Not a tutorial — the list of decisions the
-package has already made so the next layer does not re-decide them differently.
+The rules `packages/split-engine` enforces, written for whoever adds the
+apartment-based strategies (T058), the expense aggregate (T061) or the live
+preview endpoint (T064). Not a tutorial — the list of decisions the package has
+already made so the next layer does not re-decide them differently.
 
 Source: [`packages/split-engine/src/types.ts`](../../packages/split-engine/src/types.ts)
 (the contract and the errors),
@@ -31,12 +31,17 @@ by retrying.
 ## 2. Money is the only amount
 
 Every amount is [`Money`](../../packages/domain/src/shared/money.vo.ts) — exact
-integer paise (T012, ADR-0005). **This package performs no arithmetic on amounts at
-all.** It hands the amount and one weight per participant to
+integer paise (T012, ADR-0005). **This package makes no rounding decision of its
+own.** It hands the amount and one weight per participant to
 `Money.allocateByWeights` and reports what came back. There is no second
 largest-remainder implementation, no `parseFloat`, no `Math.round`, no `toFixed`
-and no float anywhere in `src/`. The only division in the package is
-`basisPoints / 100n` in a display helper.
+and no float anywhere in `src/`.
+
+The only arithmetic on money outside that primitive is `custom`'s exact sum —
+`Σ amounts`, compared with the total (T057). It is the addition of integers, so it
+cannot round, and it is the server half of the PRD's "remaining: ₹0" rule. The only
+divisions in the package are by `100n` and `1000n`, both in display and error
+messages ('`33.33%`', '`10000 shares`'), never on an amount.
 
 `amountPaise` does not appear in the domain types. The PRD's sketch writes it
 because that is the JSON wire shape (SAD §7.9); the conversion belongs to the API
@@ -101,7 +106,6 @@ Allocations come back ordered **ascending by `apartmentNumber`**, compared
 | `equal`      | `1`                              | T056  |
 | `percentage` | the participant's basis points   | T056  |
 | `shares`     | share units                      | T057  |
-| `apartment`  | an apartment attribute           | T058  |
 | `custom`     | explicit per-participant amounts | T057  |
 
 `SplitStrategy` lists only what is implemented, so an unimplemented strategy is a
@@ -122,6 +126,77 @@ why `equal` and `percentage` at an equal percentage produce identical results.
 Each participant carries its own percentage, so a misaligned parallel array or an
 unknown participant reference is not expressible. The total must reach 100% within
 one basis point.
+
+### Shares
+
+Each participant carries its own share count, and the count is a `ShareUnits` —
+**thousandths of a share**, the `apartments.share_units numeric(8, 3)` scale, so a
+society's stored `3.000` is `shareUnits(3_000)` and `1.5` shares is `1500`. The
+count is the weight.
+
+`amount × share ÷ totalShares` is **not computed here**. It has no exact paise
+answer in general, so the share counts go to `Money.allocateByWeights` and the one
+rounding rule divides once and places the residual. Scaling every share by the same
+factor cannot move money: `1 : 2 : 3` and `1000 : 2000 : 3000` allocate
+byte-identically, including which flat carries the residual paisa, because the
+remainders the rule ranks are scaled too.
+
+Validation, in `shareWeights`:
+
+- a share must be **greater than zero**. A zero share would be a ₹0 row in a
+  published split for a flat the treasurer never meant to bill; a flat the society
+  means to exempt is left out of the participant list by participant resolution
+  (T063), exactly as one outside the selector is today, or given the `0%` a
+  percentage split allows;
+- a share must be **at most `10_000`** (`10_000_000` thousandths) — the ceiling in
+  `chk_apartments_share_units`, and the largest weight that still fits
+  `expense_splits.weight numeric(12, 4)`, so a split this engine accepts is one the
+  database can store;
+- a share must be a **whole number of thousandths**. A fractional `number` is a
+  caller that has already done share arithmetic in floating point, and rounding it
+  into money is the one thing this package must never do (`shareUnits` refuses
+  `1.5` with the hint that `1.5` shares is `1500`).
+
+The PRD's worked example is the acceptance case: ₹60,000 over `10×3 + 20×2 + 20×1`
+shares is 90,000 thousandths, giving ₹2,000.00, ₹1,333.33 and ₹666.67 per tier and
+the 20 residual paise to the 1-share tier, whose remainder is the largest. The PRD
+prints the 2-share tier as ₹1,333.34, which cannot be right — that ledger adds up to
+₹60,000.20 — so the printed figure is a display rounding of
+`60000 × 2 ÷ 90`, and the rule that conserves is the one implemented.
+
+### Custom
+
+The treasurer's exact figure per participant, carried as a `Money`. Nothing here is
+proportional, scaled or rounded: `Σ amounts` must equal the expense exactly, and a
+participant's allocation _is_ its stated amount.
+
+Inside the engine the amounts are handed to `allocateByWeights` **as the weights**.
+When the weights sum to exactly the amount the largest-remainder rule is the
+identity — `floor(A × aᵢ ÷ A) = aᵢ`, every remainder zero — so the parts come back as
+the treasurer's figures to the paisa, and the result's `weight` for a custom split
+is the stated paise amount. That is the one strategy where `weight` is money, and it
+is the honest answer: the amount _is_ the basis that produced the allocation.
+Reusing the one allocation path is what keeps `undistributedPaise` able to measure
+that a custom result balanced.
+
+Validation, in `customWeights`:
+
+- a **negative** amount is refused — `expense_splits.amount_paise` is
+  `CHECK (amount_paise >= 0)`, and a resident cannot owe less than nothing;
+- a sum that **does not equal the expense** is refused, in both the message and
+  `details.shortfallPaise` (signed: positive is unassigned money, negative is
+  over-assigned). This is the server half of "save blocked until remaining is
+  ₹0";
+- the amount must be a **`Money` at runtime**, not only in the type — a wire
+  payload that carried `amountPaise` as a plain number would otherwise throw a
+  `TypeError` out of a function that promises a `Result`.
+
+**Exclusion** is expressed by leaving a flat out of the participant list; a listed
+₹0 amount is legal and produces a ₹0 allocation (`expense_splits.amount_paise` is
+`CHECK (>= 0)`), which is a real thing a treasurer records — a caretaker's quarter,
+a shop billed separately. Excluding _everyone_ is therefore not a silent zero
+split: ₹0 does not equal the expense, and the shortfall error names the whole
+amount.
 
 ## 6. Percentages are basis points
 
@@ -155,24 +230,41 @@ set is refused, because a split with nothing to divide by has no answer.
 - **At least one participant**, and no participant twice. Duplicates are keyed on
   `(apartmentId, memberId)` — the pair `expense_splits` is unique on — so two
   members of one flat is legal while the same member twice is a `conflict`.
+- **A share is positive; a custom amount is non-negative.** A `0%` participant is
+  legal (see §6) because a percentage split is a claim on a pool that some flat may
+  legitimately hold none of, but a `0` share is refused (T057) and a negative custom
+  amount is refused — there is no reading of “this flat owes ₹0.00 from a shares
+  split” that a participant list cannot express more clearly by leaving the flat
+  out.
 
 ## 8. Errors
 
-| Code         | When                                                                                                                                           |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `validation` | zero or negative amount; no participants; a percentage outside 0–100; a fractional percentage; percentages not totalling 100% within tolerance |
-| `conflict`   | the same member and flat appears twice                                                                                                         |
-| `invariant`  | allocations do not sum to the amount (a bug; thrown)                                                                                           |
+| Code         | When                                                                                                                                                                                                                                                                               |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `validation` | zero or negative amount; no participants; a percentage outside 0–100; a fractional percentage; percentages not totalling 100% within tolerance; a share that is zero, negative, fractional or above 10,000; a negative custom amount; custom amounts that do not sum to the amount |
+| `conflict`   | the same member and flat appears twice                                                                                                                                                                                                                                             |
+| `invariant`  | allocations do not sum to the amount (a bug; thrown)                                                                                                                                                                                                                               |
 
-`details.field` is `"amount"` or `"participants"`/`"participants.percentage"`, so the
-API maps it to a `422` whose `field` the form can highlight (SAD §7).
+`details.field` is `"amount"`, `"participants"`, `"participants.percentage"`,
+`"participants.share"` or `"participants.amount"`, so the API maps it to a `422`
+whose `field` the form can highlight (SAD §7). A custom sum failure also carries
+`details.shortfallPaise` — signed, as a string, because it is a bigint.
 
 ## 9. Ordering, determinism, and what is _not_ covered
 
 Determinism is asserted over the whole pipeline: 1,000 identical runs, 500 random
-equal splits each re-run reversed, and an exhaustive sweep of every amount from 1
-to 200 paise across 1 to 12 participants (2,400 splits) — the last one because a
-systematic off-by-one at a particular divisor is what a random sample walks past.
+equal splits each re-run reversed, 300 random percentage splits, 300 random shares
+splits (300 more, re-run reversed), 200 randomly partitioned custom amounts (also
+re-run reversed), and an exhaustive sweep of every amount from 1 to 200 paise
+across 1 to 12 participants (2,400 splits) — the last one because a systematic
+off-by-one at a particular divisor is what a random sample walks past.
+
+Equivalence between strategies is asserted on exact paise, per allocation and per
+participant id: `equal` and `shares` at one share each, `shares 1 : 2 : 1` and
+`percentage 25 : 50 : 25`, and a `custom` split typed to the amounts an `equal` or
+`shares` split produced. A strategy that rounded its own remainder could still pass
+its own conservation test — a total can be conserved by the wrong rule — but it
+could not agree with another strategy on the same input.
 
 These properties are deterministic (a seeded xorshift, so a failure reproduces from
 its seed) rather than `fast-check`. **The 10,000-iteration `fast-check` invariant
@@ -184,14 +276,19 @@ toolchain now would be two things to keep green for one invariant.
 Adding a strategy means:
 
 1. a new variant in `SplitInput` (`types.ts`), with the strategy's per-participant
-   value on the participant — the shape `shares` and `custom` both need;
+   value on the participant — the shape `shares` and `custom` both use, and the one
+   `apartment` will need;
 2. a module in `strategies/` that turns an ordered participant list into
-   `Result<readonly Weight[], SplitError>`;
-3. one branch in `planSplit` (`engine.ts`).
+   `Result<readonly Weight[], SplitError>` (a strategy that needs the total, as
+   `custom` does to check its sum, receives it as a second argument);
+3. one `case` in `planSplit` (`engine.ts`).
 
 `engine.ts`, `rounding.ts` and `types.ts` should not otherwise change, and no
 strategy touches `Money` directly. Then extend `SPLIT_STRATEGIES` — and the test
-that pins it will make you look at the change.
+that pins it will make you look at the change. The `switch` in `planSplit` has no
+`default`: an arm per variant is what makes a missing one a compile error
+(`TS2366`, measured by deleting the `shares` arm) instead of a runtime throw that
+no test can reach.
 
 ## 11. Coverage, and how to measure it
 
@@ -205,10 +302,10 @@ non-zero. `global` rather than a path pattern because the package _is_ the SAD
 pnpm --filter @ses/split-engine test:coverage   # or, repo-wide, pnpm test:coverage
 ```
 
-Measured 2026-09-30: **100% statements, branches, functions and lines** on
-`engine.ts`, `rounding.ts`, `types.ts`, `index.ts`, `strategies/equal.ts` and
-`strategies/percentage.ts` — 49 tests. Thresholds, proofs and the (currently red)
-API row are documented in `docs/guides/TEST_COVERAGE.md`.
+Measured 2026-09-30 (T057): **100% statements, branches, functions and lines** on
+all nine source files — `engine.ts`, `rounding.ts`, `types.ts`, `index.ts` and the
+four strategies — 88 tests. Thresholds, proofs and the (currently red) API row are
+documented in `docs/guides/TEST_COVERAGE.md`.
 
 ## 12. Architecture boundary
 

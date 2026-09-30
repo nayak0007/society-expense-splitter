@@ -10,7 +10,7 @@ import {
 
 /**
  * The split engine's contract — what `computeSplit` accepts and answers
- * (Roadmap T056, PRD §3.5).
+ * (Roadmap T056/T057, PRD §3.5).
  *
  * ## Where this sits
  *
@@ -97,19 +97,23 @@ export function splitError(
 /**
  * The strategies this package implements.
  *
- * Two of the database's five. `split_strategy` in
+ * Four of the database's five. `split_strategy` in
  * `supabase/migrations/20260920130000_society_core.sql` is already
  * `('equal', 'percentage', 'shares', 'apartment', 'custom')`, and the spelling
  * here matches it exactly so a stored value maps onto a strategy without a
- * translation table. `shares` and `custom` arrive with T057, the apartment bases
- * with T058.
+ * translation table. The apartment bases arrive with T058.
  *
  * Listing all five now would be the tempting mistake: a caller could then pass
- * `strategy: 'custom'`, type-check, and reach a `switch` that throws at runtime.
- * The union grows as the strategies land, so "not implemented" is a compile error
- * rather than a production one.
+ * `strategy: 'apartment'`, type-check, and reach a `switch` that throws at
+ * runtime. The union grows as the strategies land, so "not implemented" is a
+ * compile error rather than a production one.
  */
-export const SPLIT_STRATEGIES = ["equal", "percentage"] as const;
+export const SPLIT_STRATEGIES = [
+  "equal",
+  "percentage",
+  "shares",
+  "custom",
+] as const;
 
 export type SplitStrategy = (typeof SPLIT_STRATEGIES)[number];
 
@@ -194,6 +198,108 @@ export function basisPoints(value: bigint | number): BasisPoints {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Shares
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `ShareUnits` — a share count as an exact integer: **thousandths of a share**.
+ * `1.5` shares is `1500n`; one whole share is `1000n`.
+ *
+ * ## Why the scale is thousandths
+ *
+ * It is the column's scale, not a choice made here: `apartments.share_units` is
+ * `numeric(8, 3)` with `CHECK (share_units >= 0 AND share_units <= 10000)`
+ * (`20260924140000_structure_apartments.sql`), and PRD §3.5.3 says shares may be
+ * "integer or decimal". A decimal share held as a float is the same hazard a float
+ * percentage is — `0.1 + 0.2` is not `0.3`, and a ledger has to balance to the
+ * paisa — so a share is represented the way the database represents it: an
+ * integer of thousandths, widened to a `Weight` with no division anywhere.
+ *
+ * ## The scale cannot move money
+ *
+ * Shares are a ratio, and every weight scaled by the same factor allocates the
+ * same proportions — `3000 : 2000 : 1000` is `3 : 2 : 1` — because
+ * `Money.allocateByWeights` divides once by the sum it is given, and the
+ * remainder ranking it uses for the residual is scaled by that same factor. What
+ * the scale buys is the decimal: `1.25` shares is expressible as `1250n`, rather
+ * than as a float that is *almost* `1.25`.
+ */
+declare const shareUnitsBrand: unique symbol;
+
+export type ShareUnits = bigint & {
+  readonly [shareUnitsBrand]: "ShareUnits";
+};
+
+/** One whole share — the `1` of `apartments.share_units DEFAULT 1`. */
+export const ONE_SHARE = 1_000n as ShareUnits;
+
+/**
+ * The ceiling on a share count: **`10_000` shares**, i.e. `10_000_000`
+ * thousandths.
+ *
+ * The number is the database's (`chk_apartments_share_units`, quoted above), and
+ * the reason to enforce it here is the same reason a zero amount is refused: a
+ * weight above the column's limit describes a split that could never be stored,
+ * so accepting it would turn a field error the treasurer can fix into a
+ * constraint violation at commit. It is also, exactly, the largest weight that
+ * still fits `expense_splits.weight numeric(12, 4)` — eight integer digits.
+ */
+export const MAX_SHARE_UNITS = 10_000_000n as ShareUnits;
+
+/**
+ * Validates and brands a share count.
+ *
+ * Accepts a whole number of thousandths from `1` to `10_000_000` — `0.001` to
+ * `10_000` shares. **Zero and negative shares are refused** (Roadmap T057): a
+ * share is a claim on a pool, and a participant with no claim is not a
+ * participant. Returning a ₹0 allocation for a mistyped share would hide the
+ * mistake rather than refuse it, and `expense_splits` would carry a row for a flat
+ * the society never meant to charge. A flat the society does mean to exempt is
+ * left out of the participant list by participant resolution (T063) — the same
+ * way a flat outside the selector is left out today — or given the `0%` that a
+ * percentage split allows (see `percentageWeights`).
+ *
+ * A `number` must be a safe integer: `1.5` shares is `1500`, so a fractional
+ * `number` arriving here is a caller that has already done share arithmetic in
+ * floats. Rounding it into money is the one thing this package must never do, so
+ * it is refused instead.
+ */
+export function shareUnits(value: bigint | number): ShareUnits {
+  const candidate =
+    typeof value === "number"
+      ? Number.isSafeInteger(value)
+        ? BigInt(value)
+        : undefined
+      : value;
+
+  if (candidate === undefined) {
+    throw splitError(
+      "validation",
+      `A share must be a whole number of thousandths, received ${String(value)}; 1.5 shares is 1500.`,
+      { field: "participants.share" },
+    );
+  }
+
+  if (candidate <= 0n) {
+    throw splitError(
+      "validation",
+      `A share must be greater than zero, received ${candidate.toString()} thousandths.`,
+      { field: "participants.share" },
+    );
+  }
+
+  if (candidate > MAX_SHARE_UNITS) {
+    throw splitError(
+      "validation",
+      `A share cannot exceed ${(MAX_SHARE_UNITS / ONE_SHARE).toString()} shares, received ${candidate.toString()} thousandths.`,
+      { field: "participants.share" },
+    );
+  }
+
+  return candidate as ShareUnits;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Participants
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -248,6 +354,37 @@ export interface PercentageParticipant extends SplitParticipant {
   readonly percentage: BasisPoints;
 }
 
+/**
+ * A participant in a shares split: the same share, with its share count.
+ *
+ * The count is a {@link ShareUnits} — thousandths of a share, the
+ * `apartments.share_units numeric(8, 3)` scale — and it is validated on the way in
+ * (`shareUnits`), because a share is a ratio that has to be exact. The field is
+ * named for what the treasurer configures ("give 102 three shares"), and it is
+ * still the only thing this strategy needs: a share count *is* a weight.
+ */
+export interface ShareParticipant extends SplitParticipant {
+  readonly share: ShareUnits;
+}
+
+/**
+ * A participant in a custom split: the same share, with the exact amount the
+ * treasurer allocated to it.
+ *
+ * This is the one strategy where each participant's figure is *the answer* rather
+ * than a basis to divide — no proportion, no residual, no rounding — so it is the
+ * one participant type whose value is money rather than a weight.
+ *
+ * The amount lives on the participant for the same reason the percentage does
+ * (see {@link PercentageParticipant}): a parallel array or an id-keyed map makes
+ * an amount belonging to nobody, or a participant with no amount, *expressible*.
+ * Here both are simply not writable down, and a custom split "excludes a flat" by
+ * leaving it out of the list.
+ */
+export interface CustomParticipant extends SplitParticipant {
+  readonly amount: Money;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Input
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,14 +404,36 @@ export interface PercentageSplitInput {
 }
 
 /**
+ * Weighted shares (PRD §3.5.3): each participant pays
+ * `amount × share ÷ totalShares`.
+ */
+export interface SharesSplitInput {
+  readonly strategy: "shares";
+  readonly amount: Money;
+  readonly participants: readonly ShareParticipant[];
+}
+
+/**
+ * Custom (PRD §3.5.5): the treasurer's exact amount per participant, which must
+ * add up to the expense.
+ */
+export interface CustomSplitInput {
+  readonly strategy: "custom";
+  readonly amount: Money;
+  readonly participants: readonly CustomParticipant[];
+}
+
+/**
  * What `computeSplit` accepts.
  *
  * A discriminated union rather than `{ strategy, amount, participants, config }`,
  * so the strategy decides what a participant *is* and TypeScript enforces it: an
- * equal split cannot be handed percentages to ignore, and a percentage split
- * cannot be run without them. The PRD's `config` slot is where the sketch put the
- * strategy's data; moving that data onto the participant is what makes the
- * invariants structural (see {@link PercentageParticipant}).
+ * equal split cannot be handed percentages to ignore, a percentage split cannot be
+ * run without them, and a custom split cannot be run without amounts. The PRD's
+ * `config` slot is where the sketch put the strategy's data; moving that data onto
+ * the participant is what makes the invariants structural (see
+ * {@link PercentageParticipant}, {@link ShareParticipant} and
+ * {@link CustomParticipant}).
  *
  * There is deliberately **no `rounding` field**, though the PRD's sketch lists
  * one. The PRD specifies exactly one rounding rule (§3.5: divide in paise, floor,
@@ -283,7 +442,8 @@ export interface PercentageSplitInput {
  * value is "the rule" would be a choice that does not exist — and the obvious
  * second value, `round`, is the one that loses paise.
  */
-export type SplitInput = EqualSplitInput | PercentageSplitInput;
+export type SplitInput =
+  EqualSplitInput | PercentageSplitInput | SharesSplitInput | CustomSplitInput;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Result

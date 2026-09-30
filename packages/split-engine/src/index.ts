@@ -19,10 +19,10 @@
  * path to the rounding rule — the one piece of arithmetic that must never be
  * reimplemented.
  *
- * ## Two of five strategies
+ * ## Four of five strategies
  *
- * `equal` and `percentage` (T056). `shares` and `custom` are T057 and the
- * apartment bases are T058; `SplitStrategy` grows with them.
+ * `equal` and `percentage` (T056), `shares` and `custom` (T057). The apartment
+ * bases arrive with T058, and `SplitStrategy` grows with them.
  *
  * @example
  * ```ts
@@ -39,6 +39,8 @@
 export { computeSplit } from "./engine";
 
 export {
+  MAX_SHARE_UNITS,
+  ONE_SHARE,
   PERCENT_TOLERANCE_BASIS_POINTS,
   PERCENT_TOTAL_BASIS_POINTS,
   SPLIT_ERROR_CODES,
@@ -46,14 +48,20 @@ export {
   SplitError,
   basisPoints,
   isSplitError,
+  shareUnits,
   splitError,
 } from "./types";
 
 export type {
   BasisPoints,
+  CustomParticipant,
+  CustomSplitInput,
   EqualSplitInput,
   PercentageParticipant,
   PercentageSplitInput,
+  ShareParticipant,
+  ShareUnits,
+  SharesSplitInput,
   SplitAllocation,
   SplitErrorCode,
   SplitInput,
