@@ -160,13 +160,13 @@ admins" to somebody who was promoting themselves.
 Every rule above is enforced again underneath, and that duplication is deliberate — the
 trigger is what a guard bug or a bypassed client meets:
 
-| Rule                                          | Enforced by                                                             |
-| --------------------------------------------- | ----------------------------------------------------------------------- |
-| Only an active Admin of the society may write | `members_update_self_or_admin` (RLS) + the `UPDATE (role)` column grant |
-| Nobody changes their own role                 | `chk_member_self_change()` → `MEMBER_ROLE_CHANGE_FORBIDDEN`             |
-| ≤ 3 active admins, ≤ 2 active treasurers      | `checkRoleLimit` **and** `chk_role_caps()` (a `BEFORE` trigger)         |
-| A society always keeps an active Admin        | `checkAdminPresence` **and** the deferred `chk_admin_present()`         |
-| A not-admitted membership has no role         | `checkRoleTarget` **and** `chk_role_caps()`                             |
+| Rule                                          | Enforced by                                                                                      |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Only an active Admin of the society may write | `members_update_self_or_admin` (RLS) + the `UPDATE (role)` column grant                          |
+| Nobody changes their own role                 | `chk_member_self_change()` → `MEMBER_ROLE_CHANGE_FORBIDDEN`                                      |
+| ≤ 3 active admins, ≤ 2 active treasurers      | `checkRoleLimit` **and** `chk_role_caps()` (a `BEFORE` trigger)                                  |
+| A society always keeps an active Admin        | `checkAdminPresence` **and** the deferred `chk_admin_present()`                                  |
+| A not-admitted membership has no role         | `checkRoleTarget` **and** `chk_role_caps()` (a write that admits it is cap-checked, not refused) |
 
 The cap trigger is **immediate** where the presence check is deferred, and the difference
 is the rule's kind: a cap is a limit on the state the row is in the moment it is written,

@@ -66,6 +66,8 @@ open behind the two that are named.
 | `@ses/split-engine` |        100 |      100 |       100 |   100 | **pass**          |
 | `@ses/api`          |      82.08 |    70.01 |     87.26 | 81.95 | **pass** — see §4 |
 
+> **Post-fix re-run (2026-09-30, join-approval role correction).** The corrected-role fix added eight integration tests and one translation line in the member adapter; the gate now measures `@ses/api` at **82.38 / 70.46 / 87.57 / 82.28** (2,372/2,879 · 1,076/1,527 · 557/636 · 2,258/2,744) over **40 suites / 743 tests**, and `pnpm test:coverage` still exits 0. The thresholds are unchanged; the figures above are the T014 snapshot that closed the gap.
+
 So `pnpm test:coverage` exits 0 today and the CI test job is green. `@ses/api` is
 measured over its complete automated test surface (unit + integration + e2e, §4);
 the row was not lowered, scoped or excluded to get there — the missing coverage

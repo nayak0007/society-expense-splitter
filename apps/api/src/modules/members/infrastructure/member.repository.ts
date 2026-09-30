@@ -733,6 +733,11 @@ export class MemberRepositoryPostgres implements MemberRepository {
    * `p_payload` carries only the fields the caller actually sent, so "absent means as
    * requested" survives the boundary: a payload built by spreading defaults would silently
    * overwrite the requester's declaration with its own.
+   *
+   * The role goes into the payload through `roleToDatabase()`: the RPC validates the value
+   * against `public.member_role`'s own labels, so the domain's `committee_member` written
+   * raw would be refused as `JOIN_ROLE_INVALID` — a documented correction answered as an
+   * invalid one.
    */
   async approveJoinRequest(
     id: MemberId,
@@ -745,7 +750,9 @@ export class MemberRepositoryPostgres implements MemberRepository {
       "write",
       async (tx) => {
         const payload: Record<string, unknown> = {};
-        if (input.role !== undefined) payload.role = input.role;
+        if (input.role !== undefined) {
+          payload.role = roleToDatabase(input.role);
+        }
         if (input.occupancy !== undefined) payload.occupancy = input.occupancy;
         if (input.apartmentId !== undefined) {
           payload.apartment_id = input.apartmentId;

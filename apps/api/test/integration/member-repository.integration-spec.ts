@@ -8,9 +8,17 @@ import type {
 } from "@ses/domain";
 import type postgres from "postgres";
 
+import {
+  MEMBERSHIP_CACHE,
+  type MembershipCache,
+} from "../../src/common/authorization/membership-cache";
 import { MEMBER_REPOSITORY } from "../../src/modules/members/application/member.tokens";
 
-import { createLocalUser, resetData } from "../utils/integration-db";
+import {
+  createLocalUser,
+  ownerClient,
+  resetData,
+} from "../utils/integration-db";
 import {
   insertApartment,
   insertBuilding,
@@ -19,6 +27,7 @@ import {
   type SocietyFixture,
 } from "../utils/integration-fixtures";
 import {
+  ownerUrl,
   startIntegrationHarness,
   type IntegrationHarness,
 } from "../utils/integration-harness";
@@ -882,6 +891,28 @@ describe("MemberRepositoryPostgres", () => {
   });
 
   describe("the join queue", () => {
+    /** One pending request, as the join flow lands it: `pending` and `resident`. */
+    async function joinRequest(displayName: string): Promise<MemberId> {
+      return asMemberId(
+        await insertMember(owner, fixture.societyId, {
+          displayName,
+          status: "pending",
+        }),
+      );
+    }
+
+    /** The stored row, for the assertions about what actually landed. */
+    async function storedRow(
+      id: MemberId,
+    ): Promise<{ status: string; role: string }> {
+      const [row] = await owner<{ status: string; role: string }[]>`
+        select status::text as status, role::text as role
+          from public.members where id = ${id}::uuid
+      `;
+      if (row === undefined) throw new Error("the member row is missing");
+      return row;
+    }
+
     it("lists pending requests newest-first with the same flat's live claimants", async () => {
       const claimantId = asMemberId(
         await insertMember(owner, fixture.societyId, {
@@ -972,33 +1003,233 @@ describe("MemberRepositoryPostgres", () => {
       expect(approved.approvedBy).toBe(fixture.adminMemberId);
     });
 
-    it.failing(
-      "admits a request at a corrected role (known defect: chk_role_caps refuses it)",
-      async () => {
-        // `member_approve_join()` sets `status = 'active'` and `role = …` in ONE
-        // update, and `chk_role_caps()` refuses any role change while
-        // `OLD.status = 'pending'` — so the documented "corrected role" path
-        // fails with MEMBER_ROLE_CHANGE_FORBIDDEN ("That membership is not
-        // active…"). The e2e suite cannot see it because it runs against fake
-        // repositories. `it.failing` keeps the defect visible: when the database
-        // is fixed this test starts failing and must be promoted to a plain `it`.
-        const requestId = asMemberId(
-          await insertMember(owner, fixture.societyId, {
-            displayName: "Corrected Role Applicant",
-            status: "pending",
-          }),
-        );
+    it("admits a request at a corrected role", async () => {
+      // The regression this file carried as `it.failing`: `member_approve_join()`
+      // sets `status = 'active'` and the corrected `role` in ONE update, and
+      // `chk_role_caps()` refused any role change while `OLD.status = 'pending'` —
+      // so the documented "corrected role" path (Roadmap T049) failed with
+      // MEMBER_ROLE_CHANGE_FORBIDDEN. `committee_member` is deliberately the case:
+      // it is the one role whose label differs between the domain and the enum, so
+      // the payload's translation is exercised on the way in and the read's on the
+      // way back.
+      const requestId = await joinRequest("Corrected Role Applicant");
 
+      const approved = await members.approveJoinRequest(
+        requestId,
+        fixture.societyId,
+        { role: "committee_member" },
+        fixture.adminUserId,
+      );
+      expect(approved.status).toBe("active");
+      expect(approved.role).toBe("committee_member");
+      // The database's own label landed, and the decision consumed the request.
+      expect(await storedRow(requestId)).toEqual({
+        status: "active",
+        role: "committee",
+      });
+    });
+
+    it("admits at the requested role or at any role the approver corrects to", async () => {
+      // The approval's role menu (PRD §2.1): absent means "as requested", and a
+      // correction may be any role the reviewer holds `member.role_change` for — all
+      // six, for an Admin. Every request row here is `resident` before the decision,
+      // because both INSERT policies pin one to that; what the approval settles is
+      // the *effective* role.
+      const corrected = [
+        "resident",
+        "committee_member",
+        "tenant",
+        "guest",
+        "treasurer",
+        "admin",
+      ] as const;
+
+      for (const role of corrected) {
+        const requestId = await joinRequest(`Applicant ${role}`);
         const approved = await members.approveJoinRequest(
           requestId,
           fixture.societyId,
-          { role: "committee_member" },
+          { role },
           fixture.adminUserId,
         );
         expect(approved.status).toBe("active");
-        expect(approved.role).toBe("committee_member");
-      },
-    );
+        expect(approved.role).toBe(role);
+      }
+
+      // Each correction is a membership the caps now count: one Treasurer, and two
+      // active Admins — the society's creator and the correction just made.
+      expect(
+        await members.countActiveByRole(
+          fixture.societyId,
+          "treasurer",
+          fixture.adminUserId,
+        ),
+      ).toBe(1);
+      expect(
+        await members.countActiveByRole(
+          fixture.societyId,
+          "admin",
+          fixture.adminUserId,
+        ),
+      ).toBe(2);
+    });
+
+    it("refuses a correction the reviewer's own grant cannot make", async () => {
+      // `member.approve` (Admin and Treasurer) says *whether* somebody joins;
+      // `member.role_change` (Admin only) is what hands out a role — PRD §2.1. The
+      // RPC enforces it, as does `checkJoinRoleAssignment()` above it.
+      const treasurerUserId = asUserId(
+        await createLocalUser(
+          owner,
+          "treasurer-queue@repo.ses.test",
+          "Tara Treasurer",
+        ),
+      );
+      await insertMember(owner, fixture.societyId, {
+        userId: treasurerUserId,
+        displayName: "Tara Treasurer",
+        role: "treasurer",
+        status: "active",
+      });
+      const requestId = await joinRequest("Committee Hopeful");
+
+      const error = await rejection(
+        members.approveJoinRequest(
+          requestId,
+          fixture.societyId,
+          { role: "committee_member" },
+          treasurerUserId,
+        ),
+      );
+      expect(error.code).toBe("role_not_assignable");
+      // Refused before the write: the request is still the society's to decide.
+      expect(await storedRow(requestId)).toEqual({
+        status: "pending",
+        role: "resident",
+      });
+    });
+
+    it("keeps the cap refusal on the corrected-role path", async () => {
+      // Three active admins — the creator plus two — so a fourth admitted through the
+      // queue must be refused. This is the half the fix could have traded away: an
+      // activation that carries a role is still exactly the write PRD §2.2's cap
+      // counts, and the count still happens under the per-society lock.
+      await insertMember(owner, fixture.societyId, {
+        displayName: "Admin Two",
+        role: "admin",
+        status: "active",
+      });
+      await insertMember(owner, fixture.societyId, {
+        displayName: "Admin Three",
+        role: "admin",
+        status: "active",
+      });
+      const requestId = await joinRequest("Admin Hopeful");
+
+      const error = await rejection(
+        members.approveJoinRequest(
+          requestId,
+          fixture.societyId,
+          { role: "admin" },
+          fixture.adminUserId,
+        ),
+      );
+      expect(error.code).toBe("role_cap_exceeded");
+      expect(
+        await members.countActiveByRole(
+          fixture.societyId,
+          "admin",
+          fixture.adminUserId,
+        ),
+      ).toBe(3);
+      // The whole approval rolled back, activation included.
+      expect(await storedRow(requestId)).toEqual({
+        status: "pending",
+        role: "resident",
+      });
+    });
+
+    it("still refuses a role change that leaves a membership un-admitted", async () => {
+      // The clause the fix narrowed, not removed: a role change on a pending row that
+      // stays pending is still MEMBER_ROLE_CHANGE_FORBIDDEN. `applyRoleChange`
+      // refuses a pending target first with a sentence; this is the database's own
+      // lock behind that door, reached here directly through the adapter.
+      const requestId = await joinRequest("Premature Promotion");
+
+      const error = await rejection(
+        members.setRole(
+          requestId,
+          fixture.societyId,
+          "committee_member",
+          fixture.adminUserId,
+        ),
+      );
+      expect(error.code).toBe("forbidden");
+      expect(await storedRow(requestId)).toEqual({
+        status: "pending",
+        role: "resident",
+      });
+    });
+
+    it("refuses a reviewer from another society, whatever role they correct to", async () => {
+      // RLS is not the only boundary: the RPC resolves the reviewer from the
+      // request's OWN society, so another society's Admin cannot decide this queue
+      // even holding the request's id — and the answer is the same `not_found` an
+      // unavailable row gets, so they learn nothing about the row.
+      const other = await seedSociety(
+        harness,
+        "Epsilon Court",
+        "epsilon@repo.ses.test",
+      );
+      const requestId = await joinRequest("Not Yours");
+
+      const error = await rejection(
+        members.approveJoinRequest(
+          requestId,
+          fixture.societyId,
+          { role: "treasurer" },
+          other.adminUserId,
+        ),
+      );
+      expect(error.code).toBe("not_found");
+      expect(await storedRow(requestId)).toEqual({
+        status: "pending",
+        role: "resident",
+      });
+    });
+
+    it("bumps the society's membership-cache version on a corrected approval", async () => {
+      // T038's ordering, unchanged by the fix: the invalidation is a society-scoped
+      // version bump after the commit, and an approval admits a member — a new
+      // authorization context for them and a changed population for everybody
+      // picking roles. The adapter names the scope; this reads the version the cache
+      // actually holds, before and after.
+      const cache = harness.app.get<MembershipCache>(MEMBERSHIP_CACHE);
+      const key = {
+        societyId: fixture.societyId,
+        userId: fixture.adminUserId,
+      };
+      const before = await cache.lookup(key);
+      const requestId = await joinRequest("Cache Applicant");
+
+      await members.approveJoinRequest(
+        requestId,
+        fixture.societyId,
+        { role: "committee_member" },
+        fixture.adminUserId,
+      );
+
+      const after = await cache.lookup(key);
+      if (before.status === "bypass" || after.status === "bypass") {
+        // Not a silent pass: an integration run binds the Redis store, and a test
+        // that asserted "the version moved" against a cache that was never there
+        // would be asserting nothing.
+        throw new Error(
+          "the membership cache was unreachable — MEMBERSHIP_CACHE_STORE=redis is the harness's setting",
+        );
+      }
+      expect(after.version).not.toBe(before.version);
+    });
 
     it("refuses to decide a request twice", async () => {
       const requestId = asMemberId(
@@ -1085,6 +1316,104 @@ describe("MemberRepositoryPostgres", () => {
         fixture.adminUserId,
       );
       expect(found?.status).toBe("rejected");
+    });
+
+    it("admits at most one of two overlapping approvals to a capped role", async () => {
+      // Real overlapping transactions, not a sequence: both approvals leave on their
+      // own pooled connection, and the second waits on the per-society advisory lock
+      // `chk_role_caps()` takes before its count — the ordering the concurrency
+      // remediation built. The society has two active admins, so the first to commit
+      // fills the third slot and the second must be refused; without the lock each
+      // would count the pre-state and both would pass.
+      await insertMember(owner, fixture.societyId, {
+        displayName: "Admin Two",
+        role: "admin",
+        status: "active",
+      });
+      const first = await joinRequest("Race A");
+      const second = await joinRequest("Race B");
+
+      const results = await Promise.allSettled([
+        members.approveJoinRequest(
+          first,
+          fixture.societyId,
+          { role: "admin" },
+          fixture.adminUserId,
+        ),
+        members.approveJoinRequest(
+          second,
+          fixture.societyId,
+          { role: "admin" },
+          fixture.adminUserId,
+        ),
+      ]);
+
+      const fulfilled = results.filter(
+        (result) => result.status === "fulfilled",
+      );
+      const rejected = results.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0]?.reason as { code?: unknown }).code).toBe(
+        "role_cap_exceeded",
+      );
+
+      // Three active admins exactly, and the loser is still a request: its refusal
+      // rolled the activation back with it.
+      expect(
+        await members.countActiveByRole(
+          fixture.societyId,
+          "admin",
+          fixture.adminUserId,
+        ),
+      ).toBe(3);
+      const statuses = [
+        (await storedRow(first)).status,
+        (await storedRow(second)).status,
+      ];
+      expect(statuses.filter((status) => status === "active")).toHaveLength(1);
+      expect(statuses.filter((status) => status === "pending")).toHaveLength(1);
+    });
+
+    it("waits on the society's membership lock before counting a corrected role", async () => {
+      // The deterministic half of the same proof: hold the society's advisory lock in
+      // a transaction of its own, then start a corrected-role approval. It cannot
+      // resolve while the lock is held — which is only true if the activation reached
+      // the lock instead of returning before it — and it completes once the lock is
+      // released.
+      const requestId = await joinRequest("Locked Applicant");
+      const blocker = ownerClient(ownerUrl());
+      let approval!: Promise<{ role: string }>;
+      let outcome = "";
+
+      try {
+        await blocker.begin(async (tx) => {
+          await tx`select public.lock_society_membership_writes(${fixture.societyId}::uuid)`;
+          approval = members.approveJoinRequest(
+            requestId,
+            fixture.societyId,
+            { role: "admin" },
+            fixture.adminUserId,
+          );
+          outcome = await Promise.race([
+            approval.then(
+              () => "resolved",
+              () => "rejected",
+            ),
+            new Promise<string>((resolve) =>
+              setTimeout(() => resolve("blocked"), 300),
+            ),
+          ]);
+        });
+      } finally {
+        await blocker.end({ timeout: 5 });
+      }
+
+      expect(outcome).toBe("blocked");
+      await expect(approval).resolves.toMatchObject({ role: "admin" });
     });
   });
 });

@@ -69,13 +69,13 @@ Notes on the rows a reviewer usually asks about:
 Permissions are a property of a **role**, and a role is a property of a **membership**. The
 only write in this area is the role itself:
 
-| Rule                                                    | Where it is enforced                                                                  |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| Only `admin` holds `member.role_change`                 | the matrix above + `@RequirePermission` + `members_update_self_or_admin` (RLS)        |
-| Nobody changes their own role                           | `applyRoleChange` **and** `chk_member_self_change()` (`MEMBER_ROLE_CHANGE_FORBIDDEN`) |
-| At most 3 active admins, 2 active treasurers            | `checkRoleLimit` **and** `chk_role_caps()` (a `BEFORE` trigger)                       |
-| A society always keeps an active Admin                  | `checkAdminPresence` **and** the deferred `chk_admin_present()`                       |
-| A `pending`/`rejected`/`removed` membership has no role | `checkRoleTarget` **and** `chk_role_caps()`                                           |
+| Rule                                                                                   | Where it is enforced                                                                                              |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Only `admin` holds `member.role_change`                                                | the matrix above + `@RequirePermission` + `members_update_self_or_admin` (RLS)                                    |
+| Nobody changes their own role                                                          | `applyRoleChange` **and** `chk_member_self_change()` (`MEMBER_ROLE_CHANGE_FORBIDDEN`)                             |
+| At most 3 active admins, 2 active treasurers                                           | `checkRoleLimit` **and** `chk_role_caps()` (a `BEFORE` trigger)                                                   |
+| A society always keeps an active Admin                                                 | `checkAdminPresence` **and** the deferred `chk_admin_present()`                                                   |
+| A `pending`/`rejected`/`removed` membership cannot take a role that leaves it that way | `checkRoleTarget` **and** `chk_role_caps()` (a write that admits it — the join approval — is cap-checked instead) |
 
 No role gains a permission because somebody was appointed to it, and no member holds a
 per-member grant: there is no `member_permissions` table to hold one. That is the property
