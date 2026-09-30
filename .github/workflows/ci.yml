@@ -8,11 +8,12 @@
 # a link operation of a few seconds, so the `setup` stage buys nothing here. The
 # expensive thing being cached is Turbo's task cache, which IS shared (see below).
 #
-# WHAT IS DELIBERATELY NOT HERE YET: `test-integration` (Testcontainers Postgres +
-# Redis) and `bundle-size` (expo-atlas). Both need infrastructure that does not
-# exist in this repository yet — the first needs the migration set and a container
-# runtime on the runner, the second needs a baseline figure to compare against.
-# Adding them as no-op jobs would show green without testing anything.
+# WHAT IS DELIBERATELY NOT HERE YET: `bundle-size` (expo-atlas). It needs a
+# baseline figure to compare against, and adding it as a no-op job would show
+# green without testing anything. `test-integration` used to be in that list for
+# the same reason; Roadmap T034 supplied the missing piece — the migration chain
+# is self-sufficient on a stock Postgres (its own bootstrap shim) and the runner
+# provides a container runtime — so it is a real job now (see `test-integration`).
 name: CI
 
 on:
@@ -86,7 +87,105 @@ jobs:
 
   # ── Unit tests ─────────────────────────────────────────────────────────────
   test-unit:
-    name: Unit tests
+    name: Unit tests with coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Read for the checkout, write only to post the coverage summary below — the
+    # gate itself is Jest's exit code and needs no write access at all.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.sha }}
+          restore-keys: turbo-${{ runner.os }}-
+
+      # SAD §16.2's `test-unit`: "jest --coverage, per-path thresholds
+      # enforced". `turbo run test:coverage` runs each package's suite with
+      # coverage on, and Jest fails the task when a `coverageThreshold` in that
+      # package's config is missed, so this one command is both the test suite
+      # and the gate. It REPLACES a plain `pnpm test` rather than running beside
+      # it — same suites, and running them twice would double the job for no
+      # extra signal.
+      #
+      # It is expected to FAIL today: `apps/api` sits at ~35% against SAD §15.2's
+      # 80/70 and the number is deliberately not lowered. See
+      # docs/guides/TEST_COVERAGE.md for the deficit and what closes it.
+      - name: Unit tests with per-path coverage thresholds (SAD §15.2)
+        run: pnpm test:coverage
+
+      # The API's e2e suite boots the real Nest application (no database — the
+      # readiness probe is asserted in its degraded state). It is separate from
+      # `pnpm test` because it has its own Jest config and a longer timeout.
+      #
+      # `if: always()` ON PURPOSE: the coverage gate above fails on every PR
+      # until the API integration layer exists, and a failing step skips the ones
+      # after it — which would silently retire the e2e signal that this
+      # repository actually relies on for API behaviour.
+      - name: API e2e suite
+        if: always()
+        run: pnpm --filter @ses/api test:e2e
+
+      # ── The coverage summary (Roadmap T014) ──────────────────────────────────
+      # Informational, never a gate: the exit code above decides. `if: always()`
+      # because a summary is most useful on the runs where a threshold was
+      # missed — which is currently every run, so a green-only comment would
+      # never appear.
+      - name: Build the coverage summary
+        if: always()
+        env:
+          COVERAGE_JOB_STATUS: ${{ job.status }}
+        run: node scripts/ci/coverage-comment.mjs coverage-comment.md
+
+      - name: Comment the coverage summary on the pull request
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- coverage-report -->';
+            if (!fs.existsSync('coverage-comment.md')) return;
+            const body = fs.readFileSync('coverage-comment.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            // Sticky: update this PR's existing summary instead of appending a
+            // new one on every push.
+            const existing = (await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 },
+            )).find((comment) => comment.body && comment.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+  # ── Integration (SAD §15.4, Roadmap T034) ─────────────────────────────────
+  #
+  # Real Postgres and real Redis, started by Testcontainers from inside the suite,
+  # with the committed migration chain applied by the same runner `pnpm db:migrate`
+  # uses. "No mocked database — a mocked database cannot catch a broken constraint,
+  # and constraints are load-bearing here" (SAD §15.4) is the entire justification
+  # for a job that is slower than the unit one.
+  #
+  # WHY THIS IS SAFE ON A SHARED RUNNER: the suite owns its containers' lifecycle
+  # (start in the global setup, removed in its teardown) and never reads an ambient
+  # `DATABASE_URL` — the connection strings come from the containers it just
+  # started (see apps/api/test/integration/setup-env.ts). No hosted Supabase secret
+  # is involved, so ordinary pull requests cannot be affected by, or affect, the
+  # development project. That separation is deliberate: the hosted project remains
+  # the platform-compatibility proof, and this remains the repeatable one.
+  test-integration:
+    name: Integration tests · Postgres + Redis (Testcontainers)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -103,15 +202,10 @@ jobs:
           key: turbo-${{ runner.os }}-${{ github.sha }}
           restore-keys: turbo-${{ runner.os }}-
 
-      # `pnpm test` is `turbo run test`, which is only meaningful if a workspace
-      # that defines no tests is distinguishable from one whose tests all failed.
-      # Turbo fails the run when a task fails, so that holds.
-      - run: pnpm test
-
-      # The API's e2e suite boots the real Nest application (no database — the
-      # readiness probe is asserted in its degraded state). It is separate from
-      # `pnpm test` because it has its own Jest config and a longer timeout.
-      - run: pnpm --filter @ses/api test:e2e
+      # The runner image already has Docker; the suite fails loudly and by name if
+      # it is missing rather than falling back to mocks.
+      - name: Integration suite (containers owned by the suite)
+        run: pnpm --filter @ses/api test:integration
 
   # ── Database (ADR-0008) ────────────────────────────────────────────────────
   # The first execution of the schema history by automation. Every job above

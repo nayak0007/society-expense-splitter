@@ -96,8 +96,15 @@ pnpm exec eslint .  # the root flat config, which is the only one that reaches p
 pnpm lint:arch      # dependency-cruiser — layer boundaries (ADR-0001)
 pnpm format:check   # prettier
 pnpm test           # jest, every workspace that has tests
+pnpm test:coverage  # the same suites with per-path coverage thresholds enforced
 pnpm --filter @ses/api test:e2e   # boots the real Nest app (no database needed)
+pnpm test:integration             # real Postgres + Redis via Testcontainers (needs Docker)
 ```
+
+`pnpm test:integration` starts its own containers and applies the real migration
+chain, so it needs a container runtime and nothing else — no database to start by
+hand, no `.env` to fill in. It fails immediately and by name without Docker rather
+than falling back to mocks; see `docs/guides/INTEGRATION_TESTS.md`.
 
 `pnpm lint:arch` is the one to run deliberately rather than reflexively: it is a
 resolved-module-graph check, so it catches things ESLint structurally cannot — a
@@ -107,10 +114,12 @@ violation; a boundary rule that silently matches nothing looks identical to a
 passing one.
 
 Coverage gates are per path, not one global number (SAD §15.2): the financial core
-is held to 100%, use cases to 90%, everything else to 80%. `@ses/api` enforces its
-thresholds today. `@ses/domain` does not yet, because `money.ts` is still the
-`Paise` placeholder that T012 replaces — a 100% gate on it now would fail for a
-reason unrelated to whoever broke the build.
+is held to 100%, use cases to 90%, everything else to 80%. `pnpm test:coverage`
+runs them in every package — `@ses/domain`, `@ses/application`, `@ses/split-engine`
+and `@ses/api` — and **exits non-zero today**: the API's unit suite measures 35%
+against its 80% global row, and its threshold is deliberately not lowered.
+`docs/guides/TEST_COVERAGE.md` records every number, how the gate was proven to
+fail, and the work that closes the API gap.
 
 ## Git hooks
 

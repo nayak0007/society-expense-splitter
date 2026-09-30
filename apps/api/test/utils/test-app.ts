@@ -49,6 +49,10 @@ import {
  * No database or Redis is contacted: both connect lazily, and the indicators that
  * would exercise them are faked here.
  *
+ * `realInfrastructure` removes even those three replacements, for the suite that
+ * wants the real dependencies (T034). The fake-repository seams are ignored in
+ * that mode by definition, since their purpose is the opposite.
+ *
  * The HTTP adapter and the global prefix come from `src/bootstrap.ts`, the same
  * module `main.ts` uses, so a setting that only exists in the real bootstrap
  * cannot pass here unnoticed. That is not a hypothetical: this harness originally
@@ -59,6 +63,21 @@ import {
 export type DependencyState = "up" | "down";
 
 export type TestAppOptions = {
+  /**
+   * Boot the module with its **real** infrastructure — real Postgres, real
+   * Redis, real repositories and `UnitOfWork` — instead of the fakes below.
+   *
+   * T034's integration suite sets this. It is the difference the coverage gate
+   * cares about: everything this harness replaces is a seam an e2e suite has to
+   * open, and `SET ROLE`/`auth.uid()`, `BEGIN`/`ROLLBACK`, a unique violation
+   * translated into a domain error and an advisory lock are all behaviour that
+   * exists *only* on the far side of those seams. A mocked database cannot catch
+   * a broken constraint, which is SAD §15.4's whole sentence.
+   *
+   * With it set, every other option here is ignored: the seam options exist to
+   * make a suite database-free, and asking for both is a contradiction.
+   */
+  realInfrastructure?: boolean;
   postgres?: DependencyState;
   redis?: DependencyState;
   migrations?: DependencyState;
@@ -185,17 +204,25 @@ export async function createTestApp(
     // exactly the one it must catch). Nothing else reads it.
     imports: [DiscoveryModule, AppModule],
     controllers: [...(options.controllers ?? [])],
-  })
-    .overrideProvider(PostgresIndicator)
-    .useValue(fakeIndicator("postgres", options.postgres ?? "up"))
-    .overrideProvider(RedisIndicator)
-    .useValue(fakeIndicator("redis", options.redis ?? "up"))
-    .overrideProvider(MigrationsIndicator)
-    .useValue(
-      fakeIndicator("migrations", options.migrations ?? "up", {
-        detail: "test fixture",
-      }),
-    );
+  });
+
+  // The three indicators are what stand between "boots" and "contacts a
+  // dependency": they are the only providers in the graph that reach out on
+  // their own. Leaving them real is therefore what makes an integration run
+  // touch Postgres and Redis at all.
+  if (options.realInfrastructure !== true) {
+    builder
+      .overrideProvider(PostgresIndicator)
+      .useValue(fakeIndicator("postgres", options.postgres ?? "up"))
+      .overrideProvider(RedisIndicator)
+      .useValue(fakeIndicator("redis", options.redis ?? "up"))
+      .overrideProvider(MigrationsIndicator)
+      .useValue(
+        fakeIndicator("migrations", options.migrations ?? "up", {
+          detail: "test fixture",
+        }),
+      );
+  }
 
   if (options.jwks !== undefined) {
     builder.overrideProvider(SUPABASE_JWKS).useValue(options.jwks);

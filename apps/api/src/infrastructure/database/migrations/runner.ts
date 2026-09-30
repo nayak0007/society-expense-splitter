@@ -240,8 +240,29 @@ const LEDGER_TABLE_SQL = `
   -- expects against what the database has actually applied.
   revoke all on schema ${LEDGER_SCHEMA} from public;
   revoke all on ${LEDGER_SCHEMA}.migrations from public;
-  grant usage on schema ${LEDGER_SCHEMA} to authenticated;
-  grant select on ${LEDGER_SCHEMA}.migrations to authenticated;
+`;
+
+/** The readiness probe's read path, issued only once its role exists.
+ *
+ * `authenticated` is a *platform* role on hosted Supabase but a *shim* role the
+ * bootstrap migration creates on a stock host — and the bootstrap is the first
+ * file in the chain, which runs *after* this DDL on a fresh database. An
+ * unconditional `grant … to authenticated` therefore fails with
+ * `role "authenticated" does not exist` before a single migration can apply,
+ * which makes `pnpm db:migrate` unable to initialize any stock host (measured,
+ * not hypothesised — it is what T034's first execution and CI's `test-db` job
+ * hit). The grant is guarded instead, and `applyMigrations` re-issues it after
+ * the chain, so the run that creates the role is the run that grants it the
+ * ledger read. On Supabase the role exists up front and the guard is a no-op. */
+const LEDGER_GRANTS_SQL = `
+  do $$
+  begin
+    if exists (select 1 from pg_roles where rolname = 'authenticated') then
+      grant usage on schema ${LEDGER_SCHEMA} to authenticated;
+      grant select on ${LEDGER_SCHEMA}.migrations to authenticated;
+    end if;
+  end
+  $$;
 `;
 
 /**
@@ -319,6 +340,9 @@ export async function preflight(
   files: MigrationFile[],
 ): Promise<Preflight> {
   await sql.unsafe(LEDGER_TABLE_SQL);
+  // Conditional: on a fresh stock host this is a silent no-op and the grant is
+  // re-issued by `applyMigrations` once the bootstrap has created the role.
+  await sql.unsafe(LEDGER_GRANTS_SQL);
   const rows = await readLedger(sql);
   const byName = new Map(files.map((f) => [f.name, f]));
 
@@ -458,6 +482,12 @@ export async function applyMigrations(
     }
     appliedNow.push(file.name);
   }
+
+  // The chain's bootstrap creates `authenticated` on a stock host (see
+  // LEDGER_GRANTS_SQL), so the probe's read grant is re-issued here, where the
+  // role now exists — otherwise a freshly-migrated stock host would report
+  // `migrations` down until the next preflight run.
+  await sql.unsafe(LEDGER_GRANTS_SQL);
 
   return { appliedNow, alreadyApplied: state.applied.length };
 }

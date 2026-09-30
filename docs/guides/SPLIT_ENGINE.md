@@ -195,18 +195,20 @@ that pins it will make you look at the change.
 
 ## 11. Coverage, and how to measure it
 
-T056 requires 100% coverage. **The gate itself is not wired here** — Roadmap T014
-owns `--coverage` and the per-path thresholds, and declaring a second threshold in
-this package would be a second source of truth for the same number. So it is
-measured:
+T056 requires 100% coverage, and as of Roadmap T014 it is **enforced**, not merely
+measured: `packages/split-engine/jest.config.js` declares a `global`
+`coverageThreshold` of 100 on all four metrics, so an uncovered line exits
+non-zero. `global` rather than a path pattern because the package _is_ the SAD
+§15.2 row, and a global row cannot silently match nothing.
 
 ```bash
-pnpm --filter @ses/split-engine test --coverage
+pnpm --filter @ses/split-engine test:coverage   # or, repo-wide, pnpm test:coverage
 ```
 
-Measured 2026-09-29: **100% statements, branches, functions and lines** on
+Measured 2026-09-30: **100% statements, branches, functions and lines** on
 `engine.ts`, `rounding.ts`, `types.ts`, `index.ts`, `strategies/equal.ts` and
-`strategies/percentage.ts`.
+`strategies/percentage.ts` — 49 tests. Thresholds, proofs and the (currently red)
+API row are documented in `docs/guides/TEST_COVERAGE.md`.
 
 ## 12. Architecture boundary
 

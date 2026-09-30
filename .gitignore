@@ -34,5 +34,10 @@ pnpm-debug.log*
 .eslintcache
 jest-cache/
 
+# Integration-suite scratch state: the connection strings the Testcontainers
+# global setup writes for the workers to read (apps/api/test/integration/state.ts).
+# One ephemeral port per run; committing it would be noise in every diff.
+.integration-env.json
+
 # Freebuff / agent workspace metadata (local only)
 .freebuff/

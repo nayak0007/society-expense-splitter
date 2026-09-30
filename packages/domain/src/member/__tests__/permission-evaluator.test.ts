@@ -150,6 +150,23 @@ describe("can() against PRD §2.1", () => {
 
     expect(divergences).toEqual([]);
   });
+
+  it("denies a role the union does not contain, rather than throwing", () => {
+    // WHY THIS EXISTS: a role does not only arrive as a literal. It comes off a
+    // JWT claim and out of the `members.role` enum, so it is only *typed* as a
+    // MemberRole — a role dropped or renamed by a future migration reaches the
+    // evaluator as a string this union no longer contains, and every other test
+    // in this file would still be green. `ELIGIBLE[role]` is then `undefined` and
+    // the `?? false` is the difference between a denial and a TypeError thrown
+    // inside an authorization guard, which is the failure T037's own test list
+    // names ("unknown role returns false rather than throwing"). Cast through
+    // `unknown` on purpose: the case only exists for a value the type system
+    // cannot produce, and the test would be deleted by a narrower signature.
+    const unmigrated = "super_admin" as unknown as MemberRole;
+
+    expect(can(unmigrated, "member.view")).toBe(false);
+    expect(ACTIONS.filter((action) => can(unmigrated, action))).toEqual([]);
+  });
 });
 
 describe("scoped actions", () => {

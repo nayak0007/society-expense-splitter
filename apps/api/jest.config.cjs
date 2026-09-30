@@ -57,12 +57,44 @@ module.exports = {
    *   everything  80% lines / 70% branches
    *
    * The `split-engine` and money thresholds (100%) belong to their own packages
-   * and are enforced there. The use-case glob has no matches yet — it governs the
-   * first use case rather than being added alongside it, which is the whole point
-   * of putting the gate in before the code.
+   * and are enforced there.
+   *
+   * THE USE-CASE ROW THAT USED TO BE HERE HAS MOVED OUT OF THIS CONFIG, and its
+   * reason is a measurement rather than a preference. It read
+   * `"./src/modules/**\/use-cases/**": { lines: 90, branches: 85 }` and matched
+   * nothing, because this app's modules carry controllers and infrastructure
+   * while the use cases live in `@ses/application`. Jest 30 does not tolerate
+   * that: a threshold path matching no collected file fails the run outright with
+   * `Jest: Coverage data for ./src/modules/**\/use-cases/** was not found.` So the
+   * row was not a dormant gate waiting for the first use case — once T014 wired
+   * `--coverage`, it would have failed every pull request with a configuration
+   * error, which is exactly the kind of red that teaches people to ignore a gate.
+   * The row should be re-declared here (or wherever the first API-side use case
+   * lands) by the task that adds it; until then this package is held to the only
+   * row that applies to it, and the drift is recorded in
+   * `docs/guides/TEST_COVERAGE.md` §5.
+   *
+   * THESE NUMBERS ARE NOW ENFORCED, AND THIS PACKAGE DOES NOT PASS THEM (T014).
+   * `pnpm test:coverage` runs `jest --coverage` here, so Jest applies the block
+   * below on every developer machine and in CI — which is the point: before this,
+   * the thresholds were declared and nothing invoked them. Measured today the
+   * unit suite stands at 35.4 statements / 36.0 branches / 24.5 functions /
+   * 34.4 lines, and it cannot be moved to 80 by scoping the file set: the
+   * uncovered remainder is production code that its unit tests are not the
+   * instrument for. Roughly a third of it is the SAD §15.4 integration surface
+   * (repositories, `UnitOfWork`, the Redis membership cache, the migration
+   * runner) which needs Testcontainers Postgres + Redis — infrastructure this
+   * repository does not have yet and which Roadmap T034 owns — and the rest is
+   * the request pipeline, controllers and module operations, exercised today by
+   * the 333-test e2e suite and the live matrix instead of by unit tests.
+   *
+   * So the failure is deliberate and the numbers are NOT lowered: a gate that is
+   * relaxed until it passes is decoration. The deficit, the files responsible for
+   * it and the exact work that closes it are documented in
+   * `docs/guides/TEST_COVERAGE.md`; no `collectCoverageFrom` narrowing and no
+   * `istanbul ignore` was added to make this row green.
    */
   coverageThreshold: {
     global: { lines: 80, branches: 70, functions: 80, statements: 80 },
-    "./src/modules/**/use-cases/**": { lines: 90, branches: 85 },
   },
 };

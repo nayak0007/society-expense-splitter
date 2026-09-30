@@ -18,11 +18,23 @@ packages:
 #   @scarf/scarf     — telemetry, pulled in by swagger-ui-dist. Denied: its only
 #                      effect is to phone home from every install, and nothing in
 #                      the build or test pipeline reads what it reports.
+#   protobufjs       — a transitive dependency of testcontainers' Docker client
+#                      (T034). Its postinstall only builds the optional `pbjs`
+#                      CLI shim, which nothing here invokes.
+#   ssh2             — testcontainers' remote-Docker transport. Denied: its
+#                      install script exists to compile `cpu-features`, and the
+#                      suite drives the local Docker socket, where the pure-JS
+#                      fallback is used and an SSH transport is never opened.
+#   cpu-features     — the native accelerator ssh2's script would build, for the
+#                      same unused transport. Denied for the same reason.
 allowBuilds:
   "@parcel/watcher": false
   unrs-resolver: false
   "@swc/core": true
   "@scarf/scarf": false
+  protobufjs: false
+  ssh2: false
+  cpu-features: false
 
 minimumReleaseAgeExclude:
   - "@nestjs/terminus@12.1.0"

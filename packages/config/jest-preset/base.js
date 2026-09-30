@@ -51,5 +51,20 @@ module.exports = {
   // Tests and test support live beside the sources, so coverage must not count
   // the fakes and fixtures as production code.
   coveragePathIgnorePatterns: ["/__tests__/"],
+
+  // WHY THESE THREE REPORTERS (Roadmap T014). `text` is the table a developer
+  // reads locally and the one CI prints when a threshold is missed; nothing else
+  // is needed to diagnose a failure. `json-summary` is what the CI PR comment is
+  // rendered from (`scripts/ci/coverage-comment.mjs`) — it is ~1 KB per package
+  // where the raw `json` report is megabytes. `lcov` is for editor gutter
+  // extensions and any future coverage service, and is the only format every one
+  // of them reads. Jest's default set (`clover`, `json`, `lcov`, `text`) is
+  // dropped because `clover` has no consumer here and `json` duplicates
+  // `coverage-final.json` at ~1 MB per package on every run.
+  coverageReporters: ["text", "json-summary", "lcov"],
+
+  // Nothing here is a threshold: the gate is per package (`packages/*/jest.config.js`
+  // and `apps/api/jest.config.cjs`), because the required numbers differ per path
+  // (SAD §15.2) and a shared number cannot express that.
   clearMocks: true,
 };
