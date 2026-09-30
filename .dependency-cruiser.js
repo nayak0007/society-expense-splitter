@@ -113,6 +113,58 @@ module.exports = {
         path: "node_modules/(react|react-native|expo|@nestjs|drizzle-orm|postgres|ioredis|@supabase|zustand|@tanstack)",
       },
     },
+    // ── The split engine (SAD §4.1: "the single most important shared package") ──
+    //
+    // WHY TWO PATH PATTERNS PER RULE (measured, 2026-09-29). A dependency the
+    // package does NOT declare is reported by dependency-cruiser under pnpm's
+    // per-package layout as `resolved: "@nestjs/common"` with
+    // `dependencyTypes: ["unknown"]`, because it never resolves to a real path at
+    // all. So a rule written the usual way — a `node_modules/...` path plus a
+    // `dependencyTypes: ["npm", "npm-no-pkg"]` filter — matches NOTHING in the case
+    // that actually matters, and passes silently. Measured by planting
+    // `import { Injectable } from "@nestjs/common"` inside packages/split-engine
+    // and inside packages/domain: both reported `["unknown"]` and NEITHER rule
+    // fired, while the same import resolves to a `node_modules/.pnpm/...` path (and
+    // is caught) only once it is declared. Hence: no `dependencyTypes` filter here,
+    // and a pattern for each shape — the bare specifier for the undeclared import,
+    // and the resolved vendor path for the declared one.
+    {
+      name: "split-engine-is-framework-free",
+      severity: "error",
+      comment:
+        "packages/split-engine is imported by the mobile app AND the server, and its whole " +
+        "value is that it produces the same allocations on both — a preview that disagrees " +
+        "with the bill is the Sev-1 bug the PRD names. A framework or driver here would either " +
+        "fail to bundle for Hermes or make the client's arithmetic depend on the platform. " +
+        "`zod` is in the list on purpose: the engine's inputs are already typed, so a validator " +
+        "arriving here would be the first step back towards two implementations.",
+      from: { path: "^packages/split-engine" },
+      to: {
+        path: [
+          "node_modules/(react|react-native|expo|@nestjs|drizzle-orm|postgres|ioredis|@supabase|zod|zustand|@tanstack)",
+          "^(react|react-native|expo|@nestjs|drizzle-orm|postgres|ioredis|@supabase|zod|zustand|@tanstack)(/|$)",
+        ],
+      },
+    },
+    {
+      name: "split-engine-depends-only-on-domain",
+      severity: "error",
+      comment:
+        "T056: 'Zero runtime dependencies beyond packages/domain'. The engine is a pure " +
+        "function of its argument and must stay callable from a test, a worker and a phone, so " +
+        "it may not reach an app or a sibling package — contracts (the wire shape) and " +
+        "db-schema (persistence) both sit ABOVE it and would invert the dependency. Same two " +
+        "shapes as the rule above: `@ses/contracts` unresolved, and the resolved path once it " +
+        "is declared.",
+      from: { path: "^packages/split-engine" },
+      to: {
+        path: [
+          "^apps/",
+          "^packages/(application|contracts|db-schema)",
+          "^@ses/(application|contracts|db-schema)(/|$)",
+        ],
+      },
+    },
     {
       name: "contracts-are-dependency-light",
       severity: "error",

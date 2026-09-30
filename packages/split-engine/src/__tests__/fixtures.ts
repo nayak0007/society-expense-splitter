@@ -1,0 +1,135 @@
+import { Money, asApartmentId, asMemberId, type Result } from "@ses/domain";
+
+import {
+  basisPoints,
+  type PercentageParticipant,
+  type SplitAllocation,
+  type SplitParticipant,
+} from "../types";
+
+/**
+ * Test fixtures for the split engine's suites.
+ *
+ * Not a test file (`*.test.ts` is what the preset collects), and excluded from
+ * coverage by `coveragePathIgnorePatterns: ["/__tests__/"]`, so the builders here
+ * are never mistaken for production code.
+ *
+ * Ids are derived from the flat number rather than written out, because the tests
+ * that matter assert on *ordering* and on *which* flat carries the residual paisa.
+ * A fixture whose ids were random would make those assertions unreadable, and one
+ * whose ids were hand-copied would drift the moment a case was added.
+ */
+
+/**
+ * One participant. The default ids are `member-<number>` / `apartment-<number>`.
+ *
+ * Overriding them is how the tests express the two cases the ordering contract
+ * turns on: two participants in the *same* flat (same `apartmentNumber`, so the
+ * id tie-breakers decide) and a participant whose id order disagrees with the
+ * order it was passed in.
+ */
+export function flat(
+  apartmentNumber: string,
+  options: {
+    readonly memberId?: string;
+    readonly apartmentId?: string;
+  } = {},
+): SplitParticipant {
+  return {
+    memberId: asMemberId(options.memberId ?? `member-${apartmentNumber}`),
+    apartmentId: asApartmentId(
+      options.apartmentId ?? `apartment-${apartmentNumber}`,
+    ),
+    apartmentNumber,
+  };
+}
+
+/** A participant with a percentage, given in basis points (`3333` is `33.33%`). */
+export function percentFlat(
+  apartmentNumber: string,
+  percentage: number | bigint,
+  options: {
+    readonly memberId?: string;
+    readonly apartmentId?: string;
+  } = {},
+): PercentageParticipant {
+  return {
+    ...flat(apartmentNumber, options),
+    percentage: basisPoints(percentage),
+  };
+}
+
+/** `count` flats numbered from `first` upwards — `101`, `102`, … */
+export function flats(count: number, first = 101): readonly SplitParticipant[] {
+  return Array.from({ length: count }, (_, index) =>
+    flat(String(first + index)),
+  );
+}
+
+/**
+ * An amount from rupee text, through the real parser.
+ *
+ * Deliberately not `Money.fromPaise(10_000)`: a test that writes the amount the
+ * way a treasurer types it is the test that would have caught a parser bug, and
+ * `fromRupees` is the door real amounts come through.
+ */
+export function rupees(text: string): Money {
+  const parsed = Money.fromRupees(text);
+  if (!parsed.ok) {
+    throw new Error(`bad fixture amount "${text}": ${parsed.error.message}`);
+  }
+  return parsed.value;
+}
+
+/** The paise of each part, as strings, so an assertion reads like a ledger. */
+export function partsToPaise(parts: readonly Money[]): string[] {
+  return parts.map((part) => part.paise.toString());
+}
+
+/** The paise of each allocation, as strings. */
+export function allocationsToPaise(
+  allocations: readonly SplitAllocation[],
+): string[] {
+  return allocations.map((allocation) => allocation.amount.paise.toString());
+}
+
+/**
+ * `apartmentNumber:paise` per allocation — the shape an ordering assertion reads
+ * in.
+ *
+ * Ordering is half of what this package decides, so most tests assert on this
+ * rather than on amounts alone: it pins *which* flat got the residual paisa, which
+ * an assertion on the multiset of amounts cannot.
+ */
+export function ledger(allocations: readonly SplitAllocation[]): string[] {
+  return allocations.map(
+    (allocation) =>
+      `${allocation.apartmentNumber}:${allocation.amount.paise.toString()}`,
+  );
+}
+
+/** `Σ allocations`, in paise — the invariant every strategy is held to. */
+export function sumPaise(allocations: readonly SplitAllocation[]): bigint {
+  let total = 0n;
+  for (const allocation of allocations) total += allocation.amount.paise;
+  return total;
+}
+
+/** Unwrap a success, failing the test with the domain message if it is not one. */
+export function expectOk<TValue, TError extends { message: string }>(
+  result: Result<TValue, TError>,
+): TValue {
+  if (!result.ok)
+    throw new Error(`expected success, got: ${result.error.message}`);
+  return result.value;
+}
+
+/** Unwrap a failure, failing the test if the operation unexpectedly succeeded. */
+export function expectErr<TValue, TError>(
+  result: Result<TValue, TError>,
+): TError {
+  if (result.ok) {
+    throw new Error(`expected a failure, got: ${JSON.stringify(result.value)}`);
+  }
+  return result.error;
+}
