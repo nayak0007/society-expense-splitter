@@ -49,6 +49,13 @@
 --      Admin all lose; a rejection needs a reason, keeps it through a re-ask and
 --      loses it to the next approval; and one flat's two claims are both
 --      readable while `uq_primary_occupant` refuses the second primary one.
+--  11. Expense categories (T062): the nineteen seeded rows with their flags, a read
+--      that is member-scoped (an active Resident sees them, a pending applicant and a
+--      stranger see none), a write that is manager-scoped rather than merely
+--      authenticated, `deleted_at`/`deleted_by` and `DELETE` unreachable by DML, and
+--      `expense_category_soft_delete()` refusing a non-member (P0002), a member whose
+--      role is not enough (P0003) and a category an expense still references
+--      (P0001/CATEGORY_HAS_EXPENSES) — while succeeding on an unreferenced one.
 --
 -- MECHANICS THAT MATTER:
 --   * Fixture ids are captured by psql (\gset) while connected as the OWNER,
@@ -75,6 +82,12 @@ BEGIN
   --   * invitations first — `invited_by` references `members` with no cascade,
   --     so a member who invited somebody cannot be hard-deleted while the row
   --     stands;
+  --   * expenses, then their categories (T062) — added after invitations for the
+  --     same shape of reason: both carry a `created_by` referencing `members(id)`,
+  --     and every *seeded* category has one because `seed_society()` stamps the
+  --     society's creator. A member delete ahead of them fails outright, which is
+  --     how this ordering was found rather than reasoned about. Expenses precede
+  --     their categories because `fk_expenses_category_society` has no cascade.
   --   * members next, by society *and* by account — before the flats, because
   --     `fk_members_apartment_society` is ON DELETE SET NULL and a member who is
   --     the flat's primary occupant cannot lose `apartment_id` while
@@ -86,7 +99,16 @@ BEGIN
   --   * then flats, wings and buildings: `apartments_building_id_fkey` is ON
   --     DELETE RESTRICT, so a building cannot go while any flat — live or
   --     removed — points at it.
+
   DELETE FROM invitations WHERE society_id IN (SELECT id FROM societies WHERE created_by IN (SELECT id FROM auth.users WHERE email LIKE '%@canary.ses.test'));
+  -- Expenses and their categories, before the members they name (T062). Both carry a
+  -- `created_by` that references `members(id)` — and unlike a building or a flat, every
+  -- seeded category has one, because `seed_society()` stamps the creator. So this order
+  -- is load-bearing rather than tidy: the member delete below fails outright while a
+  -- single `expense_categories` row still points at it. Expenses first, because
+  -- `fk_expenses_category_society` is a composite key with no cascade.
+  DELETE FROM expenses           WHERE society_id IN (SELECT id FROM societies WHERE created_by IN (SELECT id FROM auth.users WHERE email LIKE '%@canary.ses.test'));
+  DELETE FROM expense_categories WHERE society_id IN (SELECT id FROM societies WHERE created_by IN (SELECT id FROM auth.users WHERE email LIKE '%@canary.ses.test'));
   DELETE FROM members
    WHERE society_id IN (SELECT id FROM societies WHERE created_by IN (SELECT id FROM auth.users WHERE email LIKE '%@canary.ses.test'))
       OR user_id    IN (SELECT id FROM auth.users WHERE email LIKE '%@canary.ses.test');
@@ -1754,6 +1776,257 @@ SELECT _canary_assert(
 COMMIT;
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- 11. Expense categories (T062) — a member-scoped read, a manager-scoped write,
+--     and a tombstone only the definer function can write
+--
+-- Four different gates on one table, and a canary that checked only the first would
+-- pass on a vocabulary every member could rewrite. The seeded set is asserted first
+-- because everything below reads it: nineteen rows per society is what
+-- `seed_society()` promises, and a count is the cheapest way to notice that a
+-- migration stopped seeding it.
+--
+-- `deleted_at` is the interesting column. It is in no INSERT or UPDATE grant and
+-- `DELETE` is granted to nobody, so the only reachable tombstone is
+-- `expense_category_soft_delete()` — which is why this section exercises that
+-- function rather than a DELETE statement.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- ── the seed ─────────────────────────────────────────────────────────────────
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.expense_categories WHERE society_id = :'society_id'::uuid) = 19,
+  'society_create did not seed the nineteen expense categories'
+);
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.expense_categories
+    WHERE society_id = :'society_id'::uuid AND display_order BETWEEN 1 AND 19) = 19,
+  'the seeded display_order is not 1..19 — the picker would show an arbitrary order'
+);
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.expense_categories
+    WHERE society_id = :'society_id'::uuid AND (is_owner_only OR is_capital)) = 2,
+  'is_owner_only/is_capital do not land on exactly the two funds'
+);
+SELECT _canary_assert(
+  (SELECT bool_and(default_split_strategy = 'equal'
+                   AND default_apartment_basis IS NULL
+                   AND is_active
+                   AND gst_applicable = false)
+     FROM public.expense_categories WHERE society_id = :'society_id'::uuid),
+  'a seeded category did not take the column defaults the PRD leaves open'
+);
+
+-- The two categories this section acts on, captured AS THE OWNER: a referenced one and
+-- a free one, so both answers of the delete rule are asserted. The admin''s member id
+-- is captured with them — `expenses.created_by` is NOT NULL and half of a composite FK.
+SELECT (SELECT id FROM public.expense_categories
+         WHERE society_id = :'society_id'::uuid AND name = 'Plumbing')  AS referenced_category_id,
+       (SELECT id FROM public.expense_categories
+         WHERE society_id = :'society_id'::uuid AND name = 'Painting')  AS free_category_id,
+       (SELECT id FROM public.members
+         WHERE society_id = :'society_id'::uuid AND user_id = :'member_uid'::uuid) AS canary_admin_member_id
+\gset
+
+-- An expense that names `Plumbing`, written as the owner. `expenses` has no
+-- `deleted_at` (SAD §8.1 — never deleted, voided instead), so this one row is what makes
+-- the category undeletable for good. `draft` keeps clear of the deferred split-total
+-- constraint, which only a `published` row has to satisfy.
+INSERT INTO public.expenses (
+  society_id, category_id, title, amount_paise, expense_date, split_strategy, status, created_by
+) VALUES (
+  :'society_id'::uuid, :'referenced_category_id'::uuid, 'Canary plumbing',
+  10000::bigint, current_date, 'equal', 'draft', :'canary_admin_member_id'::uuid
+);
+
+-- ── the pending identity, through the real self-join path ────────────────────
+-- `members_insert_self_pending` pins the row to `pending`/`resident` and `role` is not in
+-- the UPDATE grant, so this is the state every applicant is in until a reviewer decides.
+-- Minted here rather than reusing `applicant_uid` because that account is promoted to an
+-- active Treasurer later in this file, and this section needs a membership that is *not*
+-- active.
+SELECT auth.create_local_user('pendingcat@canary.ses.test', 'Canary Pending') AS pending_cat_uid
+\gset
+
+BEGIN;
+SET LOCAL ROLE authenticated;
+SELECT set_config('app.user_id',           :'pending_cat_uid', true);
+SELECT set_config('request.jwt.claims',    jsonb_build_object('sub', :'pending_cat_uid', 'role', 'authenticated')::text, true);
+SELECT set_config('request.jwt.claim.sub', :'pending_cat_uid', true);
+
+INSERT INTO public.members (society_id, user_id, occupancy)
+VALUES (:'society_id'::uuid, :'pending_cat_uid'::uuid, 'owner_occupied');
+
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.expense_categories WHERE society_id = :'society_id'::uuid) = 0,
+  'a pending member read the expense categories — can_view_expenses requires active'
+);
+SELECT _canary_assert(
+  _canary_refuses(format(
+    'INSERT INTO public.expense_categories (society_id, name) VALUES (%L::uuid, %L)',
+    :'society_id', 'Pending Category'
+  )),
+  'a pending member wrote an expense category'
+);
+COMMIT;
+
+-- ── the role the read must admit and the write must refuse ───────────────────
+-- An active Resident. Inserted by the owner because the self-join path cannot reach
+-- `active` without a reviewer''s decision, and this section is about categories.
+SELECT auth.create_local_user('catresident@canary.ses.test', 'Canary Resident') AS cat_resident_uid
+\gset
+INSERT INTO public.members (society_id, user_id, display_name, role, status, occupancy)
+VALUES (:'society_id'::uuid, :'cat_resident_uid'::uuid, 'Canary Resident',
+        'resident', 'active', 'owner_occupied')
+RETURNING id AS cat_resident_member_id
+\gset
+
+BEGIN;
+SET LOCAL ROLE authenticated;
+SELECT set_config('app.user_id',           :'cat_resident_uid', true);
+SELECT set_config('request.jwt.claims',    jsonb_build_object('sub', :'cat_resident_uid', 'role', 'authenticated')::text, true);
+SELECT set_config('request.jwt.claim.sub', :'cat_resident_uid', true);
+
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.expense_categories WHERE society_id = :'society_id'::uuid) = 19,
+  'an active Resident cannot read the expense categories — expense.view is theirs'
+);
+-- `INSERT` and not `UPDATE`: a WITH CHECK *raises*, while a USING clause merely filters
+-- rows, so an insert is the write whose refusal is observable at the SQLSTATE.
+SELECT _canary_assert(
+  _canary_refuses(format(
+    'INSERT INTO public.expense_categories (society_id, name) VALUES (%L::uuid, %L)',
+    :'society_id', 'Resident Category'
+  )),
+  'a Resident wrote an expense category — the manager policy did not refuse it'
+);
+COMMIT;
+
+-- ── a non-member: no read, no write, no function ─────────────────────────────
+BEGIN;
+SET LOCAL ROLE authenticated;
+SELECT set_config('app.user_id',           :'stranger_uid', true);
+SELECT set_config('request.jwt.claims',    jsonb_build_object('sub', :'stranger_uid', 'role', 'authenticated')::text, true);
+SELECT set_config('request.jwt.claim.sub', :'stranger_uid', true);
+
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.expense_categories WHERE society_id = :'society_id'::uuid) = 0,
+  'a non-member read another society''s expense categories'
+);
+SELECT _canary_assert(
+  _canary_refuses(format(
+    'INSERT INTO public.expense_categories (society_id, name) VALUES (%L::uuid, %L)',
+    :'society_id', 'Stranger Category'
+  )),
+  'a non-member wrote an expense category'
+);
+-- The function''s own 404-before-403: `assert_society_membership` runs first, so a
+-- stranger cannot tell another tenant''s society from a non-existent one (PRD T041).
+SELECT _canary_assert(
+  _canary_refuses(format(
+    'SELECT public.expense_category_soft_delete(%L::uuid, %L::uuid)',
+    :'free_category_id', :'society_id'
+  )),
+  'a non-member reached the category soft-delete function'
+);
+COMMIT;
+
+-- ── a manager: create, rename, and the columns no client may write ───────────
+BEGIN;
+SET LOCAL ROLE authenticated;
+SELECT set_config('app.user_id',           :'member_uid', true);
+SELECT set_config('request.jwt.claims',    jsonb_build_object('sub', :'member_uid', 'role', 'authenticated')::text, true);
+SELECT set_config('request.jwt.claim.sub', :'member_uid', true);
+
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.expense_categories WHERE society_id = :'society_id'::uuid) = 19,
+  'an active Admin cannot read the society''s expense categories'
+);
+INSERT INTO public.expense_categories (society_id, name, display_order)
+VALUES (:'society_id'::uuid, 'Canary Amenity', 20);
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.expense_categories WHERE society_id = :'society_id'::uuid) = 20,
+  'an Admin could not create an expense category'
+);
+UPDATE public.expense_categories SET name = 'Canary Amenity Renamed'
+ WHERE society_id = :'society_id'::uuid AND name = 'Canary Amenity';
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.expense_categories
+    WHERE society_id = :'society_id'::uuid AND name = 'Canary Amenity Renamed') = 1,
+  'an Admin could not rename an expense category'
+);
+
+-- The tombstone columns are in no grant and DELETE is granted to nobody, so a client
+-- that skipped the capability check still cannot remove a category by DML.
+SELECT _canary_assert(
+  _canary_refuses(format(
+    'UPDATE public.expense_categories SET deleted_at = now() WHERE id = %L::uuid',
+    :'free_category_id'
+  )),
+  '`deleted_at` is writable by a client — the soft delete is not function-only'
+);
+SELECT _canary_assert(
+  _canary_refuses(format(
+    'DELETE FROM public.expense_categories WHERE id = %L::uuid', :'free_category_id'
+  )),
+  'a client hard-deleted an expense category'
+);
+COMMIT;
+
+-- ── the soft delete: a Resident, a reference, and a free category ────────────
+BEGIN;
+SET LOCAL ROLE authenticated;
+SELECT set_config('app.user_id',           :'cat_resident_uid', true);
+SELECT set_config('request.jwt.claims',    jsonb_build_object('sub', :'cat_resident_uid', 'role', 'authenticated')::text, true);
+SELECT set_config('request.jwt.claim.sub', :'cat_resident_uid', true);
+SELECT _canary_assert(
+  _canary_refuses(format(
+    'SELECT public.expense_category_soft_delete(%L::uuid, %L::uuid)',
+    :'free_category_id', :'society_id'
+  )),
+  'a Resident removed an expense category — only an Admin or Treasurer may'
+);
+COMMIT;
+
+BEGIN;
+SET LOCAL ROLE authenticated;
+SELECT set_config('app.user_id',           :'member_uid', true);
+SELECT set_config('request.jwt.claims',    jsonb_build_object('sub', :'member_uid', 'role', 'authenticated')::text, true);
+SELECT set_config('request.jwt.claim.sub', :'member_uid', true);
+
+-- A category an expense still names is not removable, whatever the caller''s role —
+-- the refusal is about the row''s references rather than about the caller.
+SELECT _canary_assert(
+  _canary_refuses(format(
+    'SELECT public.expense_category_soft_delete(%L::uuid, %L::uuid)',
+    :'referenced_category_id', :'society_id'
+  )),
+  'a category an expense references was removed — the reference check did not fire'
+);
+SELECT _canary_assert(
+  (SELECT deleted_at IS NULL FROM public.expense_categories WHERE id = :'referenced_category_id'::uuid),
+  'the refused removal left a tombstone behind'
+);
+
+-- …and an unreferenced one is removable, by the function rather than by DML.
+SELECT public.expense_category_soft_delete(:'free_category_id'::uuid, :'society_id'::uuid);
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.expense_categories
+    WHERE society_id = :'society_id'::uuid AND name = 'Painting' AND deleted_at IS NULL) = 0,
+  'the soft-deleted category is still in the live set'
+);
+SELECT _canary_assert(
+  (SELECT deleted_at IS NOT NULL FROM public.expense_categories WHERE id = :'free_category_id'::uuid),
+  'the soft delete left no tombstone — the row was not kept for its history'
+);
+-- The index is partial on live rows, so the freed name is usable again.
+INSERT INTO public.expense_categories (society_id, name) VALUES (:'society_id'::uuid, 'Painting');
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.expense_categories
+    WHERE society_id = :'society_id'::uuid AND name = 'Painting' AND deleted_at IS NULL) = 1,
+  'the removed name was not freed — the unique index is not partial on live rows'
+);
+COMMIT;
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Cleanup: leave no fixture rows behind
 -- ─────────────────────────────────────────────────────────────────────────────
 SELECT _canary_reset();
@@ -1761,4 +2034,4 @@ DROP FUNCTION IF EXISTS _canary_reset();
 DROP FUNCTION IF EXISTS _canary_assert(boolean, text);
 DROP FUNCTION IF EXISTS _canary_refuses(text);
 
-\echo 'RLS canary passed: auth.uid() resolves, member sees own society, stranger sees none, join preview resolves, buildings and apartments read/write/delete are member-, Admin- and function-scoped, a building with live flats refuses removal, the role writes are Admin-only with the 2-treasurer/3-admin caps, no self-change and no last-admin demotion, an invitation''s token hash is unreadable while its acceptance is recipient-matched, state-ordered and single-use (with a shadow member linked rather than duplicated), and a join request is a pending row — narrowed self-insert, no duplicate for one account, code-keyed options, one locked reviewer-resolved decision consumed once, a reason on every rejection, and one flat''s two claims both visible.'
+\echo 'RLS canary passed: auth.uid() resolves, member sees own society, stranger sees none, join preview resolves, buildings and apartments read/write/delete are member-, Admin- and function-scoped, a building with live flats refuses removal, the role writes are Admin-only with the 2-treasurer/3-admin caps, no self-change and no last-admin demotion, an invitation''s token hash is unreadable while its acceptance is recipient-matched, state-ordered and single-use (with a shadow member linked rather than duplicated), and a join request is a pending row — narrowed self-insert, no duplicate for one account, code-keyed options, one locked reviewer-resolved decision consumed once, a reason on every rejection, and one flat''s two claims both visible; and the expense categories are seeded nineteen per society with their two flags, readable by every active member and by nobody else, writable only by an Admin or Treasurer through policies whose `deleted_at` and DELETE are unreachable, with the soft delete a definer function that refuses a non-member, a Resident and any category an expense still names.'

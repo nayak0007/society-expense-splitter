@@ -7,6 +7,8 @@ import type { JWTVerifyGetKey } from "jose";
 import type {
   ApartmentRepository,
   BuildingRepository,
+  ExpenseCategoryRepository,
+  ExpenseReferenceReader,
   InvitationRepository,
   InvitationTokenPort,
   MemberRepository,
@@ -28,6 +30,10 @@ import {
   INVITATION_REPOSITORY,
   INVITATION_TOKENS,
 } from "../../src/modules/invitations/application/invitation.tokens";
+import {
+  EXPENSE_CATEGORY_REPOSITORY,
+  EXPENSE_REFERENCE_READER,
+} from "../../src/modules/expenses/application/expense-category.tokens";
 import { MEMBER_REPOSITORY } from "../../src/modules/members/application/member.tokens";
 import { SOCIETY_REPOSITORY } from "../../src/modules/societies/application/society.tokens";
 import {
@@ -157,6 +163,22 @@ export type TestAppOptions = {
    */
   invitationTokens?: InvitationTokenPort;
   /**
+   * Substitutes the expense-category storage (T062) — **both** ports at once.
+   *
+   * One seam rather than two, and that is a deliberate departure from the
+   * one-seam-per-port shape above: `EXPENSE_CATEGORY_REPOSITORY` and
+   * `EXPENSE_REFERENCE_READER` are bound to the *same* adapter in production, and a
+   * suite that replaced only one would leave the real Postgres adapter in the graph for
+   * the other — so the category routes would reach for a database the moment a delete
+   * counted references. The fake implements both interfaces (it holds the "expenses"
+   * of a category as a number it can set), which is what makes one seam honest here.
+   *
+   * When T063 lands its own expense repository the two ports gain separate owners, and
+   * this seam splits then — not before, because splitting it now would mean inventing a
+   * second fake for a table no route writes.
+   */
+  categories?: ExpenseCategoryRepository & ExpenseReferenceReader;
+  /**
    * Substitutes the caller's membership read used by the building use cases.
    *
    * Separate from `reader` (which `SocietyGuard` uses) even though both are
@@ -258,6 +280,13 @@ export async function createTestApp(
     builder
       .overrideProvider(MEMBERSHIP_READER)
       .useValue(options.membershipReader);
+  }
+  if (options.categories !== undefined) {
+    builder
+      .overrideProvider(EXPENSE_CATEGORY_REPOSITORY)
+      .useValue(options.categories)
+      .overrideProvider(EXPENSE_REFERENCE_READER)
+      .useValue(options.categories);
   }
 
   const moduleRef = await builder.compile();

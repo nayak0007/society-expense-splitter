@@ -1,5 +1,6 @@
 import {
   DomainError,
+  type ApartmentBasis,
   type ApartmentId,
   type DomainErrorInit,
   type MemberId,
@@ -116,15 +117,14 @@ export function splitError(
  * exhaustive `switch` over this union, a strategy added here without a branch of
  * its own is a compile error too.
  */
-export const SPLIT_STRATEGIES = [
-  "equal",
-  "percentage",
-  "shares",
-  "apartment",
-  "custom",
-] as const;
-
-export type SplitStrategy = (typeof SPLIT_STRATEGIES)[number];
+// The vocabulary moved to `@ses/domain` in T062
+// (`packages/domain/src/shared/split-vocabulary.ts`), which is where the full
+// rationale for the five arms and the six bases now lives. Re-exported rather than
+// re-declared so there is exactly one spelling: `@ses/contracts` and
+// `@ses/application` may import the domain but not this package, and a second
+// literal is the drift the PRD's "a preview must equal the bill" rule cannot
+// survive. `planSplit`'s exhaustive `switch` over this union is unchanged.
+export { SPLIT_STRATEGIES, type SplitStrategy } from "@ses/domain";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Percentages
@@ -231,16 +231,8 @@ export function basisPoints(value: bigint | number): BasisPoints {
  * resolution decision into the engine — the boundary {@link SplitParticipant}
  * documents.
  */
-export const APARTMENT_BASES = [
-  "per_flat",
-  "per_sqft_carpet",
-  "per_sqft_builtup",
-  "per_bhk",
-  "per_floor_band",
-  "per_parking_slot",
-] as const;
-
-export type ApartmentBasis = (typeof APARTMENT_BASES)[number];
+// Defined in `@ses/domain` — see the note above the strategy re-export.
+export { APARTMENT_BASES, type ApartmentBasis } from "@ses/domain";
 
 /**
  * The five bases that read a fact off each participant and nothing else.

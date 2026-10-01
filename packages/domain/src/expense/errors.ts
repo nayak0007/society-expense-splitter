@@ -19,6 +19,21 @@ import type { DomainErrorInit } from "../shared/errors";
  *    because the screen that collects it needs a specific message, not a generic
  *    "invalid".
  *
+ * T062 adds four, and they are the same four every writable module has plus one of
+ * its own:
+ *
+ *  - `not_found` — "the caller may not know this exists", which the API renders as
+ *    `404` rather than `403` because a distinguishable answer lets a caller
+ *    enumerate another tenant's vocabulary (SAD §7.2, PRD T041);
+ *  - `forbidden` — the caller is an active member whose role is not enough;
+ *  - `conflict` — a duplicate category name, well-formed payload but a state that
+ *    refuses it;
+ *  - `category_has_expenses` — a deletion refused because an expense references the
+ *    category. Its own code rather than a `conflict`, for the reason
+ *    `building_has_apartments` is: the two need different copy, and collapsing them
+ *    would force the UI to match on message text to tell "rename it" from
+ *    "deactivate it instead".
+ *
  * A union per module rather than one global list, exactly as `InvitationError` and
  * `MemberError` record: the API's `Record<ExpenseErrorCode, ErrorCode>` mapper then
  * *fails the build* when a code gains no HTTP meaning, which is the property that
@@ -30,6 +45,10 @@ export const EXPENSE_ERROR_CODES = [
   "invalid_transition",
   "split_mismatch",
   "void_reason_too_short",
+  "not_found",
+  "forbidden",
+  "conflict",
+  "category_has_expenses",
   "unknown",
 ] as const;
 

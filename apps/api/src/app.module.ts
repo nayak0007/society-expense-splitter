@@ -16,6 +16,7 @@ import { AppConfigModule } from "./config/config.module";
 import { AppConfig } from "./config/app-config";
 import { CacheModule } from "./infrastructure/cache/cache.module";
 import { DatabaseModule } from "./infrastructure/database/database.module";
+import { ExpensesModule } from "./modules/expenses/expenses.module";
 import { HealthModule } from "./modules/health/health.module";
 import { InvitationsModule } from "./modules/invitations/invitations.module";
 import { MembersModule } from "./modules/members/members.module";
@@ -62,6 +63,10 @@ import { buildLoggerParams } from "./observability/logger";
     // needs. The route shapes (society-scoped management, a public preview, an authenticated
     // acceptance) are documented in its controller.
     InvitationsModule,
+    // T062's expense categories: the first slice of the expenses module. It imports
+    // SocietiesModule for the same narrow membership read the structure module uses, and
+    // declares no provider of its own for it — see the module for why that is the whole point.
+    ExpensesModule,
   ],
   providers: [
     // T048 — the member module's bulk import reads the invitations module's repository

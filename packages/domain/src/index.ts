@@ -21,11 +21,13 @@
  *                 lifecycle rules and its repository/token ports. It reads the
  *                 member module's matrix for who may invite whom rather than
  *                 restating it.
- *  - `expense/`  — the Expenses module (T061): the Expense aggregate, its lifecycle
- *                 state machine and the split-total invariant, the `ExpenseSplit`
- *                 value object and the two domain events. It owns no persistence and
- *                 no split calculation; `@ses/split-engine` depends on this package,
- *                 never the reverse.
+ *  - `expense/`  — the Expenses module (T061, T062): the Expense aggregate, its
+ *                 lifecycle state machine and the split-total invariant, the
+ *                 `ExpenseSplit` value object and the two domain events; plus the
+ *                 `ExpenseCategory` entity with its value objects, capability rules
+ *                 and repository port. It owns no persistence and no split
+ *                 calculation; `@ses/split-engine` depends on this package, never the
+ *                 reverse.
  *
  * Use cases are deliberately NOT here. They are the application layer
  * (`@ses/application`), which depends on this package and never the other way
@@ -38,6 +40,7 @@ export * from "./shared/ids";
 export * from "./shared/money";
 export * from "./shared/money.vo";
 export * from "./shared/result";
+export * from "./shared/split-vocabulary";
 
 export * from "./society/society";
 export * from "./society/join-code";
@@ -56,10 +59,14 @@ export * from "./structure/value-objects";
 export * from "./invitation/errors";
 export * from "./invitation/invitation";
 export * from "./invitation/ports";
+export * from "./expense/category-value-objects";
 export * from "./expense/errors";
 export * from "./expense/events";
+export * from "./expense/expense-category";
 export * from "./expense/expense-split.vo";
 export * from "./expense/expense.entity";
+export * from "./expense/ports";
+export * from "./expense/rules";
 export * from "./member/csv-import";
 export * from "./member/errors";
 export * from "./member/join-requests";
