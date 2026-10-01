@@ -68,6 +68,8 @@ open behind the two that are named.
 
 > **Post-fix re-run (2026-09-30, join-approval role correction).** The corrected-role fix added eight integration tests and one translation line in the member adapter; the gate now measures `@ses/api` at **82.38 / 70.46 / 87.57 / 82.28** (2,372/2,879 · 1,076/1,527 · 557/636 · 2,258/2,744) over **40 suites / 743 tests**, and `pnpm test:coverage` still exits 0. The thresholds are unchanged; the figures above are the T014 snapshot that closed the gap.
 
+> **T060 re-measure (2026-10-01, expense schema).** T060 adds no production API code — only a migration, the `@ses/db-schema` column modules and one integration spec — so `@ses/api` measures the same **82.38 / 70.46 / 87.57 / 82.28** over **41 suites / 779 tests** (743 + the 36 expense-schema tests), and `pnpm test:coverage` still exits 0. `@ses/split-engine` stays **100 / 100 / 100 / 100** over **16 suites / 194 tests** (its task replays from the Turbo cache, T059's measurement unchanged), `@ses/domain` 15 suites / 397 tests, `@ses/application` 9 suites / 257 tests. No threshold, exclusion or measured-file set changed.
+
 So `pnpm test:coverage` exits 0 today and the CI test job is green. `@ses/api` is
 measured over its complete automated test surface (unit + integration + e2e, §4);
 the row was not lowered, scoped or excluded to get there — the missing coverage
