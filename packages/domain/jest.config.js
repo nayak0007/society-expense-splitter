@@ -51,5 +51,9 @@ module.exports = {
     global: { statements: 80, branches: 70, functions: 80, lines: 80 },
     "./src/shared/money*": { lines: 100, branches: 100 },
     "./src/member/permission-evaluator*": { lines: 100, branches: 100 },
+    // Roadmap T061's own row: "90%+ coverage" on the Expense aggregate and its
+    // value object. A path row rather than an aspiration in prose — the financial
+    // core's rules are the ones a diluted global number would hide.
+    "./src/expense/**": { lines: 90, branches: 90 },
   },
 };

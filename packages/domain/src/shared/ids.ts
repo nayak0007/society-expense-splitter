@@ -19,6 +19,15 @@ export type BuildingId = Brand<string, "BuildingId">;
 export type WingId = Brand<string, "WingId">;
 export type ApartmentId = Brand<string, "ApartmentId">;
 export type InvitationId = Brand<string, "InvitationId">;
+export type ExpenseId = Brand<string, "ExpenseId">;
+/**
+ * A row of `expense_categories`, the per-society category list (PRD §3.5).
+ *
+ * Branded separately from `ExpenseId` for the same reason every id is branded:
+ * a category id passed where an expense id belongs is the class of bug this file
+ * exists to make uncompilable.
+ */
+export type ExpenseCategoryId = Brand<string, "ExpenseCategoryId">;
 
 /** Boundary helpers — the only place a raw string becomes a branded id. */
 export const asUserId = (value: string): UserId => value as UserId;
@@ -30,3 +39,6 @@ export const asApartmentId = (value: string): ApartmentId =>
   value as ApartmentId;
 export const asInvitationId = (value: string): InvitationId =>
   value as InvitationId;
+export const asExpenseId = (value: string): ExpenseId => value as ExpenseId;
+export const asExpenseCategoryId = (value: string): ExpenseCategoryId =>
+  value as ExpenseCategoryId;
