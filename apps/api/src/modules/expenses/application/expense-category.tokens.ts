@@ -14,7 +14,7 @@
  * `useExisting` instance today, and they are still two tokens rather than one. That is
  * deliberate: they are two *ports* with two owners-to-be. `ExpenseCategoryRepository`
  * is this module's; `ExpenseReferenceReader` counts rows in `expenses` and is declared
- * narrow precisely so that T063's expense repository can satisfy it without the
+ * narrow precisely so that T065's expense repository can satisfy it without the
  * `deleteExpenseCategory` use case changing a line. Collapsing them into one token
  * would make that re-binding a change to the module's wiring *and* to a use case's
  * dependencies, which is the coupling the narrow port exists to avoid.

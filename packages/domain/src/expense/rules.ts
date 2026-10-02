@@ -116,3 +116,61 @@ export function evaluateExpenseCategoryCapabilities(
     canView: canViewExpenseCategories(membership.role).allowed,
   };
 }
+
+/**
+ * May this role decide **who an expense is charged to** (Roadmap T063)?
+ *
+ * The matrix's cell is `expense.create` — “Add expense” — and it is the *lowest*
+ * privilege that composes a split, which is the question resolution answers. It is
+ * deliberately not `expense.publish` (“Define split rules”): a Committee Member may
+ * draft an expense with `scoped` rights, and a draft the treasurer is building still
+ * needs to know which flats it would hit — the preview (T064) is that screen. It is
+ * also not `expense.view`: resolution returns *who will be billed*, which is a
+ * composition-time fact, not a reading of what was already charged.
+ *
+ * No new action was invented, for the reason T062's category rules record: a second
+ * action beside `expense.create` would be a second thing to keep in step with the
+ * matrix, and the guard chain that will front these routes already speaks this one.
+ *
+ * There is no resource-level narrowing: the cell is green (`full` for Admin and
+ * Treasurer, `scoped` for Committee Members) and a selector has no owner or draft
+ * state of its own, so `canOnResource` has nothing to ask about — the tenant question
+ * is the `societyId` every query already carries.
+ */
+export function canResolveExpenseParticipants(
+  role: MemberRole | null,
+): RuleOutcome {
+  if (role !== null && can(role, "expense.create")) return RULE_ALLOWED;
+  return {
+    allowed: false,
+    reason:
+      "Only a society Admin, Treasurer or Committee Member can choose who an expense is charged to.",
+  };
+}
+
+/** Everything a screen may offer around participant resolution. */
+export interface ExpenseParticipantCapabilities {
+  /** Run a resolution — the preview's and the publish path's one question. */
+  readonly canResolve: boolean;
+}
+
+const NO_PARTICIPANT_CAPABILITIES: ExpenseParticipantCapabilities = {
+  canResolve: false,
+};
+
+/**
+ * The capability block, derived once from one membership.
+ *
+ * The `pending` and `removed` cases are folded into "nothing" for the reason
+ * `evaluateExpenseCategoryCapabilities` records: a pending member's grant is a grant
+ * on a membership the society has not admitted, and T060's own predicates require
+ * `status = 'active'` outright.
+ */
+export function evaluateExpenseParticipantCapabilities(
+  membership: SocietyMembership | null,
+): ExpenseParticipantCapabilities {
+  if (membership === null || membership.status !== "active") {
+    return NO_PARTICIPANT_CAPABILITIES;
+  }
+  return { canResolve: canResolveExpenseParticipants(membership.role).allowed };
+}

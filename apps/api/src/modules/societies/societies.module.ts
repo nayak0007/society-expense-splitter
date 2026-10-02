@@ -97,6 +97,18 @@ import { SocietiesController } from "./presentation/societies.controller";
   // interfaces live in `common/authorization/` (or in `@ses/domain`) and both
   // implementations live here, so the dependency still points inward; these two
   // lines are what make the container agree with that.
-  exports: [SocietyOperations, SOCIETY_AUTHORIZATION_READER, MEMBERSHIP_READER],
+  //
+  // `SOCIETY_REPOSITORY` is exported for the expenses module (T063), which needs one
+  // field of a society's settings — `bill_vacant_flats` — to resolve participants. It
+  // is the same borrow as `MEMBERSHIP_READER`, and it is deliberately the *port*
+  // rather than a new narrow adapter: `ExpenseSocietyReader` in `@ses/domain` is a
+  // structural subset of this interface (`findById`), so the expenses module binds its
+  // token to this provider and no second reader of `society_settings` can exist.
+  exports: [
+    SocietyOperations,
+    SOCIETY_AUTHORIZATION_READER,
+    MEMBERSHIP_READER,
+    SOCIETY_REPOSITORY,
+  ],
 })
 export class SocietiesModule {}

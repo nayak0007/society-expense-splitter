@@ -14,6 +14,13 @@ import type {
 import request from "supertest";
 
 import type { SocietyAuthorizationContext } from "../src/common/authorization/society-authorization";
+import { ParticipantResolverService } from "../src/modules/expenses/application/participant-resolver.service";
+import {
+  EXPENSE_PARTICIPANT_READER,
+  EXPENSE_SOCIETY_READER,
+} from "../src/modules/expenses/application/participant.tokens";
+import { ExpenseParticipantRepositoryPostgres } from "../src/modules/expenses/infrastructure/participant.repository";
+import { SOCIETY_REPOSITORY } from "../src/modules/societies/application/society.tokens";
 import {
   createFakeCategoryRepository,
   type FakeCategoryRepository,
@@ -914,5 +921,33 @@ describe("the SAD §7.10 envelope", () => {
     });
     expect(refused.body.error).toBeDefined();
     expect(refused.body.data).toBeUndefined();
+  });
+});
+
+describe("participant resolution wiring (T063)", () => {
+  it("resolves the resolver's four reads from the container, with no route of its own", async () => {
+    // T063's row names `ParticipantResolverService` and this module, and no route:
+    // resolution is internal until T064's preview and T066's publish call it. Minting
+    // an endpoint here would be a route nobody asked for, behind a permission nobody
+    // chose — so what is asserted is that the container can build the service, which is
+    // the property a future route needs to have.
+    expect(app.get(ParticipantResolverService)).toBeInstanceOf(
+      ParticipantResolverService,
+    );
+
+    // Each port is bound to exactly one provider, and the participant reader is this
+    // module's own adapter — the reason the token exists rather than the class name
+    // being injected directly.
+    expect(app.get(EXPENSE_PARTICIPANT_READER)).toBeInstanceOf(
+      ExpenseParticipantRepositoryPostgres,
+    );
+
+    // The society read is *borrowed*: the same object `SocietiesModule` exports, so
+    // `bill_vacant_flats` has one implementation to drift and this module owns no SQL
+    // over another module's tables.
+    expect(app.get(EXPENSE_SOCIETY_READER)).toBe(app.get(SOCIETY_REPOSITORY));
+
+    // And nothing was mounted for it: the API's route table is T062's, unchanged —
+    // asserted where routes are enumerated rather than here.
   });
 });

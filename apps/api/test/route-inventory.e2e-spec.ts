@@ -271,6 +271,17 @@ describe("route inventory", () => {
     expect(unnarrowed).toEqual([]);
   });
 
+  it("mounts no participant-resolution route — T063's resolver is internal", () => {
+    // T063's row names a service and a module, no controller: resolution is called by
+    // T064's preview and T066's publish, so the API's route table must be exactly the
+    // one T062 shipped. A controller added here would also fail the permission test
+    // above — but only until somebody gave it a permission; this assertion names the
+    // intent instead of relying on the accident.
+    expect(routes.filter((route) => /participant/i.test(route.path))).toEqual(
+      [],
+    );
+  });
+
   it("inventories the guarded surface it claims to", () => {
     // A sanity check on coverage of the inventory's own claims: if the structure,
     // member, invitation and join-request surfaces are all header-scoped, their

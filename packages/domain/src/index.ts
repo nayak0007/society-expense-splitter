@@ -21,13 +21,15 @@
  *                 lifecycle rules and its repository/token ports. It reads the
  *                 member module's matrix for who may invite whom rather than
  *                 restating it.
- *  - `expense/`  — the Expenses module (T061, T062): the Expense aggregate, its
+ *  - `expense/`  — the Expenses module (T061–T063): the Expense aggregate, its
  *                 lifecycle state machine and the split-total invariant, the
- *                 `ExpenseSplit` value object and the two domain events; plus the
+ *                 `ExpenseSplit` value object and the two domain events; the
  *                 `ExpenseCategory` entity with its value objects, capability rules
- *                 and repository port. It owns no persistence and no split
- *                 calculation; `@ses/split-engine` depends on this package, never the
- *                 reverse.
+ *                 and repository port; and (T063) the participant selector with the
+ *                 pure resolution core — which flats a selector bills, who each
+ *                 charge is addressed to, and owner-only routing. It owns no
+ *                 persistence and no split calculation; `@ses/split-engine` depends
+ *                 on this package, never the reverse.
  *
  * Use cases are deliberately NOT here. They are the application layer
  * (`@ses/application`), which depends on this package and never the other way
@@ -65,6 +67,8 @@ export * from "./expense/events";
 export * from "./expense/expense-category";
 export * from "./expense/expense-split.vo";
 export * from "./expense/expense.entity";
+export * from "./expense/participant-resolution";
+export * from "./expense/participant-selector";
 export * from "./expense/ports";
 export * from "./expense/rules";
 export * from "./member/csv-import";

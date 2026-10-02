@@ -27,7 +27,7 @@ import {
 } from "./category.rows";
 
 /**
- * `ExpenseCategoryRepository` over Postgres, under RLS — and, until T063 lands its own
+ * `ExpenseCategoryRepository` over Postgres, under RLS — and, until T065 lands its own
  * adapter, `ExpenseReferenceReader` as well.
  *
  * ## The identity is the transaction, not an argument

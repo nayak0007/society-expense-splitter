@@ -1,18 +1,25 @@
 import { Module } from "@nestjs/common";
 
 import { DatabaseModule } from "../../infrastructure/database/database.module";
+import { SOCIETY_REPOSITORY } from "../societies/application/society.tokens";
 import { SocietiesModule } from "../societies/societies.module";
 import { ExpenseCategoryOperations } from "./application/expense-category.operations";
 import {
   EXPENSE_CATEGORY_REPOSITORY,
   EXPENSE_REFERENCE_READER,
 } from "./application/expense-category.tokens";
+import { ParticipantResolverService } from "./application/participant-resolver.service";
+import {
+  EXPENSE_PARTICIPANT_READER,
+  EXPENSE_SOCIETY_READER,
+} from "./application/participant.tokens";
 import { ExpenseCategoryRepositoryPostgres } from "./infrastructure/category.repository";
+import { ExpenseParticipantRepositoryPostgres } from "./infrastructure/participant.repository";
 import { ExpenseCategoriesController } from "./presentation/categories.controller";
 
 /**
- * The expenses feature module — Roadmap T062 (categories), with T063 (expense CRUD,
- * publishing, previews, attachments) still to come.
+ * The expenses feature module — Roadmap T062 (categories) and T063 (participant
+ * resolution), with expense CRUD, publishing, previews and attachments still to come.
  *
  * ## The dependency direction is the module's whole content
  *
@@ -23,11 +30,31 @@ import { ExpenseCategoriesController } from "./presentation/categories.controlle
  *                          │                  ExpenseCategoryRepositoryPostgres
  *                          │                              │
  *                          │                              └─ reads `expenses` too,
- *                          │                                 until T063's adapter lands
+ *                          │                                 until T065/T066's adapter lands
  *                          │
  *                          └──▶ MEMBERSHIP_READER ──▶ SocietyRepositoryPostgres
  *                                   (common/)              (SocietiesModule)
+ *
+ * (T063, no route yet)
+ * ParticipantResolverService ──▶ ExpenseParticipantReader  (port, @ses/domain)
+ *          │                              ▲
+ *          │                  ExpenseParticipantRepositoryPostgres
+ *          │                              └─ reads `apartments`, `members`, `wings`,
+ *          │                                 `buildings` — a projection, never a write
+ *          ├──▶ ExpenseCategoryRepository ─▶ the category's `is_owner_only`
+ *          ├──▶ ExpenseSocietyReader ──────▶ SocietyRepositoryPostgres
+ *          │        (port, @ses/domain)         (SocietiesModule, for `bill_vacant_flats`)
+ *          └──▶ MEMBERSHIP_READER ────────▶ SocietyRepositoryPostgres
  * ```
+ *
+ * ## Why the resolver is a provider with no controller
+ *
+ * T063's row names this module and the service file, and **no route**: resolution is an
+ * internal capability whose two real callers are T064's preview endpoint and T066's
+ * publish path, neither of which exists yet. A controller here would be a route nobody
+ * asked for, behind a permission nobody chose — so the module exposes the service and
+ * the e2e suite proves the graph resolves, which is the property that matters until a
+ * route needs it.
  *
  * The arrows point one way, and this file is where that is enforced rather than
  * described: the interface token is what the application layer binds to, so the adapter
@@ -42,7 +69,7 @@ import { ExpenseCategoriesController } from "./presentation/categories.controlle
  * `ExpenseCategoryRepositoryPostgres` through `useExisting`, which means they resolve to
  * the *same object* — one adapter, so a second copy of the reads cannot exist. They stay
  * two tokens because they are two ports with two owners-to-be: the reference reader is the
- * narrow read T063's expense repository will satisfy, and re-binding it then must not
+ * narrow read T065's expense repository will satisfy, and re-binding it then must not
  * mean changing anything in the application layer. See `expense-category.tokens.ts`.
  *
  * ## Why `SocietiesModule` is imported
@@ -83,6 +110,23 @@ import { ExpenseCategoriesController } from "./presentation/categories.controlle
     {
       provide: EXPENSE_REFERENCE_READER,
       useExisting: ExpenseCategoryRepositoryPostgres,
+    },
+    // T063's resolver, and the three reads it composes. One instance per token, so a
+    // test that swaps the participant reader cannot leave a second, real one in the
+    // graph — the same reason the two category tokens exist.
+    ParticipantResolverService,
+    ExpenseParticipantRepositoryPostgres,
+    {
+      provide: EXPENSE_PARTICIPANT_READER,
+      useExisting: ExpenseParticipantRepositoryPostgres,
+    },
+    {
+      provide: EXPENSE_SOCIETY_READER,
+      // The society module's own repository, borrowed through its exported token:
+      // `ExpenseSocietyReader` is a structural subset of `SocietyRepository`
+      // (`findById`), so this module reads `bill_vacant_flats` without owning SQL over
+      // a table that is not its own.
+      useExisting: SOCIETY_REPOSITORY,
     },
   ],
 })

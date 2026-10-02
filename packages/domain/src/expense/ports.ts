@@ -1,4 +1,14 @@
-import type { ExpenseCategoryId, SocietyId, UserId } from "../shared/ids";
+import type {
+  ApartmentId,
+  BuildingId,
+  ExpenseCategoryId,
+  MemberId,
+  SocietyId,
+  UserId,
+  WingId,
+} from "../shared/ids";
+import type { MemberOccupancy } from "../member/member";
+import type { OccupancyStatus } from "../structure/apartment";
 import type { SocietyMembership } from "../society/society";
 
 import type {
@@ -40,7 +50,7 @@ export interface ExpenseCategoryRepository {
    * resolved it from a different source would be a second vocabulary.
    *
    * Nothing is lost by it: `isActive` travels on every row, and the *expense* form
-   * (T063) filters on it — that is the picker's rule, not this read's.
+   * (T065) filters on it — that is the picker's rule, not this read's.
    *
    * ## No pagination, no search, no filter
    *
@@ -141,9 +151,9 @@ export interface ExpenseCategoryRepository {
  * ## Why it is declared here, and who will implement it
  *
  * Today the expenses module has no persistence — T061 deliberately kept the
- * aggregate pure, and T063 owns the expense write path — so this port is declared at
- * its point of use and satisfied by this module's adapter, which is the only thing
- * that can read `expenses` until then. When T063 lands its repository, the token can
+ * aggregate pure, and T065/T066 own the expense write path — so this port is declared
+ * at its point of use and satisfied by this module's adapter, which is the only thing
+ * that can read `expenses` until then. When T065 lands its repository, the token can
  * be re-bound to it without the use case changing a line: that is the whole point of
  * declaring the narrow read rather than reaching for a table.
  *
@@ -202,4 +212,156 @@ export interface ExpenseMembershipReader {
     societyId: SocietyId,
     actor: UserId,
   ): Promise<SocietyMembership | null>;
+}
+
+/**
+ * One live flat, as participant resolution sees it — Roadmap T063.
+ *
+ * A **projection**, not a second `Apartment` entity: the six facts the split bases read
+ * (`floor`, the two areas, `bhk`, `parkingSlots`, and `shareUnits` for a shares split),
+ * plus the four columns resolution filters on (`buildingId`, `wingId`,
+ * `occupancyStatus`, `isBillable`). The audit columns and `deletedAt` are absent
+ * because the reader returns live rows only — a resolution that could see a deleted
+ * flat would have to filter it, and *where* that filter lives is the question this
+ * projection answers: in the reader, once.
+ *
+ * `OccupancyStatus` is the domain's own union rather than a second spelling of
+ * `owner_occupied | rented | vacant | under_construction`, so the selector's
+ * validation and the column's values cannot drift.
+ */
+export interface ParticipantApartment {
+  readonly id: ApartmentId;
+  readonly buildingId: BuildingId;
+  readonly wingId: WingId | null;
+  readonly apartmentNumber: string;
+  readonly floor: number | null;
+  readonly bhk: number | null;
+  readonly carpetAreaSqft: number | null;
+  readonly builtupAreaSqft: number | null;
+  readonly parkingSlots: number;
+  readonly shareUnits: number;
+  readonly occupancyStatus: OccupancyStatus;
+  readonly isBillable: boolean;
+}
+
+/**
+ * One **active** membership attached to a flat — who a charge may be addressed to.
+ *
+ * `apartmentId` is non-nullable here although the column is nullable: a member with no
+ * flat (an admin recorded before a flat was assigned, or a society-level officer) is
+ * not a billing participant, so the reader leaves them out and this projection says so
+ * in its type.
+ *
+ * `status` is absent for the same reason the flat's `deletedAt` is: the reader returns
+ * active memberships only. A `pending` member is not somebody a society may bill —
+ * they have not been admitted — and a flat whose only member is pending therefore
+ * resolves as flagged-unassigned rather than as a charge to a stranger. That is a fact
+ * the integration suite asserts against real RLS, because it is the reader's SQL and
+ * not the domain's rule.
+ */
+export interface ParticipantMember {
+  readonly id: MemberId;
+  readonly apartmentId: ApartmentId;
+  readonly occupancy: MemberOccupancy;
+  readonly isPrimary: boolean;
+}
+
+/**
+ * One wing of the society, so a selector's `wings: ["A"]` can be resolved to ids.
+ *
+ * The PRD's selector names wings by **label** and `apartments.wing_id` is a uuid, so
+ * somebody has to map the two. Nothing in the API module reads the `wings` table today
+ * (the structure module exposes `wingId` on a flat and the generator accepts wing
+ * labels as input, but no read returns a wing's name), which is why the mapping is part
+ * of this reader rather than a call into an existing one.
+ */
+export interface ParticipantWing {
+  readonly id: WingId;
+  readonly buildingId: BuildingId;
+  readonly name: string;
+}
+
+/** The whole society, as one resolution needs it. */
+export interface SocietyParticipantDirectory {
+  /** Live flats, unfiltered: the selector decides eligibility, not the reader. */
+  readonly apartments: readonly ParticipantApartment[];
+  /** Active memberships attached to a flat. */
+  readonly members: readonly ParticipantMember[];
+  readonly wings: readonly ParticipantWing[];
+  /**
+   * Live buildings, ids only.
+   *
+   * They are here for one rule: a selector that names a building this society does not
+   * have must be refused rather than silently matching nothing (which would bill the
+   * whole society when the treasurer meant one building). A building with no flats yet
+   * is still a building, so this cannot be derived from `apartments`.
+   */
+  readonly buildings: readonly BuildingId[];
+}
+
+/**
+ * The society's billing roster, read in one transaction under the caller's RLS
+ * identity — the focused read port T063 declares.
+ *
+ * ## Why a focused port rather than the existing directory reads
+ *
+ * Resolution needs *every* eligible flat with its members, and the established ports
+ * answer that question awkwardly in three different ways:
+ *
+ *  - `ApartmentRepository.listApartments` is addressed **per building**, so a
+ *    society-wide resolution is one query per building — the fan-out
+ *    `ImportFlatReaderService` accepts for a one-time import, on a path a preview
+ *    endpoint (T064) calls while a treasurer drags a slider;
+ *  - `MemberRepository.list` is the **directory**: paginated
+ *    (`MAX_MEMBER_PAGE_LIMIT` 200), consent-filtered, and shaped for a screen that
+ *    scrolls — reading the roster to bill it would be a loop over pages whose last
+ *    page is what decides whether the resolution is complete;
+ *  - nothing reads `wings` at all (see `ParticipantWing`).
+ *
+ * What the port guarantees instead is the shape a resolution needs: **bounded,
+ * set-based reads** — one query per table, whatever the society's size — scoped by
+ * `societyId` **and** run as the caller, so another tenant's rows are structurally
+ * absent rather than filtered afterwards (the PRD T041 rule).
+ *
+ * It performs no writes and no arithmetic: the reader returns facts, and
+ * `resolveExpenseParticipants` decides who is billed.
+ */
+export interface ExpenseParticipantReader {
+  listSocietyParticipants(
+    societyId: SocietyId,
+    actor: UserId,
+  ): Promise<SocietyParticipantDirectory>;
+}
+
+/**
+ * The one piece of a society's policy participant resolution reads: whether empty flats
+ * are billed (`society_settings.bill_vacant_flats`, PRD §3.3).
+ *
+ * A named shape with one field rather than `SocietySettings`, which says exactly what
+ * this module depends on: a resolution cannot silently start reading a society's billing
+ * day or its late-fee rule, and a fake does not have to invent fifteen fields to answer
+ * one question.
+ */
+export interface ExpenseSocietyPolicy {
+  readonly settings: { readonly billVacantFlats: boolean };
+}
+
+/**
+ * The society-policy read, satisfied by the society module's own repository.
+ *
+ * Narrow rather than a `SocietyRepository` dependency, and satisfied **structurally** by
+ * `SocietyRepositoryPostgres.findById` — the same move `ImportApartmentReader` and
+ * `StructureMembershipReader` make: the interface is declared in the module that needs
+ * it, the implementation stays in the module that owns the table, and there is no second
+ * reader of `society_settings` to drift. The expenses module does not accept the switch
+ * from a request either: a society's policy about billing empty flats is not something a
+ * client gets to assert.
+ *
+ * `null` means "no such society, or no live membership for this caller" — the two are
+ * deliberately one answer (`society_snapshot()` already collapses them), and a caller
+ * that is a member of the society can only reach the first case by the society having
+ * been deleted between two reads.
+ */
+export interface ExpenseSocietyReader {
+  findById(id: SocietyId, actor: UserId): Promise<ExpenseSocietyPolicy | null>;
 }
