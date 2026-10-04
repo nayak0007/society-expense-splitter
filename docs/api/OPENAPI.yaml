@@ -11857,6 +11857,1686 @@ paths:
       security: *a85
       summary: Delete an expense category
       tags: *a86
+  /v1/expenses:
+    post:
+      description: Admin, Treasurer or Committee Member. The expense starts as a
+        draft; an expense above the society's approval threshold is moved to
+        pending_approval for Admin/Treasurer callers, while a Committee Member's
+        expense stays a draft. The category's default strategy and basis fill an
+        omitted splitStrategy/apartmentBasis through the same resolution the
+        preview uses. No splits, dues or publication are produced.
+      operationId: ExpensesController_create
+      parameters:
+        - &a87
+          name: X-Society-Id
+          in: header
+          description:
+            The society this request is scoped to (UUID). Authorisation is
+            evaluated against the caller's membership in it.
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "201":
+          description: The created expense.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      expense:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          societyId:
+                            type: string
+                          categoryId:
+                            type: string
+                          title:
+                            type: string
+                          description:
+                            nullable: true
+                            type: string
+                          amountPaise:
+                            type: integer
+                          expenseDate:
+                            type: string
+                          vendorName:
+                            nullable: true
+                            type: string
+                          paymentSource:
+                            type: string
+                            enum:
+                              - society_account
+                              - petty_cash
+                              - member_paid
+                              - vendor_credit
+                          paidByMemberId:
+                            nullable: true
+                            type: string
+                          splitStrategy:
+                            type: string
+                            enum:
+                              - equal
+                              - percentage
+                              - shares
+                              - apartment
+                              - custom
+                          apartmentBasis:
+                            nullable: true
+                            type: string
+                            enum:
+                              - per_flat
+                              - per_sqft_carpet
+                              - per_sqft_builtup
+                              - per_bhk
+                              - per_floor_band
+                              - per_parking_slot
+                          splitConfig:
+                            type: object
+                            properties:
+                              percentages:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    apartmentId:
+                                      type: string
+                                      format: uuid
+                                      pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                    basisPoints:
+                                      type: integer
+                                      minimum: 0
+                                      maximum: 9007199254740991
+                                  required:
+                                    - apartmentId
+                                    - basisPoints
+                                  additionalProperties: false
+                              shares:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    apartmentId:
+                                      type: string
+                                      format: uuid
+                                      pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                    shareUnits:
+                                      type: integer
+                                      minimum: 0
+                                      exclusiveMinimum: true
+                                      maximum: 9007199254740991
+                                  required:
+                                    - apartmentId
+                                    - shareUnits
+                                  additionalProperties: false
+                              customAmounts:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    apartmentId:
+                                      type: string
+                                      format: uuid
+                                      pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                    amountPaise:
+                                      type: integer
+                                      minimum: 0
+                                      maximum: 9007199254740991
+                                  required:
+                                    - apartmentId
+                                    - amountPaise
+                                  additionalProperties: false
+                              floorBands:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    from:
+                                      type: integer
+                                    to:
+                                      type: integer
+                                    mult:
+                                      type: number
+                                      minimum: 0
+                                  required:
+                                    - from
+                                    - to
+                                    - mult
+                                  additionalProperties: false
+                            additionalProperties: false
+                          participantSelector:
+                            type: object
+                            properties:
+                              scope:
+                                type: string
+                                enum:
+                                  - society
+                                  - building
+                              buildings:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: string
+                                  format: uuid
+                                  pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                              wings:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: string
+                                  minLength: 1
+                                  maxLength: 40
+                              floors:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: integer
+                                  minimum: -5
+                                  maximum: 200
+                              occupancy:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: string
+                                  enum:
+                                    - owner_occupied
+                                    - rented
+                                    - vacant
+                                    - under_construction
+                              excludeApartments:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: string
+                                  format: uuid
+                                  pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                              includeVacant:
+                                nullable: true
+                                type: boolean
+                              ownerOnly:
+                                type: boolean
+                            additionalProperties: false
+                          status:
+                            type: string
+                            enum:
+                              - draft
+                              - pending_approval
+                              - published
+                              - void
+                          version:
+                            type: integer
+                          createdBy:
+                            type: string
+                          publishedAt:
+                            nullable: true
+                            type: string
+                          voidedAt:
+                            nullable: true
+                            type: string
+                          voidedBy:
+                            nullable: true
+                            type: string
+                          voidReason:
+                            nullable: true
+                            type: string
+                          createdAt:
+                            type: string
+                          updatedAt:
+                            type: string
+                        required:
+                          - id
+                          - societyId
+                          - categoryId
+                          - title
+                          - description
+                          - amountPaise
+                          - expenseDate
+                          - vendorName
+                          - paymentSource
+                          - paidByMemberId
+                          - splitStrategy
+                          - apartmentBasis
+                          - splitConfig
+                          - participantSelector
+                          - status
+                          - version
+                          - createdBy
+                          - publishedAt
+                          - voidedAt
+                          - voidedBy
+                          - voidReason
+                          - createdAt
+                          - updatedAt
+                        additionalProperties: false
+                    required:
+                      - expense
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400":
+          description: Malformed payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "401":
+          description: No session, an invalid token, or an expired one.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "403":
+          description:
+            "An active member whose role does not hold the needed action:
+            `expense.create` to add (Admin, Treasurer, or a Committee Member's
+            draft-only cell), `expense.void` to edit or delete (Admin/Treasurer,
+            or a Committee Member's own drafts), `expense.view` to read (every
+            role but Guest). Deleting a draft is creator-only."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "404":
+          description:
+            No such society, expense or category — or one the caller is not an
+            active member of. This API deliberately does not distinguish these
+            (PRD T041).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "409":
+          description: The expense moved since the caller last read it
+            (`VERSION_MISMATCH`, with `details[0].current` carrying the current
+            version), or it already has splits and must be voided rather than
+            deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "422":
+          description: Well-formed payload whose values are invalid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "429":
+          description: Rate limited.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+      security:
+        - supabase-jwt: []
+      summary: Create an expense
+      tags: &a88
+        - expenses
+    get:
+      description:
+        One page of the society's expenses, newest first (expense_date,
+        then id descending), with a base64 cursor for the next page. Supports
+        categoryId, status, dateFrom, dateTo, amountPaiseMin, amountPaiseMax,
+        createdBy and full-text `q` over title, description and vendor. Unknown
+        parameters and unknown sort keys are refused rather than ignored.
+      operationId: ExpensesController_list
+      parameters:
+        - *a87
+        - name: limit
+          required: false
+          in: query
+          schema: {}
+        - name: cursor
+          required: false
+          in: query
+          schema: {}
+        - name: q
+          required: false
+          in: query
+          schema: {}
+        - name: createdBy
+          required: false
+          in: query
+          schema: {}
+        - name: amountPaiseMax
+          required: false
+          in: query
+          schema: {}
+        - name: amountPaiseMin
+          required: false
+          in: query
+          schema: {}
+        - name: dateTo
+          required: false
+          in: query
+          schema: {}
+        - name: dateFrom
+          required: false
+          in: query
+          schema: {}
+        - name: status
+          required: false
+          in: query
+          schema: {}
+        - name: categoryId
+          required: false
+          in: query
+          schema: {}
+      responses:
+        "200":
+          description: One page of expenses, with `nextCursor` and `hasMore`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      expenses:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            societyId:
+                              type: string
+                            categoryId:
+                              type: string
+                            title:
+                              type: string
+                            description:
+                              nullable: true
+                              type: string
+                            amountPaise:
+                              type: integer
+                            expenseDate:
+                              type: string
+                            vendorName:
+                              nullable: true
+                              type: string
+                            paymentSource:
+                              type: string
+                              enum:
+                                - society_account
+                                - petty_cash
+                                - member_paid
+                                - vendor_credit
+                            paidByMemberId:
+                              nullable: true
+                              type: string
+                            splitStrategy:
+                              type: string
+                              enum:
+                                - equal
+                                - percentage
+                                - shares
+                                - apartment
+                                - custom
+                            apartmentBasis:
+                              nullable: true
+                              type: string
+                              enum:
+                                - per_flat
+                                - per_sqft_carpet
+                                - per_sqft_builtup
+                                - per_bhk
+                                - per_floor_band
+                                - per_parking_slot
+                            splitConfig:
+                              type: object
+                              properties:
+                                percentages:
+                                  maxItems: 1000
+                                  type: array
+                                  items:
+                                    type: object
+                                    properties:
+                                      apartmentId:
+                                        type: string
+                                        format: uuid
+                                        pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                      basisPoints:
+                                        type: integer
+                                        minimum: 0
+                                        maximum: 9007199254740991
+                                    required:
+                                      - apartmentId
+                                      - basisPoints
+                                    additionalProperties: false
+                                shares:
+                                  maxItems: 1000
+                                  type: array
+                                  items:
+                                    type: object
+                                    properties:
+                                      apartmentId:
+                                        type: string
+                                        format: uuid
+                                        pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                      shareUnits:
+                                        type: integer
+                                        minimum: 0
+                                        exclusiveMinimum: true
+                                        maximum: 9007199254740991
+                                    required:
+                                      - apartmentId
+                                      - shareUnits
+                                    additionalProperties: false
+                                customAmounts:
+                                  maxItems: 1000
+                                  type: array
+                                  items:
+                                    type: object
+                                    properties:
+                                      apartmentId:
+                                        type: string
+                                        format: uuid
+                                        pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                      amountPaise:
+                                        type: integer
+                                        minimum: 0
+                                        maximum: 9007199254740991
+                                    required:
+                                      - apartmentId
+                                      - amountPaise
+                                    additionalProperties: false
+                                floorBands:
+                                  maxItems: 1000
+                                  type: array
+                                  items:
+                                    type: object
+                                    properties:
+                                      from:
+                                        type: integer
+                                      to:
+                                        type: integer
+                                      mult:
+                                        type: number
+                                        minimum: 0
+                                    required:
+                                      - from
+                                      - to
+                                      - mult
+                                    additionalProperties: false
+                              additionalProperties: false
+                            participantSelector:
+                              type: object
+                              properties:
+                                scope:
+                                  type: string
+                                  enum:
+                                    - society
+                                    - building
+                                buildings:
+                                  maxItems: 1000
+                                  type: array
+                                  items:
+                                    type: string
+                                    format: uuid
+                                    pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                wings:
+                                  maxItems: 1000
+                                  type: array
+                                  items:
+                                    type: string
+                                    minLength: 1
+                                    maxLength: 40
+                                floors:
+                                  maxItems: 1000
+                                  type: array
+                                  items:
+                                    type: integer
+                                    minimum: -5
+                                    maximum: 200
+                                occupancy:
+                                  maxItems: 1000
+                                  type: array
+                                  items:
+                                    type: string
+                                    enum:
+                                      - owner_occupied
+                                      - rented
+                                      - vacant
+                                      - under_construction
+                                excludeApartments:
+                                  maxItems: 1000
+                                  type: array
+                                  items:
+                                    type: string
+                                    format: uuid
+                                    pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                includeVacant:
+                                  nullable: true
+                                  type: boolean
+                                ownerOnly:
+                                  type: boolean
+                              additionalProperties: false
+                            status:
+                              type: string
+                              enum:
+                                - draft
+                                - pending_approval
+                                - published
+                                - void
+                            version:
+                              type: integer
+                            createdBy:
+                              type: string
+                            publishedAt:
+                              nullable: true
+                              type: string
+                            voidedAt:
+                              nullable: true
+                              type: string
+                            voidedBy:
+                              nullable: true
+                              type: string
+                            voidReason:
+                              nullable: true
+                              type: string
+                            createdAt:
+                              type: string
+                            updatedAt:
+                              type: string
+                          required:
+                            - id
+                            - societyId
+                            - categoryId
+                            - title
+                            - description
+                            - amountPaise
+                            - expenseDate
+                            - vendorName
+                            - paymentSource
+                            - paidByMemberId
+                            - splitStrategy
+                            - apartmentBasis
+                            - splitConfig
+                            - participantSelector
+                            - status
+                            - version
+                            - createdBy
+                            - publishedAt
+                            - voidedAt
+                            - voidedBy
+                            - voidReason
+                            - createdAt
+                            - updatedAt
+                          additionalProperties: false
+                      nextCursor:
+                        nullable: true
+                        type: string
+                      hasMore:
+                        type: boolean
+                    required:
+                      - expenses
+                      - nextCursor
+                      - hasMore
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400":
+          description: Malformed payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "401":
+          description: No session, an invalid token, or an expired one.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "403":
+          description:
+            "An active member whose role does not hold the needed action:
+            `expense.create` to add (Admin, Treasurer, or a Committee Member's
+            draft-only cell), `expense.void` to edit or delete (Admin/Treasurer,
+            or a Committee Member's own drafts), `expense.view` to read (every
+            role but Guest). Deleting a draft is creator-only."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "404":
+          description:
+            No such society, expense or category — or one the caller is not an
+            active member of. This API deliberately does not distinguish these
+            (PRD T041).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "409":
+          description: The expense moved since the caller last read it
+            (`VERSION_MISMATCH`, with `details[0].current` carrying the current
+            version), or it already has splits and must be voided rather than
+            deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "422":
+          description: Well-formed payload whose values are invalid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "429":
+          description: Rate limited.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+      security:
+        - supabase-jwt: []
+      summary: List expenses
+      tags: *a88
   /v1/expenses/preview-split:
     post:
       description:
@@ -11868,15 +13548,7 @@ paths:
         rather than dropped.
       operationId: ExpensesController_previewSplit
       parameters:
-        - name: X-Society-Id
-          in: header
-          description:
-            The society this request is scoped to (UUID). Authorisation is
-            evaluated against the caller's membership in it.
-          required: true
-          schema:
-            type: string
-            format: uuid
+        - *a87
       responses:
         "200":
           description:
@@ -12521,8 +14193,2197 @@ paths:
       security:
         - supabase-jwt: []
       summary: Preview an expense split
-      tags:
-        - expenses
+      tags: *a88
+  /v1/expenses/{expenseId}:
+    get:
+      description:
+        One expense of the society named in X-Society-Id, whatever its
+        status — residents may inspect any expense and its bill by design.
+        Cross-society or unknown ids answer 404 rather than 403.
+      operationId: ExpensesController_get
+      parameters:
+        - *a87
+        - name: expenseId
+          required: true
+          in: path
+          description: Expense UUID.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The expense.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      expense:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          societyId:
+                            type: string
+                          categoryId:
+                            type: string
+                          title:
+                            type: string
+                          description:
+                            nullable: true
+                            type: string
+                          amountPaise:
+                            type: integer
+                          expenseDate:
+                            type: string
+                          vendorName:
+                            nullable: true
+                            type: string
+                          paymentSource:
+                            type: string
+                            enum:
+                              - society_account
+                              - petty_cash
+                              - member_paid
+                              - vendor_credit
+                          paidByMemberId:
+                            nullable: true
+                            type: string
+                          splitStrategy:
+                            type: string
+                            enum:
+                              - equal
+                              - percentage
+                              - shares
+                              - apartment
+                              - custom
+                          apartmentBasis:
+                            nullable: true
+                            type: string
+                            enum:
+                              - per_flat
+                              - per_sqft_carpet
+                              - per_sqft_builtup
+                              - per_bhk
+                              - per_floor_band
+                              - per_parking_slot
+                          splitConfig:
+                            type: object
+                            properties:
+                              percentages:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    apartmentId:
+                                      type: string
+                                      format: uuid
+                                      pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                    basisPoints:
+                                      type: integer
+                                      minimum: 0
+                                      maximum: 9007199254740991
+                                  required:
+                                    - apartmentId
+                                    - basisPoints
+                                  additionalProperties: false
+                              shares:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    apartmentId:
+                                      type: string
+                                      format: uuid
+                                      pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                    shareUnits:
+                                      type: integer
+                                      minimum: 0
+                                      exclusiveMinimum: true
+                                      maximum: 9007199254740991
+                                  required:
+                                    - apartmentId
+                                    - shareUnits
+                                  additionalProperties: false
+                              customAmounts:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    apartmentId:
+                                      type: string
+                                      format: uuid
+                                      pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                    amountPaise:
+                                      type: integer
+                                      minimum: 0
+                                      maximum: 9007199254740991
+                                  required:
+                                    - apartmentId
+                                    - amountPaise
+                                  additionalProperties: false
+                              floorBands:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    from:
+                                      type: integer
+                                    to:
+                                      type: integer
+                                    mult:
+                                      type: number
+                                      minimum: 0
+                                  required:
+                                    - from
+                                    - to
+                                    - mult
+                                  additionalProperties: false
+                            additionalProperties: false
+                          participantSelector:
+                            type: object
+                            properties:
+                              scope:
+                                type: string
+                                enum:
+                                  - society
+                                  - building
+                              buildings:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: string
+                                  format: uuid
+                                  pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                              wings:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: string
+                                  minLength: 1
+                                  maxLength: 40
+                              floors:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: integer
+                                  minimum: -5
+                                  maximum: 200
+                              occupancy:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: string
+                                  enum:
+                                    - owner_occupied
+                                    - rented
+                                    - vacant
+                                    - under_construction
+                              excludeApartments:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: string
+                                  format: uuid
+                                  pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                              includeVacant:
+                                nullable: true
+                                type: boolean
+                              ownerOnly:
+                                type: boolean
+                            additionalProperties: false
+                          status:
+                            type: string
+                            enum:
+                              - draft
+                              - pending_approval
+                              - published
+                              - void
+                          version:
+                            type: integer
+                          createdBy:
+                            type: string
+                          publishedAt:
+                            nullable: true
+                            type: string
+                          voidedAt:
+                            nullable: true
+                            type: string
+                          voidedBy:
+                            nullable: true
+                            type: string
+                          voidReason:
+                            nullable: true
+                            type: string
+                          createdAt:
+                            type: string
+                          updatedAt:
+                            type: string
+                        required:
+                          - id
+                          - societyId
+                          - categoryId
+                          - title
+                          - description
+                          - amountPaise
+                          - expenseDate
+                          - vendorName
+                          - paymentSource
+                          - paidByMemberId
+                          - splitStrategy
+                          - apartmentBasis
+                          - splitConfig
+                          - participantSelector
+                          - status
+                          - version
+                          - createdBy
+                          - publishedAt
+                          - voidedAt
+                          - voidedBy
+                          - voidReason
+                          - createdAt
+                          - updatedAt
+                        additionalProperties: false
+                    required:
+                      - expense
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400":
+          description: Malformed payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "401":
+          description: No session, an invalid token, or an expired one.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "403":
+          description:
+            "An active member whose role does not hold the needed action:
+            `expense.create` to add (Admin, Treasurer, or a Committee Member's
+            draft-only cell), `expense.void` to edit or delete (Admin/Treasurer,
+            or a Committee Member's own drafts), `expense.view` to read (every
+            role but Guest). Deleting a draft is creator-only."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "404":
+          description:
+            No such society, expense or category — or one the caller is not an
+            active member of. This API deliberately does not distinguish these
+            (PRD T041).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "409":
+          description: The expense moved since the caller last read it
+            (`VERSION_MISMATCH`, with `details[0].current` carrying the current
+            version), or it already has splits and must be voided rather than
+            deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "422":
+          description: Well-formed payload whose values are invalid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "429":
+          description: Rate limited.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+      security:
+        - supabase-jwt: []
+      summary: Get an expense
+      tags: *a88
+    patch:
+      description:
+        Admin, Treasurer, or a Committee Member editing their own draft.
+        Requires `expectedVersion`; a stale version answers 409 VERSION_MISMATCH
+        with the current version in `details`. Only draft and pending_approval
+        expenses are editable. An omitted field is unchanged; `null` clears a
+        nullable field. Crossing the society's approval threshold while editing
+        promotes a draft to pending_approval for Admin/Treasurer callers.
+      operationId: ExpensesController_update
+      parameters:
+        - *a87
+        - name: expenseId
+          required: true
+          in: path
+          description: Expense UUID.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The updated expense.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      expense:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          societyId:
+                            type: string
+                          categoryId:
+                            type: string
+                          title:
+                            type: string
+                          description:
+                            nullable: true
+                            type: string
+                          amountPaise:
+                            type: integer
+                          expenseDate:
+                            type: string
+                          vendorName:
+                            nullable: true
+                            type: string
+                          paymentSource:
+                            type: string
+                            enum:
+                              - society_account
+                              - petty_cash
+                              - member_paid
+                              - vendor_credit
+                          paidByMemberId:
+                            nullable: true
+                            type: string
+                          splitStrategy:
+                            type: string
+                            enum:
+                              - equal
+                              - percentage
+                              - shares
+                              - apartment
+                              - custom
+                          apartmentBasis:
+                            nullable: true
+                            type: string
+                            enum:
+                              - per_flat
+                              - per_sqft_carpet
+                              - per_sqft_builtup
+                              - per_bhk
+                              - per_floor_band
+                              - per_parking_slot
+                          splitConfig:
+                            type: object
+                            properties:
+                              percentages:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    apartmentId:
+                                      type: string
+                                      format: uuid
+                                      pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                    basisPoints:
+                                      type: integer
+                                      minimum: 0
+                                      maximum: 9007199254740991
+                                  required:
+                                    - apartmentId
+                                    - basisPoints
+                                  additionalProperties: false
+                              shares:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    apartmentId:
+                                      type: string
+                                      format: uuid
+                                      pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                    shareUnits:
+                                      type: integer
+                                      minimum: 0
+                                      exclusiveMinimum: true
+                                      maximum: 9007199254740991
+                                  required:
+                                    - apartmentId
+                                    - shareUnits
+                                  additionalProperties: false
+                              customAmounts:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    apartmentId:
+                                      type: string
+                                      format: uuid
+                                      pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                                    amountPaise:
+                                      type: integer
+                                      minimum: 0
+                                      maximum: 9007199254740991
+                                  required:
+                                    - apartmentId
+                                    - amountPaise
+                                  additionalProperties: false
+                              floorBands:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    from:
+                                      type: integer
+                                    to:
+                                      type: integer
+                                    mult:
+                                      type: number
+                                      minimum: 0
+                                  required:
+                                    - from
+                                    - to
+                                    - mult
+                                  additionalProperties: false
+                            additionalProperties: false
+                          participantSelector:
+                            type: object
+                            properties:
+                              scope:
+                                type: string
+                                enum:
+                                  - society
+                                  - building
+                              buildings:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: string
+                                  format: uuid
+                                  pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                              wings:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: string
+                                  minLength: 1
+                                  maxLength: 40
+                              floors:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: integer
+                                  minimum: -5
+                                  maximum: 200
+                              occupancy:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: string
+                                  enum:
+                                    - owner_occupied
+                                    - rented
+                                    - vacant
+                                    - under_construction
+                              excludeApartments:
+                                maxItems: 1000
+                                type: array
+                                items:
+                                  type: string
+                                  format: uuid
+                                  pattern: ^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$
+                              includeVacant:
+                                nullable: true
+                                type: boolean
+                              ownerOnly:
+                                type: boolean
+                            additionalProperties: false
+                          status:
+                            type: string
+                            enum:
+                              - draft
+                              - pending_approval
+                              - published
+                              - void
+                          version:
+                            type: integer
+                          createdBy:
+                            type: string
+                          publishedAt:
+                            nullable: true
+                            type: string
+                          voidedAt:
+                            nullable: true
+                            type: string
+                          voidedBy:
+                            nullable: true
+                            type: string
+                          voidReason:
+                            nullable: true
+                            type: string
+                          createdAt:
+                            type: string
+                          updatedAt:
+                            type: string
+                        required:
+                          - id
+                          - societyId
+                          - categoryId
+                          - title
+                          - description
+                          - amountPaise
+                          - expenseDate
+                          - vendorName
+                          - paymentSource
+                          - paidByMemberId
+                          - splitStrategy
+                          - apartmentBasis
+                          - splitConfig
+                          - participantSelector
+                          - status
+                          - version
+                          - createdBy
+                          - publishedAt
+                          - voidedAt
+                          - voidedBy
+                          - voidReason
+                          - createdAt
+                          - updatedAt
+                        additionalProperties: false
+                    required:
+                      - expense
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+        "400":
+          description: Malformed payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "401":
+          description: No session, an invalid token, or an expired one.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "403":
+          description:
+            "An active member whose role does not hold the needed action:
+            `expense.create` to add (Admin, Treasurer, or a Committee Member's
+            draft-only cell), `expense.void` to edit or delete (Admin/Treasurer,
+            or a Committee Member's own drafts), `expense.view` to read (every
+            role but Guest). Deleting a draft is creator-only."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "404":
+          description:
+            No such society, expense or category — or one the caller is not an
+            active member of. This API deliberately does not distinguish these
+            (PRD T041).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "409":
+          description: The expense moved since the caller last read it
+            (`VERSION_MISMATCH`, with `details[0].current` carrying the current
+            version), or it already has splits and must be voided rather than
+            deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "422":
+          description: Well-formed payload whose values are invalid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "429":
+          description: Rate limited.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+      security:
+        - supabase-jwt: []
+      summary: Edit an expense
+      tags: *a88
+    delete:
+      description:
+        Hard-deletes one draft, by its creator only. A published expense is
+        voided rather than deleted; a pending_approval expense, an expense with
+        splits, or one the caller did not create is refused. There is no soft
+        delete.
+      operationId: ExpensesController_remove
+      parameters:
+        - *a87
+        - name: expenseId
+          required: true
+          in: path
+          description: Expense UUID.
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted. The expense is gone from every read path.
+        "400":
+          description: Malformed payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "401":
+          description: No session, an invalid token, or an expired one.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "403":
+          description:
+            "An active member whose role does not hold the needed action:
+            `expense.create` to add (Admin, Treasurer, or a Committee Member's
+            draft-only cell), `expense.void` to edit or delete (Admin/Treasurer,
+            or a Committee Member's own drafts), `expense.view` to read (every
+            role but Guest). Deleting a draft is creator-only."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "404":
+          description:
+            No such society, expense or category — or one the caller is not an
+            active member of. This API deliberately does not distinguish these
+            (PRD T041).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "409":
+          description: The expense moved since the caller last read it
+            (`VERSION_MISMATCH`, with `details[0].current` carrying the current
+            version), or it already has splits and must be voided rather than
+            deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "422":
+          description: Well-formed payload whose values are invalid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "429":
+          description: Rate limited.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+      security:
+        - supabase-jwt: []
+      summary: Delete a draft expense
+      tags: *a88
 info:
   title: Resident 360 API
   description:

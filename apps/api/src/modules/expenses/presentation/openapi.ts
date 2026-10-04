@@ -58,3 +58,31 @@ export function ApiExpensePreviewErrors(): ClassDecorator & MethodDecorator {
       "Not produced by this route: a preview performs no write, so no state can conflict.",
   });
 }
+
+/**
+ * The error responses T065's draft routes can return.
+ *
+ * The 404 copy is the module's usual three-indistinguishable-cases sentence, with an
+ * expense added to the list. The 403 names both narrowed cells explicitly, because
+ * the difference between them is the whole content of the routes: `expense.create`
+ * is Admin/Treasurer/Committee (draft-only for the Committee Member), `expense.void`
+ * is Admin/Treasurer or a Committee Member's **own drafts** — and deleting is
+ * narrower still, creator only. A client that rendered the same disabled state for
+ * all of them would hide which rule refused it.
+ *
+ * The 409 carries two refusals: the optimistic lock (`VERSION_MISMATCH`, whose
+ * `details[0].current` is the row's current version — the SAD §7.11 shape) and an
+ * expense that already has splits, which must be voided rather than deleted. A
+ * `published`/`void` edit or a non-draft delete is `INVALID_TRANSITION`, also 409,
+ * documented on the operations themselves.
+ */
+export function ApiExpenseDraftErrors(): ClassDecorator & MethodDecorator {
+  return ApiErrorResponses({
+    notFound:
+      "No such society, expense or category — or one the caller is not an active member of. This API deliberately does not distinguish these (PRD T041).",
+    forbidden:
+      "An active member whose role does not hold the needed action: `expense.create` to add (Admin, Treasurer, or a Committee Member's draft-only cell), `expense.void` to edit or delete (Admin/Treasurer, or a Committee Member's own drafts), `expense.view` to read (every role but Guest). Deleting a draft is creator-only.",
+    conflict:
+      "The expense moved since the caller last read it (`VERSION_MISMATCH`, with `details[0].current` carrying the current version), or it already has splits and must be voided rather than deleted.",
+  });
+}

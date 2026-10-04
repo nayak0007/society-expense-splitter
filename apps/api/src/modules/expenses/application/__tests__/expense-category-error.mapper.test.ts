@@ -33,6 +33,7 @@ describe("ERROR_CODE_BY_EXPENSE_CODE", () => {
       "split_mismatch",
       "unknown",
       "validation",
+      "version_mismatch",
       "void_reason_too_short",
     ]);
   });
@@ -62,6 +63,11 @@ describe("ERROR_CODE_BY_EXPENSE_CODE", () => {
     expect(HTTP_STATUS_BY_ERROR_CODE[ERROR_CODE_BY_EXPENSE_CODE.unknown]).toBe(
       500,
     );
+    // T065's optimistic lock: the catalogue already has VERSION_MISMATCH, and a
+    // stale write is a conflict, not an internal failure.
+    expect(
+      HTTP_STATUS_BY_ERROR_CODE[ERROR_CODE_BY_EXPENSE_CODE.version_mismatch],
+    ).toBe(409);
   });
 
   it("keeps the lifecycle codes mapped for the routes that will reuse them", () => {
@@ -136,6 +142,25 @@ describe("toAppError", () => {
 
     expect(error.code).toBe("NOT_FOUND");
     expect(error.payload.details).toBeUndefined();
+  });
+
+  it("renders a version conflict in the SAD §7.11 shape", () => {
+    const error = toAppError(
+      expenseError(
+        "version_mismatch",
+        "This expense was changed by someone else. Reload it and try again.",
+        { field: "expectedVersion", expectedVersion: 1, currentVersion: 3 },
+      ),
+    );
+
+    expect(error.code).toBe("VERSION_MISMATCH");
+    expect(error.payload.field).toBe("expectedVersion");
+    expect(error.payload.details?.[0]).toMatchObject({
+      field: "expectedVersion",
+      code: "STALE",
+      received: 1,
+      current: 3,
+    });
   });
 
   it("does not invent a field for a forbidden failure", () => {

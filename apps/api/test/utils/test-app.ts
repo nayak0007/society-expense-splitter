@@ -10,6 +10,7 @@ import type {
   ExpenseCategoryRepository,
   ExpenseParticipantReader,
   ExpenseReferenceReader,
+  ExpenseRepository,
   ExpenseSocietyReader,
   InvitationRepository,
   InvitationTokenPort,
@@ -36,6 +37,7 @@ import {
   EXPENSE_CATEGORY_REPOSITORY,
   EXPENSE_REFERENCE_READER,
 } from "../../src/modules/expenses/application/expense-category.tokens";
+import { EXPENSE_REPOSITORY } from "../../src/modules/expenses/application/expense.tokens";
 import {
   EXPENSE_PARTICIPANT_READER,
   EXPENSE_SOCIETY_READER,
@@ -199,6 +201,18 @@ export type TestAppOptions = {
     ExpenseSocietyReader &
     StructureMembershipReader;
   /**
+   * Substitutes the expense-draft storage (T065) — the `expenses` table's write path.
+   *
+   * A ninth seam, and the first in this module that T065 itself owns: T062/T063/T064
+   * declared their ports without a route that writes a `expenses` row, so there was
+   * nothing for the token to be bound to but the read-only adapters. The draft
+   * lifecycle gives `EXPENSE_REPOSITORY` a writer, and a suite that swaps it exercises
+   * the create/update/delete orchestration, the version conflict and the response
+   * contract while the RLS and the definer function stay the integration suite's to
+   * prove — the split the module's own docstring records.
+   */
+  expenses?: ExpenseRepository;
+  /**
    * Substitutes the caller's membership read used by the building use cases.
    *
    * Separate from `reader` (which `SocietyGuard` uses) even though both are
@@ -314,6 +328,9 @@ export async function createTestApp(
       .useValue(options.participants)
       .overrideProvider(EXPENSE_SOCIETY_READER)
       .useValue(options.participants);
+  }
+  if (options.expenses !== undefined) {
+    builder.overrideProvider(EXPENSE_REPOSITORY).useValue(options.expenses);
   }
 
   const moduleRef = await builder.compile();

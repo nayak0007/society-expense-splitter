@@ -16,6 +16,7 @@ import {
   EXPENSE_STATUSES,
   EXPENSE_TRANSITIONS,
   Expense,
+  isExpenseEditableStatus,
   isExpenseStatus,
 } from "../expense.entity";
 import type {
@@ -402,6 +403,144 @@ describe("submitForApproval", () => {
       "void",
       "pending_approval",
     );
+  });
+});
+
+describe("edit — Roadmap T065", () => {
+  const OTHER_CATEGORY = asExpenseCategoryId(
+    "88888888-8888-4888-8888-888888888888",
+  );
+
+  it("applies every supplied field, bumping the version once", () => {
+    const expense = makeDraft();
+    const result = expense.edit(
+      {
+        title: "  Lift AMC — Q4  ",
+        amount: Money.fromPaise(2_500_000),
+        expenseDate: "2026-10-01",
+        categoryId: OTHER_CATEGORY,
+      },
+      LATER,
+    );
+
+    expect(result.ok).toBe(true);
+    // The title is normalised by the same rule creation uses.
+    expect(expense.title).toBe("Lift AMC — Q4");
+    expect(expense.amount.paise).toBe(2_500_000n);
+    expect(expense.expenseDate).toBe("2026-10-01");
+    expect(expense.categoryId).toBe(OTHER_CATEGORY);
+    expect(expense.status).toBe("draft");
+    expect(expense.version).toBe(2);
+    expect(expense.updatedAt).toBe("2026-10-02T10:00:00.000Z");
+    expect(expense.createdAt).toBe("2026-10-01T10:00:00.000Z");
+  });
+
+  it("leaves an absent field exactly as it was — one key is a whole patch", () => {
+    const expense = makeDraft();
+    expect(expense.edit({ title: "Renamed" }, LATER).ok).toBe(true);
+
+    expect(expense.title).toBe("Renamed");
+    expect(expense.amount.paise).toBe(AMOUNT.paise);
+    expect(expense.expenseDate).toBe("2026-09-30");
+    expect(expense.categoryId).toBe(CATEGORY);
+    expect(expense.version).toBe(2);
+  });
+
+  it("edits an expense awaiting approval", () => {
+    const expense = makeDraft();
+    expect(expense.submitForApproval(CLOCK).ok).toBe(true);
+
+    expect(expense.edit({ amount: Money.fromPaise(999) }, LATER).ok).toBe(true);
+    expect(expense.status).toBe("pending_approval");
+    expect(expense.amount.paise).toBe(999n);
+    expect(expense.version).toBe(3);
+  });
+
+  it("refuses a published expense and changes nothing", () => {
+    const expense = makePublished();
+    const before = {
+      title: expense.title,
+      amount: expense.amount.paise,
+      version: expense.version,
+      updatedAt: expense.updatedAt,
+    };
+
+    const result = expense.edit({ title: "Should not land" }, LATER);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.error.code).toBe("invalid_transition");
+    expect(result.error.details).toMatchObject({ from: "published" });
+    expect(expense.title).toBe(before.title);
+    expect(expense.amount.paise).toBe(before.amount);
+    expect(expense.version).toBe(before.version);
+    expect(expense.updatedAt).toBe(before.updatedAt);
+  });
+
+  it("refuses a voided expense", () => {
+    const expense = makeVoided();
+    const result = expense.edit({ title: "Nope" }, LATER);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.error.code).toBe("invalid_transition");
+    expect(result.error.details).toMatchObject({ from: "void" });
+  });
+
+  it("refuses a non-positive amount and keeps the old one", () => {
+    const expense = makeDraft();
+    const result = expense.edit(
+      { amount: Money.fromPaise(0), title: "Also not applied" },
+      LATER,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.error.code).toBe("validation");
+    expect(result.error.details).toMatchObject({ field: "amount" });
+    expect(expense.amount.paise).toBe(AMOUNT.paise);
+    expect(expense.title).toBe("Lift AMC — Q3");
+    expect(expense.version).toBe(1);
+  });
+
+  it("re-runs the title and date rules on supplied values only", () => {
+    const expense = makeDraft();
+
+    const blank = expense.edit({ title: "   " }, LATER);
+    expect(blank.ok).toBe(false);
+    if (blank.ok) throw new Error("unreachable");
+    expect(blank.error.details).toMatchObject({ field: "title" });
+
+    const long = expense.edit({ title: "x".repeat(121) }, LATER);
+    expect(long.ok).toBe(false);
+
+    const far = expense.edit({ expenseDate: "2026-12-31" }, LATER);
+    expect(far.ok).toBe(false);
+    if (far.ok) throw new Error("unreachable");
+    expect(far.error.details).toMatchObject({ field: "expenseDate" });
+
+    const notADate = expense.edit({ expenseDate: "2026-02-30" }, LATER);
+    expect(notADate.ok).toBe(false);
+
+    // None of the refusals moved the row.
+    expect(expense.title).toBe("Lift AMC — Q3");
+    expect(expense.expenseDate).toBe("2026-09-30");
+    expect(expense.version).toBe(1);
+  });
+
+  it("an empty patch is a legal no-op write that still bumps the version", () => {
+    const expense = makeDraft();
+    expect(expense.edit({}, LATER).ok).toBe(true);
+    expect(expense.version).toBe(2);
+  });
+
+  it("isExpenseEditableStatus admits draft and pending_approval only", () => {
+    expect(EXPENSE_STATUSES.map(isExpenseEditableStatus)).toEqual([
+      true,
+      true,
+      false,
+      false,
+    ]);
   });
 });
 

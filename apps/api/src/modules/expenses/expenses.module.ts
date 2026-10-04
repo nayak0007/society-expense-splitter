@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { systemClock } from "@ses/domain";
 
 import { DatabaseModule } from "../../infrastructure/database/database.module";
 import { SOCIETY_REPOSITORY } from "../societies/application/society.tokens";
@@ -13,8 +14,19 @@ import {
   EXPENSE_PARTICIPANT_READER,
   EXPENSE_SOCIETY_READER,
 } from "./application/participant.tokens";
+import {
+  EXPENSE_APPROVAL_POLICY_READER,
+  EXPENSE_CLOCK,
+  EXPENSE_REPOSITORY,
+} from "./application/expense.tokens";
+import { CreateExpenseUseCase } from "./application/use-cases/create-expense.use-case";
+import { DeleteDraftUseCase } from "./application/use-cases/delete-draft.use-case";
+import { GetExpenseUseCase } from "./application/use-cases/get-expense.use-case";
+import { ListExpensesUseCase } from "./application/use-cases/list-expenses.use-case";
 import { PreviewSplitUseCase } from "./application/use-cases/preview-split.use-case";
+import { UpdateExpenseUseCase } from "./application/use-cases/update-expense.use-case";
 import { ExpenseCategoryRepositoryPostgres } from "./infrastructure/category.repository";
+import { ExpenseRepositoryPostgres } from "./infrastructure/expense.repository";
 import { ExpenseParticipantRepositoryPostgres } from "./infrastructure/participant.repository";
 import { ExpenseCategoriesController } from "./presentation/categories.controller";
 import { ExpensesController } from "./presentation/expenses.controller";
@@ -135,6 +147,26 @@ import { ExpensesController } from "./presentation/expenses.controller";
     // `computeSplit` — the same engine T066's publish will call, which is the whole
     // point of the endpoint: what the split editor previews is what the bill will be.
     PreviewSplitUseCase,
+    // T065's repository and its five use cases. The adapter is bound through tokens
+    // so the e2e suite can substitute an in-memory one, exactly as the category and
+    // participant seams do; `EXPENSE_APPROVAL_POLICY_READER` borrows the society
+    // module's own repository for the one `society_settings` field the threshold
+    // rule reads, so this module owns no SQL over that table.
+    ExpenseRepositoryPostgres,
+    {
+      provide: EXPENSE_REPOSITORY,
+      useExisting: ExpenseRepositoryPostgres,
+    },
+    {
+      provide: EXPENSE_APPROVAL_POLICY_READER,
+      useExisting: SOCIETY_REPOSITORY,
+    },
+    { provide: EXPENSE_CLOCK, useValue: systemClock },
+    CreateExpenseUseCase,
+    UpdateExpenseUseCase,
+    GetExpenseUseCase,
+    ListExpensesUseCase,
+    DeleteDraftUseCase,
   ],
 })
 export class ExpensesModule {}

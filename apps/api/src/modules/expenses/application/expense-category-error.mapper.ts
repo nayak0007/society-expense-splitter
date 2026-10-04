@@ -46,6 +46,9 @@ export const ERROR_CODE_BY_EXPENSE_CODE: Readonly<
   // renamed or removed, which is what makes it a conflict rather than a validation
   // failure (SAD §7.2).
   conflict: "CONFLICT",
+  // T065's optimistic lock. The catalogue's own code — 409 — and the refusal carries
+  // the row's current version in `details` so a client can reload rather than guess.
+  version_mismatch: "VERSION_MISMATCH",
   // A category an expense still references. 409 for the same reason a duplicate name
   // is — the state refused it — and the code is preserved on the wire so a client can
   // tell "rename it" from "deactivate it instead" without matching on message text.
@@ -86,23 +89,50 @@ export function toAppError(error: ExpenseError): AppError {
   const code = ERROR_CODE_BY_EXPENSE_CODE[error.code];
   const field =
     fieldOf(error) ?? (error.code === "conflict" ? "name" : undefined);
-  const detailCode = DETAIL_CODES[error.code];
-
-  const details: readonly ErrorDetail[] | undefined =
-    detailCode === undefined
-      ? undefined
-      : [
-          {
-            field: field ?? "code",
-            code: detailCode,
-            message: error.message,
-          },
-        ];
+  const details = detailsFor(error, field);
 
   return new AppError(code, error.message, {
     ...(field === undefined ? {} : { field }),
     ...(details === undefined ? {} : { details }),
   });
+}
+
+/**
+ * The refusal's `details`, in the shape the SAD gives it.
+ *
+ * A **version conflict** gets the SAD §7.11 shape verbatim —
+ * `{ field: "expectedVersion", code: "STALE", received, current }` — because the
+ * current version is the one fact the client needs to reload and retry, and it is
+ * exactly the example the document publishes. Every other mapped code keeps the
+ * module's flat detail shape.
+ */
+function detailsFor(
+  error: ExpenseError,
+  field: string | undefined,
+): readonly ErrorDetail[] | undefined {
+  if (error.code === "version_mismatch") {
+    const expected = error.details?.expectedVersion;
+    const current = error.details?.currentVersion;
+    return [
+      {
+        field: "expectedVersion",
+        code: "STALE",
+        message: error.message,
+        ...(typeof expected === "number" ? { received: expected } : {}),
+        ...(typeof current === "number" ? { current } : {}),
+      },
+    ];
+  }
+
+  const detailCode = DETAIL_CODES[error.code];
+  if (detailCode === undefined) return undefined;
+  return [
+    {
+      field: field ?? "code",
+      code: detailCode,
+      message: error.message,
+    },
+  ];
 }
 
 /**

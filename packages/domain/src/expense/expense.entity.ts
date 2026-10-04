@@ -102,6 +102,12 @@ export const EXPENSE_TRANSITIONS: Readonly<
 /** PRD §3.4: `title | string(120)`, and the column is `varchar(120)`. */
 export const EXPENSE_TITLE_MAX_LENGTH = 120;
 
+/** The free-text description column (`text`); PRD §3.4's notes field, 2,000 chars. */
+export const EXPENSE_DESCRIPTION_MAX_LENGTH = 2000;
+
+/** `expenses.vendor_name varchar(120)` — the column's width, so the wire cannot exceed it. */
+export const EXPENSE_VENDOR_NAME_MAX_LENGTH = 120;
+
 /** PRD §3.4: "cannot be > 30 days in the future". */
 export const EXPENSE_MAX_FUTURE_DAYS = 30;
 
@@ -114,6 +120,22 @@ export function isExpenseStatus(value: unknown): value is ExpenseStatus {
     typeof value === "string" &&
     (EXPENSE_STATUSES as readonly string[]).includes(value)
   );
+}
+
+/**
+ * Whether an expense in this state may be edited as a draft — PRD §3.5's "Freely
+ * editable while `draft` or `pending_approval`".
+ *
+ * Exported because two layers ask the question and must not answer it differently:
+ * `Expense.edit()` refuses the move, and T065's update use case checks it *before*
+ * rebuilding an entity (a published row's split set belongs to T068's recalculation
+ * flow, not to this door). One predicate, so the two cannot drift.
+ *
+ * A published expense is **not** in this set: editing it is the recalculation with a
+ * diff preview (T068). A void one is terminal (T061's matrix).
+ */
+export function isExpenseEditableStatus(status: ExpenseStatus): boolean {
+  return status === "draft" || status === "pending_approval";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -295,6 +317,28 @@ export interface CreateExpenseProps {
  * balanced splits; a void row has its reason) and must not re-run a rule about
  * "today" that judged the expense on the day it was written.
  */
+/**
+ * Everything `Expense.edit()` may change — PRD §3.5's "Freely editable while `draft`
+ * or `pending_approval`".
+ *
+ * **Only the four fields the aggregate itself owns.** `undefined` means "leave
+ * unchanged" (the repository convention T062's `UpdateExpenseCategoryInput` records),
+ * and there is no `null` spelling because none of the four is nullable.
+ *
+ * The rest of the expense form — `description`, `vendorName`, `paymentSource`,
+ * `paidByMemberId`, the split strategy/basis/config and the participant selector — is
+ * deliberately absent: T061 assigned those to T065's *use cases*, and the aggregate
+ * cannot own the split vocabulary without inverting the `@ses/split-engine →
+ * @ses/domain` dependency. The use case merges them and the repository writes them,
+ * inside the same version-checked statement that writes these four.
+ */
+export interface EditExpenseProps {
+  readonly title?: string | undefined;
+  readonly amount?: Money | undefined;
+  readonly expenseDate?: string | undefined;
+  readonly categoryId?: ExpenseCategoryId | undefined;
+}
+
 export interface ReconstituteExpenseProps {
   readonly id: ExpenseId;
   readonly societyId: SocietyId;
@@ -348,13 +392,17 @@ interface ExpenseState {
 export class Expense {
   readonly id: ExpenseId;
   readonly societyId: SocietyId;
-  readonly categoryId: ExpenseCategoryId;
-  readonly title: string;
-  readonly amount: Money;
-  /** `YYYY-MM-DD`. A date, not an instant — the PRD's column is `date`. */
-  readonly expenseDate: string;
   readonly createdBy: MemberId;
   readonly createdAt: string;
+
+  // The four fields `edit()` may change. Private with getters rather than `readonly`
+  // public fields so that the *only* way they move is `edit()` — the same shape the
+  // status keeps, and the reason a caller cannot assign "what a published expense
+  // should have cost" from outside a rule.
+  private _categoryId: ExpenseCategoryId;
+  private _title: string;
+  private _amount: Money;
+  private _expenseDate: string;
 
   private _status: ExpenseStatus;
   private _splits: readonly ExpenseSplit[];
@@ -369,10 +417,10 @@ export class Expense {
   private constructor(props: ExpenseState) {
     this.id = props.id;
     this.societyId = props.societyId;
-    this.categoryId = props.categoryId;
-    this.title = props.title;
-    this.amount = props.amount;
-    this.expenseDate = props.expenseDate;
+    this._categoryId = props.categoryId;
+    this._title = props.title;
+    this._amount = props.amount;
+    this._expenseDate = props.expenseDate;
     this.createdBy = props.createdBy;
     this.createdAt = props.createdAt;
     this._status = props.status;
@@ -548,6 +596,23 @@ export class Expense {
 
   // ── Reads ──────────────────────────────────────────────────────────────────
 
+  get categoryId(): ExpenseCategoryId {
+    return this._categoryId;
+  }
+
+  get title(): string {
+    return this._title;
+  }
+
+  get amount(): Money {
+    return this._amount;
+  }
+
+  /** `YYYY-MM-DD`. A date, not an instant — the PRD's column is `date`. */
+  get expenseDate(): string {
+    return this._expenseDate;
+  }
+
   get status(): ExpenseStatus {
     return this._status;
   }
@@ -582,7 +647,10 @@ export class Expense {
     return this._updatedAt;
   }
 
-  /** Bumped by every successful transition; optimistic locking is T065's use case. */
+  /**
+   * Bumped by every successful transition and by `edit()`; optimistic locking is T065's
+   * use case, which states the expected version to the repository's atomic `UPDATE`.
+   */
   get version(): number {
     return this._version;
   }
@@ -593,6 +661,75 @@ export class Expense {
   }
 
   // ── Transitions ────────────────────────────────────────────────────────────
+
+  /**
+   * `draft | pending_approval` fields → the same state, one version later — PRD §3.5's
+   * "Freely editable while `draft` or `pending_approval`" — Roadmap T065.
+   *
+   * ## What it owns, and what it refuses
+   *
+   * Only the four fields the aggregate holds (title, amount, date, category). Every
+   * supplied field re-runs the *input* rule the create door runs — a positive amount,
+   * the title bounds, a real date no more than 30 days ahead — in the same order, and
+   * **nothing changes unless every supplied field passes**: the locals are assigned
+   * only after the last check, so a failed edit leaves the expense exactly as it was.
+   * An absent field is untouched, which is what lets a PATCH carry one key.
+   *
+   * A published or void expense is refused with `invalid_transition` before any field
+   * is read: editing a published expense is T068's recalculation with a diff preview,
+   * not this door, and a field error about a bill the caller cannot edit here would be
+   * advice they cannot act on.
+   *
+   * ## Version, events, persistence
+   *
+   * Success bumps the version from the injected clock — the write the repository then
+   * performs is optimistic-locked on the version the caller stated (T065's use case),
+   * so the object's semantics and the row's cannot disagree. Raises **no event**: the
+   * catalogue has `expense.published` and `expense.voided` and nothing for an edit,
+   * and the PRD's "every edit creates a revision" is a persistence fact T068 owns.
+   */
+  edit(changes: EditExpenseProps, clock: Clock): Result<void, ExpenseError> {
+    if (!isExpenseEditableStatus(this._status)) {
+      return err(
+        expenseError(
+          "invalid_transition",
+          `A ${this._status} expense cannot be edited as a draft. Only drafts and expenses awaiting approval can be edited.`,
+          { from: this._status },
+        ),
+      );
+    }
+
+    if (changes.amount !== undefined && !changes.amount.isPositive()) {
+      return err(
+        expenseError("validation", "An expense must be greater than ₹0.00.", {
+          field: "amount",
+        }),
+      );
+    }
+
+    let title = this._title;
+    if (changes.title !== undefined) {
+      const next = createExpenseTitle(changes.title);
+      if (!next.ok) return next;
+      title = next.value;
+    }
+
+    let expenseDate = this._expenseDate;
+    if (changes.expenseDate !== undefined) {
+      const next = createExpenseDate(changes.expenseDate, clock.now());
+      if (!next.ok) return next;
+      expenseDate = next.value;
+    }
+
+    this._amount = changes.amount ?? this._amount;
+    this._title = title;
+    this._expenseDate = expenseDate;
+    if (changes.categoryId !== undefined) {
+      this._categoryId = changes.categoryId;
+    }
+    this.touch(clock.nowIso());
+    return ok(undefined);
+  }
 
   /**
    * `draft → pending_approval` — the expense needs an Admin's approval before it can

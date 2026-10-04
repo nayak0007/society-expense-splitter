@@ -2,15 +2,21 @@ import type {
   ApartmentId,
   BuildingId,
   ExpenseCategoryId,
+  ExpenseId,
   MemberId,
   SocietyId,
   UserId,
   WingId,
 } from "../shared/ids";
 import type { MemberOccupancy } from "../member/member";
+import type { Paise } from "../shared/money";
+import type { Money } from "../shared/money.vo";
+import type { PaymentSource } from "../shared/payment-sources";
+import type { ApartmentBasis, SplitStrategy } from "../shared/split-vocabulary";
 import type { OccupancyStatus } from "../structure/apartment";
 import type { SocietyMembership } from "../society/society";
 
+import type { Expense, ExpenseStatus } from "./expense.entity";
 import type {
   CreateExpenseCategoryInput,
   ExpenseCategory,
@@ -364,4 +370,233 @@ export interface ExpenseSocietyPolicy {
  */
 export interface ExpenseSocietyReader {
   findById(id: SocietyId, actor: UserId): Promise<ExpenseSocietyPolicy | null>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The expense draft record — Roadmap T065
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The expense form fields the aggregate deliberately does not own — T061's hand-off.
+ *
+ * `Expense.create()`'s docstring names these as T065's: "`vendorName`/`description`/
+ * `paymentSource`/`paidByMemberId` (T065's create/update use cases own the form
+ * domain)", and the split strategy/basis/config and selector live outside the
+ * aggregate because their canonical vocabulary is `@ses/split-engine`'s, which
+ * depends on this package — importing it here would invert the dependency.
+ *
+ * `splitConfig` and `participantSelector` are `unknown` on purpose: they are stored
+ * `jsonb`, validated at the wire by the shared contracts and (for the selector) by
+ * `createParticipantSelector` before they are written. A typed shape here would be a
+ * second schema for values the domain does not interpret on this path.
+ */
+export interface ExpenseDraftFields {
+  readonly description: string | null;
+  readonly vendorName: string | null;
+  readonly paymentSource: PaymentSource;
+  readonly paidByMemberId: MemberId | null;
+  readonly splitStrategy: SplitStrategy;
+  readonly apartmentBasis: ApartmentBasis | null;
+  readonly splitConfig: unknown;
+  readonly participantSelector: unknown;
+}
+
+/**
+ * One `expenses` row, in the expense module's own vocabulary — the projection the
+ * T065 use cases read and return.
+ *
+ * A **projection, not a second `Expense`**: the aggregate stays the authority for the
+ * lifecycle, the money and the four fields it owns, and this record pairs its values
+ * with the form fields T061 assigned to the use cases. It is flat because reads need
+ * one: reconstituting an aggregate requires a published row's split set to sum to its
+ * amount (`Expense.reconstitute`), and the split table belongs to T066/T068 — a list
+ * that joined it would be an N+1 for a fact no T065 screen shows.
+ */
+export interface ExpenseRecord extends ExpenseDraftFields {
+  readonly id: ExpenseId;
+  readonly societyId: SocietyId;
+  readonly categoryId: ExpenseCategoryId;
+  readonly title: string;
+  readonly amount: Money;
+  /** `YYYY-MM-DD` — a date, not an instant (the column is `date`). */
+  readonly expenseDate: string;
+  readonly createdBy: MemberId;
+  readonly status: ExpenseStatus;
+  readonly version: number;
+  readonly publishedAt: string | null;
+  readonly voidedAt: string | null;
+  readonly voidedBy: MemberId | null;
+  readonly voidReason: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** What `create` writes: the aggregate plus the form fields, one draft. */
+export interface CreateExpenseRecordInput {
+  readonly expense: Expense;
+  readonly fields: ExpenseDraftFields;
+}
+
+/**
+ * What `update` writes: the **whole** post-edit row plus the version the caller
+ * expected to find.
+ *
+ * `expense` carries the edited aggregate — its title, amount, date, category and
+ * status are the values to write — and `fields` carries the merged form fields. The
+ * update is one statement whose `WHERE` is `id + society_id + version =
+ * expectedVersion + status IN ('draft', 'pending_approval')`: a read-then-compare
+ * followed by an unconditional write is exactly the lost-update bug T065's acceptance
+ * asks to prevent.
+ */
+export interface UpdateExpenseRecordInput {
+  readonly expense: Expense;
+  readonly fields: ExpenseDraftFields;
+  readonly expectedVersion: number;
+}
+
+/** The stable sort tuple SAD §7.4 names: `{ expenseDate, id }`, newest first. */
+export interface ExpenseCursor {
+  readonly expenseDate: string;
+  readonly id: ExpenseId;
+}
+
+/**
+ * The filters SAD §7.5 declares, plus search and the cursor — nothing generic.
+ *
+ * Named parameters only: a client cannot express a predicate the schema does not
+ * have. `buildingId`, `hasAttachments` and `cycleId` from the SAD's example are
+ * deliberately absent because no column or table supports them yet — `expenses` has
+ * no `building_id` (the PRD's building scope is stored inside `participant_selector`),
+ * `cycle_id` was withheld by T060 until the cycles module exists, and attachments are
+ * T071's. The contract's strict query schema refuses them by name rather than
+ * ignoring them, which is what lets the gap be reported instead of silently widening
+ * a list.
+ */
+export interface ExpenseListQuery {
+  readonly categoryId?: ExpenseCategoryId | undefined;
+  readonly status?: ExpenseStatus | undefined;
+  /** Inclusive lower bound on `expense_date`. */
+  readonly dateFrom?: string | undefined;
+  /** Inclusive upper bound on `expense_date`. */
+  readonly dateTo?: string | undefined;
+  readonly amountPaiseMin?: Paise | undefined;
+  readonly amountPaiseMax?: Paise | undefined;
+  readonly createdBy?: MemberId | undefined;
+  /** Full-text query over title, description and vendor (the GIN index's expression). */
+  readonly search?: string | undefined;
+  readonly cursor?: ExpenseCursor | undefined;
+  /** Already clamped by the caller; the adapter never widens it. */
+  readonly limit: number;
+}
+
+/** One page, plus the cursor for the next — `null` when this is the last page. */
+export interface ExpensePage {
+  readonly expenses: readonly ExpenseRecord[];
+  readonly nextCursor: ExpenseCursor | null;
+}
+
+/**
+ * Expense draft persistence — Roadmap T065's five operations and nothing else.
+ *
+ * ## Why this port exists now
+ *
+ * `ExpenseReferenceReader`'s docstring anticipated it: "When T065 lands its
+ * repository, the token can be re-bound to it without the use case changing a line."
+ * This is that repository. It is not a god-repository: `publish`, splits, dues,
+ * balances and revisions are T066–T069's, and adding a method here before its task
+ * would be the boundary violation those rows exist to prevent.
+ *
+ * ## The actor, again
+ *
+ * Every method takes `actor` explicitly, like every other port in this package, and
+ * the implementation runs each statement inside `UnitOfWork` under that identity — so
+ * RLS decides which rows exist, and a cross-society id is structurally absent rather
+ * than filtered after the fact.
+ *
+ * ## Failure semantics are part of the contract
+ *
+ * `findById` answers `null`; `create` cannot fail on authorisation once the caller
+ * has passed the guard chain (RLS refuses with `forbidden` when it does); `update`
+ * throws `ExpenseError('version_mismatch')` carrying `currentVersion` when the row
+ * moved, `not_found` when it is not there, and `invalid_transition` when it is no
+ * longer editable; `deleteDraft` throws `not_found` / `forbidden` /
+ * `invalid_transition` and never reports success for a row it did not remove.
+ */
+export interface ExpenseRepository {
+  /** Insert one draft (or pending-approval) row and return what landed. */
+  create(
+    input: CreateExpenseRecordInput,
+    actor: UserId,
+  ): Promise<ExpenseRecord>;
+
+  /** One expense of one society, `null` when the actor may not see it. */
+  findById(
+    id: ExpenseId,
+    societyId: SocietyId,
+    actor: UserId,
+  ): Promise<ExpenseRecord | null>;
+
+  /**
+   * Write the whole post-edit row, optimistically locked on `expectedVersion`.
+   *
+   * Atomic in SQL: `WHERE id = ? AND society_id = ? AND version = ? AND status IN
+   * ('draft', 'pending_approval')`. A caller that lost the race gets
+   * `version_mismatch` with the row's **current** version, never a silent overwrite.
+   */
+  update(
+    id: ExpenseId,
+    societyId: SocietyId,
+    expectedVersion: number,
+    input: Omit<UpdateExpenseRecordInput, "expectedVersion">,
+    actor: UserId,
+  ): Promise<ExpenseRecord>;
+
+  /** One page of the filtered list, newest first, with the next cursor. */
+  list(
+    societyId: SocietyId,
+    query: ExpenseListQuery,
+    actor: UserId,
+  ): Promise<ExpensePage>;
+
+  /**
+   * Hard-delete one draft, creator only — the definer function T060 deferred.
+   *
+   * Not a soft delete and not a void: PRD §3.5 says "drafts can be hard-deleted by
+   * their creator", the table has no delete columns, and `DELETE` is withheld at the
+   * grant level — so this is the one path, enforced inside the database rather than
+   * by the caller.
+   */
+  deleteDraft(
+    id: ExpenseId,
+    societyId: SocietyId,
+    actor: UserId,
+  ): Promise<void>;
+}
+
+/**
+ * The one `society_settings` fact the approval threshold needs — PRD §2.2's default
+ * ₹10,000, `society_settings.approval_threshold_paise`.
+ *
+ * A port of its own rather than a widening of `ExpenseSocietyPolicy`: the two
+ * readers are two questions with two owners-to-be (resolution reads vacancy policy;
+ * the create/update use cases read the threshold), and widening the existing policy
+ * shape would make every T063/T064 fake invent a field no resolution uses.
+ */
+export interface ExpenseApprovalPolicy {
+  readonly settings: { readonly approvalThresholdPaise: Paise };
+}
+
+/**
+ * The threshold read, satisfied **structurally** by the society module's
+ * `SocietyRepositoryPostgres.findById` — the same borrow `ExpenseSocietyReader`
+ * makes, so no adapter exists to drift and this module owns no SQL over
+ * `society_settings`.
+ *
+ * `null` means "no such society, or no live membership for this caller": the two are
+ * one answer for the reason the society snapshot already collapses them. A caller
+ * that is an active member of the society can only reach the first case by the
+ * society having been deleted between two reads.
+ */
+export interface ExpenseApprovalPolicyReader {
+  findById(id: SocietyId, actor: UserId): Promise<ExpenseApprovalPolicy | null>;
 }

@@ -127,6 +127,18 @@ const NARROWED_ROUTES: readonly string[] = [
   // caller is composing (`kind: "expense", published: false`) before resolving
   // anyone, which is exactly the draft the 🟡 cell is about.
   "ExpensesController POST /expenses/preview-split",
+  // T065's create. The same 🟡 cell and the same narrowing: the record about to be
+  // written is a draft (`CreateExpenseUseCase.create`), and the threshold rule — not
+  // the caller — is the only thing that can move it to pending_approval.
+  "ExpensesController POST /expenses",
+  // T065's edit. `expense.void` is Admin/Treasurer full and Committee Member on
+  // *their own drafts*; `UpdateExpenseUseCase.update` narrows against the stored row's
+  // snapshot (`snapshotOf`), where `pending_approval` is deliberately not a draft.
+  "ExpensesController PATCH /expenses/:expenseId",
+  // T065's delete. The same 🟡 cell, narrowed the same way — and then narrowed again
+  // to the creator, which is the Roadmap's own sentence ("hard-deletable by their
+  // creator only").
+  "ExpensesController DELETE /expenses/:expenseId",
 ];
 
 async function collectRoutes(

@@ -28,6 +28,11 @@ import type { DomainErrorInit } from "../shared/errors";
  *  - `forbidden` — the caller is an active member whose role is not enough;
  *  - `conflict` — a duplicate category name, well-formed payload but a state that
  *    refuses it;
+ *  - `version_mismatch` — T065's optimistic lock: the row moved between the caller's
+ *    read and their write. It is its own code rather than a `conflict` because the
+ *    catalogue already has `VERSION_MISMATCH` (SAD §7.10) and because the refusal
+ *    carries the row's *current* version in `details`, which a client needs to offer
+ *    "reload and retry" — the SAD's own worked example shows exactly that shape;
  *  - `category_has_expenses` — a deletion refused because an expense references the
  *    category. Its own code rather than a `conflict`, for the reason
  *    `building_has_apartments` is: the two need different copy, and collapsing them
@@ -48,6 +53,7 @@ export const EXPENSE_ERROR_CODES = [
   "not_found",
   "forbidden",
   "conflict",
+  "version_mismatch",
   "category_has_expenses",
   "unknown",
 ] as const;

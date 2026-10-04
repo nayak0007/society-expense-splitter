@@ -5,10 +5,15 @@ import {
   CATEGORY_DISPLAY_ORDER_MIN,
   CATEGORY_ICON_MAX_LENGTH,
   CATEGORY_NAME_MAX_LENGTH,
+  EXPENSE_DESCRIPTION_MAX_LENGTH,
+  EXPENSE_STATUSES,
+  EXPENSE_TITLE_MAX_LENGTH,
+  EXPENSE_VENDOR_NAME_MAX_LENGTH,
   FLOOR_MAX,
   FLOOR_MIN,
   OCCUPANCY_STATUSES,
   PARTICIPANT_SCOPES,
+  PAYMENT_SOURCES,
   SELECTOR_MAX_TERMS,
   SPLIT_STRATEGIES,
   SPLIT_WARNING_CODES,
@@ -231,7 +236,14 @@ export const participantSelectorSchema = z.strictObject({
     .max(SELECTOR_MAX_TERMS)
     .optional(),
   excludeApartments: z.array(z.uuid()).max(SELECTOR_MAX_TERMS).optional(),
-  includeVacant: z.boolean().optional(),
+  /**
+   * `null` and absent are one fact — "not stated", so the society's
+   * `bill_vacant_flats` decides — which is why the schema admits both. The stored,
+   * canonical selector spells the absence `null` (T063's `includeVacant` is
+   * `boolean | null` deliberately), so a response carrying a stored selector through
+   * this schema would otherwise fail to parse the product's own default.
+   */
+  includeVacant: z.boolean().nullable().optional(),
   ownerOnly: z.boolean().optional(),
 });
 export type ParticipantSelectorPayload = z.infer<
@@ -450,3 +462,212 @@ export const previewSplitResponseSchema = z.object({
 export type PreviewSplitResponseDto = z.infer<
   typeof previewSplitResponseSchema
 >;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Expense draft lifecycle — Roadmap T065
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `YYYY-MM-DD` — the stored `date` column's own shape.
+ *
+ * Only the shape. The *calendar* round-trip (`2026-02-30` is not a date) and the
+ * 30-day future bound are `createExpenseDate`'s, and they run in the use case for the
+ * reason every cross-field rule does: a rule expressed twice drifts once. A malformed
+ * string is refused here with the offending field, before any row is read.
+ */
+const expenseDateSchema = z.iso.date();
+
+/**
+ * The form fields T061 handed to the create/update use cases (PRD §3.4).
+ *
+ * `null` and absent are different facts on a **patch** and the same one on a create:
+ * an absent key means "leave unchanged", an explicit `null` clears a nullable column
+ * (the convention `updateExpenseCategorySchema` records). `paidByMemberId` is
+ * nullable because the column is; the PRD's "required" is the form's and the publish
+ * path's business, and a draft is allowed to be incomplete.
+ */
+const expenseDraftFieldsShape = {
+  /** PRD §3.4's notes field; the column is `description`. */
+  description: z
+    .string()
+    .trim()
+    .max(EXPENSE_DESCRIPTION_MAX_LENGTH)
+    .nullable()
+    .optional(),
+  vendorName: z
+    .string()
+    .trim()
+    .max(EXPENSE_VENDOR_NAME_MAX_LENGTH)
+    .nullable()
+    .optional(),
+  paymentSource: z.enum(PAYMENT_SOURCES).optional(),
+  paidByMemberId: z.uuid().nullable().optional(),
+};
+
+/**
+ * `POST /expenses` — Roadmap T065.
+ *
+ * ## What is absent, and why
+ *
+ * `societyId` comes from `X-Society-Id` and `createdBy` from the caller's membership
+ * (SAD §1.1: scope comes from the token and the membership, never from the request),
+ * and `status` is **not a client field at all**: a new expense starts `draft` and is
+ * moved to `pending_approval` by the server's threshold rule, so accepting a status
+ * would be accepting an authorisation decision from the caller (T061's lifecycle is
+ * the only place a state lives).
+ *
+ * `splitStrategy` and `apartmentBasis` are optional because a category carries
+ * defaults for both and the preview already established the resolution order (the
+ * same `resolveSplitPlan` both doors call); `apartmentBasis` with no basis anywhere is
+ * a field error, exactly as it is in a preview.
+ *
+ * `currency`, `isRecurring` and `dueDate` are not exposed: the first is a server
+ * default for a single-market product, and the other two have no product path until
+ * the cycles/recurring modules exist (T060 withheld their columns' companions).
+ */
+export const createExpenseSchema = z.strictObject({
+  title: z.string().trim().min(1).max(EXPENSE_TITLE_MAX_LENGTH),
+  amountPaise: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  expenseDate: expenseDateSchema,
+  categoryId: z.uuid(),
+  ...expenseDraftFieldsShape,
+  splitStrategy: z.enum(SPLIT_STRATEGIES).optional(),
+  apartmentBasis: z.enum(APARTMENT_BASES).nullable().optional(),
+  splitConfig: splitConfigSchema.optional(),
+  participantSelector: participantSelectorSchema.optional(),
+});
+export type CreateExpensePayload = z.infer<typeof createExpenseSchema>;
+
+/**
+ * `PATCH /expenses/:expenseId` — create with every field optional, plus the version
+ * the caller read (PRD's PATCH example carries `expectedVersion`).
+ *
+ * `expectedVersion` is **required**, not defaulted: an optimistic lock the caller can
+ * omit is not a lock, and every write here (T065's acceptance: "version incremented on
+ * every write") must state what it believed it was editing. The `refine` refuses a
+ * body that carries only the version — an empty patch reaches the use case as a
+ * no-op write otherwise, which would bump the version for nothing.
+ *
+ * `splitConfig` and `participantSelector` are nullable on a patch so an editor can
+ * reset them to the product's defaults (`{}`); every other nullable field clears its
+ * column.
+ */
+export const updateExpenseSchema = createExpenseSchema
+  .extend({
+    splitConfig: splitConfigSchema.nullable().optional(),
+    participantSelector: participantSelectorSchema.nullable().optional(),
+  })
+  .partial()
+  .extend({ expectedVersion: z.number().int().min(1) })
+  .refine(
+    (patch) => Object.keys(patch).some((key) => key !== "expectedVersion"),
+    { message: "Nothing to update" },
+  );
+export type UpdateExpensePayload = z.infer<typeof updateExpenseSchema>;
+
+/**
+ * One expense on the wire — the fields every T065 route returns.
+ *
+ * The names mirror the entity and the columns, so a rename is a rename in three
+ * places rather than a mapping table in one. Money is integer paise (SAD §7.9) and
+ * `expenseDate` is the stored date, not an instant.
+ *
+ * `splitConfig` and `participantSelector` travel as their own strict schemas rather
+ * than as opaque objects: the mappers *parse* responses (T064's convention), and a
+ * stored selector that this build cannot represent is a drift bug worth surfacing as
+ * a 500 at the boundary instead of on a client. A draft's selector is stored
+ * canonically by `createParticipantSelector`, which is why the response schema has to
+ * admit `includeVacant: null` — "not stated" is a real stored fact.
+ *
+ * Deliberately absent: `currency` (single-market server default), the approval stamps
+ * (`approvedBy`/`approvedAt` arrive with T070), and the publish-time `splitSummary` —
+ * no T065 route publishes anything.
+ */
+export const expenseSchema = z.object({
+  id: z.string(),
+  societyId: z.string(),
+  categoryId: z.string(),
+  title: z.string(),
+  description: z.string().nullable(),
+  amountPaise: z.number().int(),
+  expenseDate: z.string(),
+  vendorName: z.string().nullable(),
+  paymentSource: z.enum(PAYMENT_SOURCES),
+  paidByMemberId: z.string().nullable(),
+  splitStrategy: z.enum(SPLIT_STRATEGIES),
+  apartmentBasis: z.enum(APARTMENT_BASES).nullable(),
+  splitConfig: splitConfigSchema,
+  participantSelector: participantSelectorSchema,
+  status: z.enum(EXPENSE_STATUSES),
+  version: z.number().int(),
+  createdBy: z.string(),
+  publishedAt: z.string().nullable(),
+  voidedAt: z.string().nullable(),
+  voidedBy: z.string().nullable(),
+  voidReason: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type ExpenseDto = z.infer<typeof expenseSchema>;
+
+/** `POST /expenses` and `PATCH /expenses/:expenseId` — the expense alone. */
+export const expenseResponseSchema = z.object({ expense: expenseSchema });
+export type ExpenseResponseDto = z.infer<typeof expenseResponseSchema>;
+
+/**
+ * `GET /expenses` — SAD §7.5's named filters, SAD §7.4's cursor.
+ *
+ * Every parameter is declared and a field outside this schema is refused rather than
+ * ignored, which is what makes the three filters the schema does **not** have
+ * deliberately loud: `buildingId`, `hasAttachments` and `cycleId` are the SAD's but
+ * have no column or table yet (T060 withheld `cycle_id`; attachments are T071; the
+ * PRD's building scope lives inside `participant_selector`).
+ *
+ * `limit` clamps silently at 100, as SAD §7.4 requires ("Exceeding the max clamps
+ * silently rather than erroring"); a non-numeric or non-positive one is still a
+ * validation failure. `dateFrom`/`dateTo` are a range, and the refinement pins the
+ * one cross-field rule the document states (`dateTo >= dateFrom`).
+ */
+export const listExpensesQuerySchema = z
+  .strictObject({
+    categoryId: z.uuid().optional(),
+    status: z.enum(EXPENSE_STATUSES).optional(),
+    dateFrom: expenseDateSchema.optional(),
+    dateTo: expenseDateSchema.optional(),
+    amountPaiseMin: z.coerce.number().int().min(0).optional(),
+    amountPaiseMax: z.coerce.number().int().min(0).optional(),
+    createdBy: z.uuid().optional(),
+    /** Full-text search over title, description and vendor. */
+    q: z.string().trim().min(1).max(200).optional(),
+    /** Base64 of `{ expenseDate, id }` — SAD §7.4's sort tuple. */
+    cursor: z.string().min(1).optional(),
+    limit: z.coerce
+      .number()
+      .int()
+      .positive()
+      .transform((value) => Math.min(value, 100))
+      .optional(),
+  })
+  .refine(
+    (query) =>
+      query.dateFrom === undefined ||
+      query.dateTo === undefined ||
+      query.dateFrom <= query.dateTo,
+    { message: "dateTo must not be before dateFrom.", path: ["dateTo"] },
+  );
+export type ListExpensesQueryPayload = z.infer<typeof listExpensesQuerySchema>;
+
+/**
+ * One page of expenses plus the cursor for the next page.
+ *
+ * `nextCursor` is `null` on the last page and `hasMore` says whether another request
+ * would return anything — the pair SAD §7.4's envelope defines (its `total` is
+ * explicitly optional and deliberately not computed here: a second count query on
+ * every list is not cheap once the table is the society's whole ledger).
+ */
+export const expenseListResponseSchema = z.object({
+  expenses: z.array(expenseSchema),
+  nextCursor: z.string().nullable(),
+  hasMore: z.boolean(),
+});
+export type ExpenseListResponseDto = z.infer<typeof expenseListResponseSchema>;
