@@ -13,13 +13,16 @@ import {
   EXPENSE_PARTICIPANT_READER,
   EXPENSE_SOCIETY_READER,
 } from "./application/participant.tokens";
+import { PreviewSplitUseCase } from "./application/use-cases/preview-split.use-case";
 import { ExpenseCategoryRepositoryPostgres } from "./infrastructure/category.repository";
 import { ExpenseParticipantRepositoryPostgres } from "./infrastructure/participant.repository";
 import { ExpenseCategoriesController } from "./presentation/categories.controller";
+import { ExpensesController } from "./presentation/expenses.controller";
 
 /**
- * The expenses feature module — Roadmap T062 (categories) and T063 (participant
- * resolution), with expense CRUD, publishing, previews and attachments still to come.
+ * The expenses feature module — Roadmap T062 (categories), T063 (participant
+ * resolution) and T064 (the stateless split preview), with expense CRUD, publishing,
+ * recalculation and attachments still to come.
  *
  * ## The dependency direction is the module's whole content
  *
@@ -99,7 +102,7 @@ import { ExpenseCategoriesController } from "./presentation/categories.controlle
  */
 @Module({
   imports: [DatabaseModule, SocietiesModule],
-  controllers: [ExpenseCategoriesController],
+  controllers: [ExpenseCategoriesController, ExpensesController],
   providers: [
     ExpenseCategoryOperations,
     ExpenseCategoryRepositoryPostgres,
@@ -128,6 +131,10 @@ import { ExpenseCategoriesController } from "./presentation/categories.controlle
       // a table that is not its own.
       useExisting: SOCIETY_REPOSITORY,
     },
+    // T064's preview. It composes the resolver above with `@ses/split-engine`'s
+    // `computeSplit` — the same engine T066's publish will call, which is the whole
+    // point of the endpoint: what the split editor previews is what the bill will be.
+    PreviewSplitUseCase,
   ],
 })
 export class ExpensesModule {}

@@ -84,3 +84,43 @@ export function isSplitStrategy(value: string): value is SplitStrategy {
 export function isApartmentBasis(value: string): value is ApartmentBasis {
   return (APARTMENT_BASES as readonly string[]).includes(value);
 }
+
+/**
+ * Why a split is still a split but something about its data is worth saying —
+ * Roadmap T058, moved here by T064.
+ *
+ * The distinction from an error is the whole point: an **error** means the
+ * calculation cannot proceed (a reversed floor band, a BHK of `2.25`), while a
+ * **warning** means it proceeded and a caller should know why the result looks the
+ * way it does — `MISSING_AREA`'s flats are *not in the allocations*, and without
+ * the warning their absence would be invisible.
+ *
+ * ## Why the vocabulary lives in the domain now
+ *
+ * The same reason {@link SPLIT_STRATEGIES} does: it crosses layers. The engine
+ * produces warnings (T058), the preview endpoint returns them on the wire (T064),
+ * and `@ses/contracts` validates the response with `z.enum(SPLIT_WARNING_CODES)` —
+ * but contracts may import only the domain, never the engine. Re-declaring the four
+ * codes in the contract would be a second spelling of a closed vocabulary whose
+ * failure mode is silent: a code the engine emits and the contract does not is
+ * simply unparseable, which reads as a server bug. The engine re-exports both names
+ * from `types.ts`, so `grep SPLIT_WARNING_CODES` still finds one definition and
+ * every existing import keeps working — the identical move T062 made for the
+ * strategy and basis lists.
+ *
+ * ## The order is load-bearing
+ *
+ * A result carries **one warning per code, not per flat** (the PRD's own wire
+ * example reports three flats with one warning), and the warnings are emitted in
+ * this order — so two callers who assembled the same result see byte-identical
+ * warning lists. Changing the order is therefore a change to the engine's output
+ * contract, not a presentation choice.
+ */
+export const SPLIT_WARNING_CODES = [
+  "MISSING_AREA",
+  "MISSING_BHK",
+  "MISSING_FLOOR",
+  "NO_FLOOR_BAND",
+] as const;
+
+export type SplitWarningCode = (typeof SPLIT_WARNING_CODES)[number];

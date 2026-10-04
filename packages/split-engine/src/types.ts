@@ -6,6 +6,7 @@ import {
   type MemberId,
   type Money,
   type Paise,
+  type SplitWarningCode,
   type Weight,
 } from "@ses/domain";
 
@@ -650,14 +651,15 @@ export interface SplitAllocation {
  * one warning, and a split table wants one line saying "3 flats have no area",
  * not three lines saying one each.
  */
-export const SPLIT_WARNING_CODES = [
-  "MISSING_AREA",
-  "MISSING_BHK",
-  "MISSING_FLOOR",
-  "NO_FLOOR_BAND",
-] as const;
-
-export type SplitWarningCode = (typeof SPLIT_WARNING_CODES)[number];
+// The four codes and their order moved to `@ses/domain` in T064
+// (`shared/split-vocabulary.ts`), which is where the full rationale for the move now
+// lives: the preview response contract (T064) validates the warning list with
+// `z.enum(SPLIT_WARNING_CODES)`, and `@ses/contracts` may import only the domain —
+// never the engine. Re-exported rather than re-declared, so `grep SPLIT_WARNING_CODES`
+// still finds one definition and every existing import keeps working; the identical
+// move T062 made for `SPLIT_STRATEGIES` and `APARTMENT_BASES`. `SplitWarningCode` is
+// also imported above because the interface below names it.
+export { SPLIT_WARNING_CODES, type SplitWarningCode } from "@ses/domain";
 
 export interface SplitWarning {
   readonly code: SplitWarningCode;

@@ -37,6 +37,7 @@
     "@ses/contracts": "workspace:*",
     "@ses/db-schema": "workspace:*",
     "@ses/domain": "workspace:*",
+    "@ses/split-engine": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "ioredis": "^6.0.0",
     "jose": "^6.2.12",

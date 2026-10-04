@@ -32,3 +32,29 @@ export function ApiExpenseCategoryErrors(): ClassDecorator & MethodDecorator {
       "A live category of this society already carries that name (`code: CATEGORY_NAME_TAKEN`); or an expense references the category, so it cannot be removed (`code: CATEGORY_HAS_EXPENSES`).",
   });
 }
+
+/**
+ * The error responses T064's preview route can return.
+ *
+ * The 404 description is the same three indistinguishable cases the category routes
+ * name, and the preview adds a fourth of the same kind: a building, wing or excluded
+ * apartment the selector names that this society does not have is answered by the
+ * resolver as `not_found` for exactly the same reason — a distinguishable answer would
+ * let a caller enumerate another tenant's structure (PRD T041). The 403 is narrow: the
+ * caller is an active member, and the only thing a 403 can mean is a role that does not
+ * hold `expense.create` (Admin, Treasurer or Committee Member — the matrix's delegated
+ * cell for composing an expense, which is what a preview is).
+ *
+ * A preview performs no write, so no state can conflict and no 409 is produced; the
+ * `conflict` copy says so rather than documenting a status a client might retry on.
+ */
+export function ApiExpensePreviewErrors(): ClassDecorator & MethodDecorator {
+  return ApiErrorResponses({
+    notFound:
+      "No such society, no such category, building or apartment — or one the caller is not an active member of. This API deliberately does not distinguish these (PRD T041).",
+    forbidden:
+      "An active member whose role does not hold `expense.create`: Admin, Treasurer or Committee Member (the Committee Member's grant is draft-only, which is what a preview composes).",
+    conflict:
+      "Not produced by this route: a preview performs no write, so no state can conflict.",
+  });
+}

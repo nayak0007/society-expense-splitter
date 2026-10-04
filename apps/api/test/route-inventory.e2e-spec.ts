@@ -117,13 +117,17 @@ const keyOf = (entry: RouteEntry): string =>
 /**
  * Routes whose declared action is conditional, with the site that narrows it.
  *
- * Empty today, and that is the finding rather than an omission: **no shipped route
- * declares a 🟡 action**, because every one of the six belongs to a module that
- * does not exist yet (expenses, complaints, reports, audit). The entry this list
- * will hold names the use case that calls `canOnResource`, so that adding the
- * route and adding the narrowing site are the same change.
+ * Each entry names a 🟡 route and the use case that calls `canOnResource` — so that
+ * adding the route and adding the narrowing site are the same change, and a scoped
+ * grant can never ship as a bare permission declaration.
  */
-const NARROWED_ROUTES: readonly string[] = [];
+const NARROWED_ROUTES: readonly string[] = [
+  // T064's preview. `expense.create` is Admin/Treasurer full and Committee Member
+  // *draft only*; `PreviewSplitUseCase.preview` narrows it against the record the
+  // caller is composing (`kind: "expense", published: false`) before resolving
+  // anyone, which is exactly the draft the 🟡 cell is about.
+  "ExpensesController POST /expenses/preview-split",
+];
 
 async function collectRoutes(
   app: NestFastifyApplication,

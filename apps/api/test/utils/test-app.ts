@@ -8,7 +8,9 @@ import type {
   ApartmentRepository,
   BuildingRepository,
   ExpenseCategoryRepository,
+  ExpenseParticipantReader,
   ExpenseReferenceReader,
+  ExpenseSocietyReader,
   InvitationRepository,
   InvitationTokenPort,
   MemberRepository,
@@ -34,6 +36,10 @@ import {
   EXPENSE_CATEGORY_REPOSITORY,
   EXPENSE_REFERENCE_READER,
 } from "../../src/modules/expenses/application/expense-category.tokens";
+import {
+  EXPENSE_PARTICIPANT_READER,
+  EXPENSE_SOCIETY_READER,
+} from "../../src/modules/expenses/application/participant.tokens";
 import { MEMBER_REPOSITORY } from "../../src/modules/members/application/member.tokens";
 import { SOCIETY_REPOSITORY } from "../../src/modules/societies/application/society.tokens";
 import {
@@ -179,6 +185,20 @@ export type TestAppOptions = {
    */
   categories?: ExpenseCategoryRepository & ExpenseReferenceReader;
   /**
+   * Substitutes the society roster resolution reads (T063/T064) — **both** participant
+   * ports at once, plus the membership read the resolver's use case performs.
+   *
+   * One seam rather than three, for the reason the `categories` seam records: the fake
+   * directory is a *world* (flats, members, wings, buildings, the vacancy policy and the
+   * caller's memberships), and splitting it would let a suite seed the flats in one fake
+   * and the memberships in another — the drift a test fixture must not have. The same
+   * object can be passed as `membershipReader`, exactly as the expenses e2e suite points
+   * its two membership seams at one fixture on purpose.
+   */
+  participants?: ExpenseParticipantReader &
+    ExpenseSocietyReader &
+    StructureMembershipReader;
+  /**
    * Substitutes the caller's membership read used by the building use cases.
    *
    * Separate from `reader` (which `SocietyGuard` uses) even though both are
@@ -287,6 +307,13 @@ export async function createTestApp(
       .useValue(options.categories)
       .overrideProvider(EXPENSE_REFERENCE_READER)
       .useValue(options.categories);
+  }
+  if (options.participants !== undefined) {
+    builder
+      .overrideProvider(EXPENSE_PARTICIPANT_READER)
+      .useValue(options.participants)
+      .overrideProvider(EXPENSE_SOCIETY_READER)
+      .useValue(options.participants);
   }
 
   const moduleRef = await builder.compile();
