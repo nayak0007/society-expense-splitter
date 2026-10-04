@@ -373,38 +373,45 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
  * `expense_date::text` keeps a `date` a date instead of a midnight instant.
  * `version` is returned without a cast — it is the optimistic lock's operand and an
  * `int4`, and the row schema coerces it.
+ *
+ * Exported as the list of expressions rather than only as the joined fragment,
+ * because T066's `expense_publish()` returns the *same* row shape plus one extra
+ * column, and the split repository composes its select from this list. Two spellings
+ * of the row would be one rename away from a response that silently loses a field —
+ * the exact failure `expenseRowSchema` exists to make loud.
  */
-const EXPENSE_COLUMNS = sql.raw(
-  [
-    "id",
-    "society_id",
-    "category_id",
-    "title",
-    "description",
-    "amount_paise::text as amount_paise",
-    "expense_date::text as expense_date",
-    "vendor_name",
-    "payment_source",
-    "paid_by_member_id",
-    "split_strategy",
-    "apartment_basis",
-    "split_config",
-    "participant_selector",
-    "status",
-    "created_by",
-    "published_at",
-    "voided_at",
-    "voided_by",
-    "void_reason",
-    "version",
-    "created_at",
-    "updated_at",
-  ].join(", "),
-);
+export const EXPENSE_COLUMN_EXPRESSIONS: readonly string[] = [
+  "id",
+  "society_id",
+  "category_id",
+  "title",
+  "description",
+  "amount_paise::text as amount_paise",
+  "expense_date::text as expense_date",
+  "vendor_name",
+  "payment_source",
+  "paid_by_member_id",
+  "split_strategy",
+  "apartment_basis",
+  "split_config",
+  "participant_selector",
+  "status",
+  "created_by",
+  "published_at",
+  "voided_at",
+  "voided_by",
+  "void_reason",
+  "version",
+  "created_at",
+  "updated_at",
+];
 
-type Row = Record<string, unknown>;
+const EXPENSE_COLUMNS = sql.raw(EXPENSE_COLUMN_EXPRESSIONS.join(", "));
 
-async function runQuery(
+export type Row = Record<string, unknown>;
+
+/** The one `execute` → rows cast, shared with the split repository (T066). */
+export async function runQuery(
   tx: TransactionContext,
   statement: SQL,
 ): Promise<readonly Row[]> {

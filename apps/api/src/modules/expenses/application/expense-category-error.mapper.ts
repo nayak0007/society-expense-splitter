@@ -49,6 +49,15 @@ export const ERROR_CODE_BY_EXPENSE_CODE: Readonly<
   // T065's optimistic lock. The catalogue's own code — 409 — and the refusal carries
   // the row's current version in `details` so a client can reload rather than guess.
   version_mismatch: "VERSION_MISMATCH",
+  // T066's retry key, used for a *different* request. The catalogue's own code; the
+  // status is the catalogue's choice (409), which is where SAD §7.7's prose ("422")
+  // and the shipped `HTTP_STATUS_BY_ERROR_CODE` disagree — the shipped one wins, and
+  // the divergence is recorded in the T066 report.
+  idempotency_key_reuse: "IDEMPOTENCY_KEY_REUSE",
+  // T066's fail-closed refusal: a billable flat with nobody to charge. A `422`
+  // rather than a `409` because the request is well formed and the *state* is
+  // incomplete — the product's answer is "fix the roster", not "retry later".
+  unassigned_participants: "VALIDATION_ERROR",
   // A category an expense still references. 409 for the same reason a duplicate name
   // is — the state refused it — and the code is preserved on the wire so a client can
   // tell "rename it" from "deactivate it instead" without matching on message text.
@@ -110,6 +119,26 @@ function detailsFor(
   error: ExpenseError,
   field: string | undefined,
 ): readonly ErrorDetail[] | undefined {
+  if (error.code === "unassigned_participants") {
+    // One detail per flagged flat, so a client can render the treasurer's queue
+    // rather than parse the sentence. The entries are validated structurally: a
+    // `details` bag is `unknown` by construction, and a form fed a malformed list
+    // would be worse than one fed only the message.
+    const entries = error.details?.["unassigned"];
+    if (!Array.isArray(entries) || entries.length === 0) return undefined;
+    return entries.map((entry) => {
+      const flat = entry as {
+        apartmentNumber?: unknown;
+        reason?: unknown;
+      };
+      return {
+        field: "participantSelector",
+        code: "UNASSIGNED_PARTICIPANTS",
+        message: `Flat ${String(flat.apartmentNumber ?? "(unknown)")} has nobody to charge (${String(flat.reason ?? "unassigned")}).`,
+      };
+    });
+  }
+
   if (error.code === "version_mismatch") {
     const expected = error.details?.expectedVersion;
     const current = error.details?.currentVersion;

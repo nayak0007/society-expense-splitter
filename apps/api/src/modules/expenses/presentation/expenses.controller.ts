@@ -9,9 +9,11 @@ import {
   Patch,
   Post,
   Query,
+  Res,
 } from "@nestjs/common";
 import {
   ApiCreatedResponse,
+  ApiHeader,
   ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
@@ -23,27 +25,34 @@ import {
   createExpenseSchema,
   expenseListResponseSchema,
   expenseResponseSchema,
+  idempotencyKeySchema,
   listExpensesQuerySchema,
   previewSplitRequestSchema,
   previewSplitResponseSchema,
+  publishExpenseSchema,
+  publishExpenseResponseSchema,
   updateExpenseSchema,
 } from "@ses/contracts";
 import type {
   CreateExpensePayload,
+  IdempotencyKeyPayload,
   ListExpensesQueryPayload,
   PreviewSplitRequestPayload,
+  PublishExpensePayload,
   UpdateExpensePayload,
 } from "@ses/contracts";
 import { asExpenseId, asUserId } from "@ses/domain";
 import { z } from "zod";
 
 import { ApiSocietyContext } from "../../../common/authorization/api-society-context.decorator";
+import { writeResponseHeader } from "../../../common/http/http-access";
 import {
   Ctx,
   requireActor,
   requireSociety,
   type RequestCtx,
 } from "../../../common/decorators/ctx.decorator";
+import { HeaderParam } from "../../../common/decorators/header-param.decorator";
 import { NoEnvelope } from "../../../common/decorators/no-envelope.decorator";
 import { RequirePermission } from "../../../common/decorators/require-permission.decorator";
 import { ZodPipe } from "../../../common/pipes/zod.pipe";
@@ -53,13 +62,23 @@ import { DeleteDraftUseCase } from "../application/use-cases/delete-draft.use-ca
 import { GetExpenseUseCase } from "../application/use-cases/get-expense.use-case";
 import { ListExpensesUseCase } from "../application/use-cases/list-expenses.use-case";
 import { PreviewSplitUseCase } from "../application/use-cases/preview-split.use-case";
+import { PublishExpenseUseCase } from "../application/use-cases/publish-expense.use-case";
 import { UpdateExpenseUseCase } from "../application/use-cases/update-expense.use-case";
-import { expenseListToDto, expenseResponseToDto } from "./expense.mapper";
+import {
+  expenseListToDto,
+  expensePublicationToDto,
+  expenseResponseToDto,
+} from "./expense.mapper";
 import { expenseSplitPreviewToDto } from "./expense-preview.mapper";
-import { ApiExpenseDraftErrors, ApiExpensePreviewErrors } from "./openapi";
+import {
+  ApiExpenseDraftErrors,
+  ApiExpensePreviewErrors,
+  ApiExpensePublishErrors,
+} from "./openapi";
 
 /**
- * Expense endpoints — Roadmap T064's preview and T065's draft lifecycle.
+ * Expense endpoints — Roadmap T064's preview, T065's draft lifecycle and T066's
+ * publication.
  *
  * ## The addresses are the PRD's, under the module's own noun
  *
@@ -106,6 +125,7 @@ export class ExpensesController {
     private readonly getExpense: GetExpenseUseCase,
     private readonly listExpenses: ListExpensesUseCase,
     private readonly deleteDraft: DeleteDraftUseCase,
+    private readonly publishExpense: PublishExpenseUseCase,
   ) {}
 
   /**
@@ -347,5 +367,91 @@ export class ExpensesController {
       society.id,
       asExpenseId(expenseId),
     );
+  }
+
+  /**
+   * Publish a draft or a pending expense — the PRD's bill becomes real.
+   *
+   * `200` rather than `201`: nothing is created at a new address, and a retry has to
+   * be able to answer the same way. The path is the PRD's (`POST
+   * /expenses/:eid/publish` under the global `/v1`), the action is the matrix's
+   * `expense.publish` (Admin or Treasurer — a Committee Member's draft-only cell does
+   * not reach it), and the body is one number: the version the caller believed it was
+   * publishing. Everything financial — amount, strategy, config, selector,
+   * participants, allocations — is recomputed server-side from the persisted row and
+   * the current society state, so a stale preview cannot be replayed as an
+   * authorisation.
+   *
+   * `Idempotency-Key` is **required** (SAD §7.7: mandatory on every POST that creates
+   * money movement). A key that already published this request's expense answers the
+   * stored response verbatim with `Idempotency-Replayed: true` and writes nothing; a
+   * key used for a *different* request is `409 IDEMPOTENCY_KEY_REUSE`.
+   *
+   * The refusal this route is most likely to produce in practice is the flagged-flat
+   * one: if any resolved, billable flat has nobody to charge (no owner for an
+   * owner-only charge, or no member at all), publication is refused with
+   * `422 VALIDATION_ERROR` and one `details` entry per flat rather than a bill that
+   * silently omits it. See `PublishExpenseUseCase` for why that is the only
+   * implementable option today.
+   */
+  @Post(":expenseId/publish")
+  @RequirePermission("expense.publish")
+  @HttpCode(HttpStatus.OK)
+  @ApiExpensePublishErrors()
+  @ApiOperation({
+    summary: "Publish an expense",
+    description:
+      "Admin or Treasurer. Recomputes the split from the persisted expense and the current participant roster — a preview is never trusted as input — and writes the splits, the transition and the idempotency record in one transaction. Requires the current `expectedVersion` and an `Idempotency-Key`. Refused while any billable flat has nobody to charge, rather than publishing a bill that omits it.",
+  })
+  @ApiParam({ name: "expenseId", description: "Expense UUID." })
+  @ApiHeader({
+    name: "Idempotency-Key",
+    required: true,
+    description:
+      "SAD §7.7's mandatory retry key for money-moving POSTs, 8–128 characters. Replaying a key returns the stored response with `Idempotency-Replayed: true` and publishes nothing.",
+  })
+  @ApiOkResponse({
+    description:
+      "The published expense (status `published`, with `publishedAt` and the version the database stamped) plus the split summary measured over the rows that committed.",
+    schema: envelopeSchemaOf(publishExpenseResponseSchema),
+    headers: {
+      "Idempotency-Replayed": {
+        description:
+          "`true` when this response is the stored one from an earlier request with the same key; absent on a fresh publication.",
+        schema: { type: "string" },
+      },
+    },
+  })
+  async publish(
+    @Ctx() context: RequestCtx,
+    @Param("expenseId", new ZodPipe(expenseIdParam)) expenseId: string,
+    @HeaderParam("idempotency-key", new ZodPipe(idempotencyKeySchema))
+    idempotencyKey: IdempotencyKeyPayload,
+    @Body(new ZodPipe(publishExpenseSchema)) body: PublishExpensePayload,
+    // `passthrough: true` keeps Nest's serialization and the envelope interceptor in
+    // charge of the body; this controller only ever writes one header on it.
+    @Res({ passthrough: true }) response: unknown,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+
+    const publication = await this.publishExpense.publish(
+      asUserId(userId),
+      society.id,
+      asExpenseId(expenseId),
+      { expectedVersion: body.expectedVersion, idempotencyKey },
+    );
+
+    // The one header, and only on a replay: a client that lost the first response
+    // needs to know this body is stored rather than freshly computed, and the body
+    // itself is deliberately identical either way. Written through
+    // `writeResponseHeader`, which tries Node's `setHeader` and falls back to
+    // Fastify's `header` — the adapter this API actually runs on exposes only the
+    // latter, so `response.setHeader(...)` here was a 500 on every replay.
+    if (publication.replayed) {
+      writeResponseHeader(response, "Idempotency-Replayed", "true");
+    }
+
+    return expensePublicationToDto(publication);
   }
 }

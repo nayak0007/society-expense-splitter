@@ -169,7 +169,14 @@ export interface PreviewSplitConfig {
  * disagree about what a selector is.
  */
 export interface PreviewSplitCommand {
-  readonly amountPaise: number;
+  /**
+   * The amount in paise. `bigint` as well as `number` because T066's publish path
+   * calls this same plan builder with the **persisted** amount, which is a `bigint`
+   * by the time a row has been read (`ExpenseRecord.amount.paise`); widening the
+   * parameter keeps the one authority callable from both doors without a lossy
+   * `Number()` in between.
+   */
+  readonly amountPaise: number | bigint;
   readonly selector: unknown;
   /** `null` and absent are one fact: no category defaults are consulted. */
   readonly categoryId?: string | null | undefined;
@@ -379,7 +386,7 @@ function storedShareUnits(value: number): number {
 export function buildSplitInput(
   resolution: ExpenseParticipantResolution,
   plan: ResolvedSplitPlan,
-  amountPaise: number,
+  amountPaise: number | bigint,
   config: PreviewSplitConfig | undefined,
 ): Result<SplitInput, ExpenseError> {
   const amount = Money.fromPaise(paise(amountPaise));

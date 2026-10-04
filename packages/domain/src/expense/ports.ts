@@ -10,7 +10,7 @@ import type {
 } from "../shared/ids";
 import type { MemberOccupancy } from "../member/member";
 import type { Paise } from "../shared/money";
-import type { Money } from "../shared/money.vo";
+import type { Money, Weight } from "../shared/money.vo";
 import type { PaymentSource } from "../shared/payment-sources";
 import type { ApartmentBasis, SplitStrategy } from "../shared/split-vocabulary";
 import type { OccupancyStatus } from "../structure/apartment";
@@ -22,6 +22,8 @@ import type {
   ExpenseCategory,
   UpdateExpenseCategoryInput,
 } from "./expense-category";
+import type { ExpenseEvent } from "./events";
+import type { AssignedReason } from "./split-reasons";
 
 /**
  * Expense-category repository port (Clean Architecture: the domain declares what it
@@ -599,4 +601,208 @@ export interface ExpenseApprovalPolicy {
  */
 export interface ExpenseApprovalPolicyReader {
   findById(id: SocietyId, actor: UserId): Promise<ExpenseApprovalPolicy | null>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Publishing — Roadmap T066
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One allocation, as the publish path persists it — the `expense_splits` row's
+ * writable content, in the domain's vocabulary.
+ *
+ * Five of its fields are the split engine's allocation verbatim (`memberId`,
+ * `apartmentId`, `amount`, `weight`), because it **is** the engine's result: the
+ * publish use case maps the result onto this shape and nothing here recomputes or
+ * re-rounds anything (T066's acceptance: "persist exactly the allocations produced
+ * by the authoritative publish calculation").
+ *
+ * The two fields the engine knows nothing about are the module's own:
+ *
+ *  - `percent` is the exact decimal string for the *percentage* strategy (its
+ *    weight is basis points, hundredths of a percent, so `33.33%` is `"33.33"`),
+ *    and `null` for every other strategy. It travels as text because the column is
+ *    `numeric(7,4)` and a JS number would be the one float in the money's
+ *    neighbourhood;
+ *  - `snapshot` is PRD §7.3's "member name, flat no at publish time" — the fact
+ *    that makes a rename not rewrite history. It is a value the *publish* caller
+ *    supplies (from the roster as it is at publication), never one a later read
+ *    reconstructs.
+ *
+ * `assignedReason` is `'owner_only_category'` exactly when resolution moved the
+ * charge off the flat's occupant (T063) — the value `expense_splits.assigned_reason`
+ * was added for.
+ */
+export interface PublishExpenseAllocation {
+  readonly memberId: MemberId;
+  readonly apartmentId: ApartmentId;
+  readonly amount: Money;
+  readonly weight: Weight;
+  /** `null` unless the effective strategy is `percentage`. */
+  readonly percent: string | null;
+  readonly assignedReason: AssignedReason | null;
+  readonly snapshot: {
+    readonly memberName: string;
+    readonly apartmentNumber: string;
+  };
+}
+
+/**
+ * The facts that identify one publication attempt — what a retry has to repeat
+ * exactly, and what a stored record is looked up by.
+ *
+ * Split out from `PublishExpenseRecordInput` because the *read* side needs it too:
+ * `findPublication` answers whether this attempt already committed, and it must be
+ * asked with the same three facts the write would use. Sharing the shape means a
+ * caller cannot hash or key a lookup differently from the write it is looking for.
+ */
+export interface ExpensePublicationLookup {
+  /** The version the caller believed it was publishing — the optimistic lock. */
+  readonly expectedVersion: number;
+  /** The `Idempotency-Key` header, opaque and already validated by the contract. */
+  readonly idempotencyKey: string;
+  /**
+   * A hash of the request this key was used for. A second request with the same
+   * key and a different hash is `idempotency_key_reuse`, never a replay.
+   */
+  readonly requestHash: string;
+}
+
+/** What `ExpenseSplitRepository.publish` writes, besides the transition itself. */
+export interface PublishExpenseRecordInput extends ExpensePublicationLookup {
+  readonly allocations: readonly PublishExpenseAllocation[];
+}
+
+/**
+ * What one publication produced, read back from the rows it wrote.
+ *
+ * `summary` is measured over the **persisted** split rows — not over the computed
+ * allocations — so a response can only describe what committed, and the
+ * conservation fact a caller reads (`total`) is the database's own sum. `replayed`
+ * is `true` when nothing was written at all: this response is the one an earlier
+ * request with the same key produced.
+ */
+export interface ExpensePublication {
+  readonly expense: ExpenseRecord;
+  readonly summary: ExpenseSplitSummary;
+  readonly replayed: boolean;
+}
+
+/** The PRD §8.3 `splitSummary`, with the conservation total alongside it. */
+export interface ExpenseSplitSummary {
+  readonly participantCount: number;
+  readonly total: Money;
+  readonly min: Money;
+  readonly max: Money;
+}
+
+/**
+ * The publishing write path — Roadmap T066's `split.repository.ts`.
+ *
+ * ## One method, because it is one transaction
+ *
+ * `publish` performs the whole publication: it resolves nothing (the caller hands it
+ * allocations), computes nothing (there is no arithmetic here), and writes the two
+ * things that must not be separable — the expense's splits and its transition to
+ * `published`. The implementation runs them inside a single `UnitOfWork`
+ * transaction, with the `expense_publish()` definer function owning the transition
+ * (the lifecycle stamps are not client-writable) and the API writing the
+ * idempotency record in the same transaction, so a replay can only exist if the
+ * bill does.
+ *
+ * ## Replay is decided here, not by the caller
+ *
+ * A matching record is answered with the stored publication and `replayed: true`
+ * **without touching the expense**, which is what makes a retry safe rather than
+ * merely idempotent: it does not depend on the lifecycle to refuse a second write.
+ * A record whose `requestHash` differs is `idempotency_key_reuse` (409) — the key
+ * names a different operation and replaying it would be a lie.
+ *
+ * ## Failure semantics are part of the contract
+ *
+ * `not_found` for an expense outside the caller's society (PRD T041); `forbidden`
+ * when the caller's role cannot publish (the database's own `expense.publish`
+ * check, reachable when this port is called outside the HTTP guard chain);
+ * `version_mismatch` carrying the row's **current** version when it moved;
+ * `invalid_transition` for a published or void expense; `split_mismatch` when the
+ * allocations do not sum to the amount (the definer function's check and, at
+ * COMMIT, `chk_split_total()`'s). Nothing about SQLSTATE or the driver escapes this
+ * boundary.
+ */
+export interface ExpenseSplitRepository {
+  /**
+   * The publication a previous attempt with this key committed, or `null`.
+   *
+   * Read **before** recomputing, so a retry is answered from what already happened
+   * rather than from what the current roster would produce: an idempotent replay
+   * must not be able to fail for a reason the original request never met. A stored
+   * record under the same key but for a different request is
+   * `idempotency_key_reuse` (409) here, exactly as it is on the write path.
+   */
+  findPublication(
+    input: ExpensePublicationLookup,
+    actor: UserId,
+  ): Promise<ExpensePublication | null>;
+
+  /**
+   * The whole publication, atomically, or a replay of one that already happened.
+   * The transaction and its ordering are the implementation's; see the docstring.
+   */
+  publish(
+    id: ExpenseId,
+    societyId: SocietyId,
+    input: PublishExpenseRecordInput,
+    actor: UserId,
+  ): Promise<ExpensePublication>;
+}
+
+/**
+ * The member display names the publish snapshot records — PRD §7.3's "member name …
+ * at publish time".
+ *
+ * A port of its own because it is a question no other read answers: T063's
+ * resolution returns *who* each charge is addressed to and never their name (the
+ * engine has no use for it), and the snapshot is the one place a name is a
+ * financial fact rather than a label. The implementation is this module's
+ * participant adapter — the only thing in the module that already reads `members` —
+ * and it performs **one bounded query** over the ids it is given, never one per
+ * participant.
+ *
+ * A member missing from the answer is not an error here: names exist for every
+ * active membership the database can hold (`members.display_name` is `NOT NULL`
+ * with a non-blank `CHECK`), so a gap is a corrupt read and the caller decides what
+ * to make of it. Returning what was found keeps "the roster changed underneath us"
+ * distinguishable from "the read failed".
+ */
+export interface ExpenseMemberNameReader {
+  listMemberNames(
+    societyId: SocietyId,
+    memberIds: readonly MemberId[],
+    actor: UserId,
+  ): Promise<ReadonlyMap<MemberId, string>>;
+}
+
+/**
+ * Where a raised expense event goes — SAD §3.2's dispatch half.
+ *
+ * ## Why this port exists now, before its consumer
+ *
+ * T061's entity raises events and deliberately cannot dispatch them: dispatching
+ * inside a transaction is the exact failure SAD §3.2 names — a push about a bill
+ * whose transaction then rolls back. T066 is the first task whose acceptance
+ * requires the *ordering* ("domain events enqueued and dispatched **after**
+ * commit", "a failed notification never rolls back the bill"), and that ordering is
+ * a property of the calling code, so it needs a seam a test can observe.
+ *
+ * The binding shipped today is an in-process publisher that records the event on
+ * the application log; T107 replaces it with the orchestrator's queue. What must not
+ * change is the contract: it is called **after** the publishing transaction has
+ * returned successfully, for the *fresh* publication only (a replay announces
+ * nothing — the first call already did), and its failure is caught by the use case
+ * and reported rather than propagated, because a notification that cannot be sent
+ * must never un-publish a bill.
+ */
+export interface ExpenseEventPublisher {
+  /** Dispatch events after commit. Must not be called before the transaction ends. */
+  dispatch(events: readonly ExpenseEvent[]): Promise<void>;
 }

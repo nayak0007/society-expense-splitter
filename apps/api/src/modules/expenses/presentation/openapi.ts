@@ -76,6 +76,55 @@ export function ApiExpensePreviewErrors(): ClassDecorator & MethodDecorator {
  * `published`/`void` edit or a non-draft delete is `INVALID_TRANSITION`, also 409,
  * documented on the operations themselves.
  */
+/**
+ * The error responses T066's publish route can return.
+ *
+ * The 404 copy is the module's usual three-indistinguishable-cases sentence with an
+ * expense added: the route is header-scoped, so a society the caller has no active
+ * membership in is answered before the handler runs, and an expense id that is not in
+ * the resolved society is the same invisibility as one that never existed (PRD T041).
+ *
+ * The 403 is `expense.publish` itself — Admin or Treasurer, no qualification — and
+ * that is deliberately narrower than the draft routes' description: a Committee
+ * Member who may compose a draft cannot mint a bill, which is the one cell this
+ * endpoint exists to enforce.
+ *
+ * The 409 carries three different refusals and names all three, because a client
+ * acts differently on each: `VERSION_MISMATCH` (reload — `details[0].current` has the
+ * version), `INVALID_TRANSITION` (the expense is already published or void; there is
+ * nothing to retry) and `IDEMPOTENCY_KEY_REUSE` (the key names a different request;
+ * use a new one). A 422 is the conservation/roster class: `SPLIT_MISMATCH` (the
+ * allocations do not sum) and the flagged-flat refusal, whose `details` list one
+ * entry per flat with nobody to charge.
+ */
+export function ApiExpensePublishErrors(): ClassDecorator & MethodDecorator {
+  return ApiErrorResponses({
+    notFound:
+      "No such society or expense — or one the caller is not an active member of. This API deliberately does not distinguish these (PRD T041).",
+    forbidden:
+      "An active member whose role does not hold `expense.publish`: Admin or Treasurer. A Committee Member's draft-only grant does not reach this route.",
+    conflict:
+      "The expense moved since the caller read it (`VERSION_MISMATCH`, with `details[0].current` carrying the current version); the expense is already published or void (`INVALID_TRANSITION`); or the `Idempotency-Key` was already used for a different request (`IDEMPOTENCY_KEY_REUSE`).",
+  });
+}
+
+/**
+ * The error responses T065's draft routes can return.
+ *
+ * The 404 copy is the module's usual three-indistinguishable-cases sentence, with an
+ * expense added to the list. The 403 names both narrowed cells explicitly, because
+ * the difference between them is the whole content of the routes: `expense.create`
+ * is Admin/Treasurer/Committee (draft-only for the Committee Member), `expense.void`
+ * is Admin/Treasurer or a Committee Member's **own drafts** — and deleting is
+ * narrower still, creator only. A client that rendered the same disabled state for
+ * all of them would hide which rule refused it.
+ *
+ * The 409 carries two refusals: the optimistic lock (`VERSION_MISMATCH`, whose
+ * `details[0].current` is the row's current version — the SAD §7.11 shape) and an
+ * expense that already has splits, which must be voided rather than deleted. A
+ * `published`/`void` edit or a non-draft delete is `INVALID_TRANSITION`, also 409,
+ * documented on the operations themselves.
+ */
 export function ApiExpenseDraftErrors(): ClassDecorator & MethodDecorator {
   return ApiErrorResponses({
     notFound:

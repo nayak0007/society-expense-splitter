@@ -68,6 +68,19 @@ export const participantMemberRowSchema = z.object({
   is_primary: z.boolean(),
 });
 
+/**
+ * The one column T066's publish snapshot needs that resolution does not: the member's
+ * name *now*, so the split row can record it as it was *then* (PRD §7.3).
+ *
+ * Non-nullable on purpose — `members.display_name` is `NOT NULL` with a non-blank
+ * `CHECK`, so a null here is a schema drift worth failing on rather than a name
+ * quietly missing from a snapshot.
+ */
+export const participantMemberNameRowSchema = z.object({
+  id: z.string(),
+  display_name: z.string(),
+});
+
 export const participantWingRowSchema = z.object({
   id: z.string(),
   building_id: z.string(),
@@ -81,6 +94,9 @@ export const participantApartmentRowListSchema = z.array(
 );
 export const participantMemberRowListSchema = z.array(
   participantMemberRowSchema,
+);
+export const participantMemberNameRowListSchema = z.array(
+  participantMemberNameRowSchema,
 );
 export const participantWingRowListSchema = z.array(participantWingRowSchema);
 export const participantBuildingRowListSchema = z.array(

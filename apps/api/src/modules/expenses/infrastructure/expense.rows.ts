@@ -127,6 +127,8 @@ export const RAISED_EXCEPTION = {
   expenseNotOwnDraft: "EXPENSE_NOT_OWN_DRAFT",
   expenseNotDraft: "EXPENSE_NOT_DRAFT",
   expenseHasSplits: "EXPENSE_HAS_SPLITS",
+  expenseNotPublishable: "EXPENSE_NOT_PUBLISHABLE",
+  expenseVersionMismatch: "EXPENSE_VERSION_MISMATCH",
   splitMismatch: "SPLIT_MISMATCH",
 } as const;
 
@@ -205,6 +207,34 @@ export function expenseErrorFromPostgres(
           "conflict",
           "This expense has been split. Void it instead of deleting it.",
           withHint(),
+        );
+      }
+      if (message.includes(RAISED_EXCEPTION.expenseNotPublishable)) {
+        // The refused *state* travels in the database's `DETAIL` (it read the row
+        // under the lock), so the refusal can name it without a second query.
+        const from = candidate.detail;
+        return expenseError(
+          "invalid_transition",
+          "Only a draft or an expense awaiting approval can be published.",
+          {
+            ...withHint(),
+            ...(typeof from === "string" && from !== "" ? { from } : {}),
+          },
+        );
+      }
+      if (message.includes(RAISED_EXCEPTION.expenseVersionMismatch)) {
+        // T066's publish lock. `DETAIL` carries the row's current version, which the
+        // SAD §7.11 details need; the *expected* one is added by the repository,
+        // which is the only place that knows it.
+        const current = Number(candidate.detail);
+        return expenseError(
+          "version_mismatch",
+          "This expense was changed by someone else. Reload it and try again.",
+          {
+            ...withHint(),
+            field: "expectedVersion",
+            ...(Number.isFinite(current) ? { currentVersion: current } : {}),
+          },
         );
       }
       if (message.includes(RAISED_EXCEPTION.splitMismatch)) {

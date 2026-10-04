@@ -10,6 +10,7 @@ import type {
   ParticipantMember,
   SocietyParticipantDirectory,
 } from "./ports";
+import type { AssignedReason, UnassignedReason } from "./split-reasons";
 
 /**
  * Participant resolution — the pure core (PRD §3.5.4, Roadmap T063).
@@ -86,33 +87,11 @@ import type {
 // Vocabulary
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Why a participant was charged when it was not the flat's own occupant.
- *
- * `owner_only_category` is the PRD's own value (§3.5.4) and it is what
- * `expense_splits.assigned_reason varchar(40)` was added for — T060's column comment
- * says so in as many words ("T063 writes the value"). It is a closed union rather than
- * a `string` so a second value cannot appear from a typo.
- */
-export const ASSIGNED_REASONS = ["owner_only_category"] as const;
-export type AssignedReason = (typeof ASSIGNED_REASONS)[number];
-
-/**
- * Why a flat could not be addressed to anybody.
- *
- * Two values, because the two are different jobs for the treasurer: `unassigned_no_owner`
- * is the PRD's owner-only case (the society records a tenant but no owner), and
- * `unassigned_no_member` is the flat with no accountable membership at all — a
- * `bill_vacant_flats` society billing a flat nobody has been linked to yet. The
- * database needs no new vocabulary for them: both are the member-less split row the
- * `chk_expense_splits_participant` constraint already allows, and both fit the same
- * `assigned_reason` column.
- */
-export const UNASSIGNED_REASONS = [
-  "unassigned_no_owner",
-  "unassigned_no_member",
-] as const;
-export type UnassignedReason = (typeof UNASSIGNED_REASONS)[number];
+// Defined in `split-reasons.ts`, a leaf module this file re-exports: the publishing
+// port names `AssignedReason` and must be able to do so without importing this
+// resolver, which imports the port's own read projections.
+export type { AssignedReason, UnassignedReason } from "./split-reasons";
+export { ASSIGNED_REASONS, UNASSIGNED_REASONS } from "./split-reasons";
 
 /**
  * The occupancies that mean "this membership is the flat's **owner**".

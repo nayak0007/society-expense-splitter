@@ -2,14 +2,16 @@ import {
   expenseListResponseSchema,
   expenseResponseSchema,
   expenseSchema,
+  publishExpenseResponseSchema,
 } from "@ses/contracts";
 import type {
   ExpenseDto,
   ExpenseListResponseDto,
   ExpenseResponseDto,
+  PublishExpenseResponseDto,
 } from "@ses/contracts";
 import { paiseToWire } from "@ses/domain";
-import type { ExpenseRecord } from "@ses/domain";
+import type { ExpensePublication, ExpenseRecord } from "@ses/domain";
 
 import type { ExpenseListResult } from "../application/use-cases/list-expenses.use-case";
 
@@ -78,5 +80,34 @@ export function expenseListToDto(
     expenses: result.expenses.map((record) => expenseToDto(record)),
     nextCursor: result.nextCursor,
     hasMore: result.hasMore,
+  });
+}
+
+/**
+ * The publication → the wire DTO — Roadmap T066.
+ *
+ * The expense travels through `expenseToDto` (the same mapping every other route
+ * uses, so `status`/`publishedAt`/`version` are the row the transition wrote rather
+ * than the in-memory aggregate's view of it), and the summary's three amounts cross
+ * through `paiseToWire` — the repository's single range-checked crossing point — so
+ * a summary above `Number.MAX_SAFE_INTEGER` throws loudly instead of rounding into
+ * a bill. The summary itself was measured over the persisted rows by
+ * `expense_publish()`, which is what makes this a report and not a prediction.
+ *
+ * `replayed` is deliberately **not** a field: it is carried on the response header
+ * (`Idempotency-Replayed`), because the body of a replay must be byte-identical to
+ * the body of the original success — that is the whole point of storing it.
+ */
+export function expensePublicationToDto(
+  publication: ExpensePublication,
+): PublishExpenseResponseDto {
+  return publishExpenseResponseSchema.parse({
+    expense: expenseToDto(publication.expense),
+    splitSummary: {
+      participantCount: publication.summary.participantCount,
+      totalPaise: paiseToWire(publication.summary.total.paise),
+      minPaise: paiseToWire(publication.summary.min.paise),
+      maxPaise: paiseToWire(publication.summary.max.paise),
+    },
   });
 }

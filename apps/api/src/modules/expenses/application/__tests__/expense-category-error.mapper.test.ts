@@ -27,10 +27,12 @@ describe("ERROR_CODE_BY_EXPENSE_CODE", () => {
       "category_has_expenses",
       "conflict",
       "forbidden",
+      "idempotency_key_reuse",
       "invalid_transition",
       "invariant",
       "not_found",
       "split_mismatch",
+      "unassigned_participants",
       "unknown",
       "validation",
       "version_mismatch",
@@ -68,6 +70,18 @@ describe("ERROR_CODE_BY_EXPENSE_CODE", () => {
     expect(
       HTTP_STATUS_BY_ERROR_CODE[ERROR_CODE_BY_EXPENSE_CODE.version_mismatch],
     ).toBe(409);
+    // T066's retry key, reused for a different request: the catalogue's own 409.
+    expect(
+      HTTP_STATUS_BY_ERROR_CODE[
+        ERROR_CODE_BY_EXPENSE_CODE.idempotency_key_reuse
+      ],
+    ).toBe(409);
+    // T066's fail-closed refusal: well formed, incomplete state, so 422.
+    expect(
+      HTTP_STATUS_BY_ERROR_CODE[
+        ERROR_CODE_BY_EXPENSE_CODE.unassigned_participants
+      ],
+    ).toBe(422);
   });
 
   it("keeps the lifecycle codes mapped for the routes that will reuse them", () => {

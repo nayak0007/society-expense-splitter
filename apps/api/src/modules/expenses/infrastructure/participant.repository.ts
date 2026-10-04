@@ -1,8 +1,10 @@
 import { Injectable } from "@nestjs/common";
 import { sql, type SQL } from "drizzle-orm";
-import { isExpenseError } from "@ses/domain";
+import { asMemberId, isExpenseError } from "@ses/domain";
 import type {
+  ExpenseMemberNameReader,
   ExpenseParticipantReader,
+  MemberId,
   SocietyId,
   SocietyParticipantDirectory,
   UserId,
@@ -21,6 +23,7 @@ import {
   participantApartmentRowListSchema,
   participantBuildingRowListSchema,
   participantErrorFromPostgres,
+  participantMemberNameRowListSchema,
   participantMemberRowListSchema,
   participantWingRowListSchema,
   unexpectedShapeError,
@@ -64,7 +67,9 @@ import {
  * not the database's.
  */
 @Injectable()
-export class ExpenseParticipantRepositoryPostgres implements ExpenseParticipantReader {
+export class ExpenseParticipantRepositoryPostgres
+  implements ExpenseParticipantReader, ExpenseMemberNameReader
+{
   constructor(private readonly unitOfWork: UnitOfWork) {}
 
   async listSocietyParticipants(
@@ -136,6 +141,59 @@ export class ExpenseParticipantRepositoryPostgres implements ExpenseParticipantR
         wings: Object.freeze(wings),
         buildings: Object.freeze(buildings),
       });
+    });
+  }
+
+  /**
+   * Member display names for a bounded set of ids — T066's publish snapshot.
+   *
+   * One query for the whole set (`in (…)`), never one per participant, which is why
+   * this lives on the adapter that already reads `members` rather than inside the
+   * publish use case: the cost of a snapshot must not scale with the number of flats
+   * the way a per-participant read would.
+   *
+   * The list is written as one cast placeholder per id rather than
+   * `= any(${memberIds}::uuid[])`: Drizzle expands a JS-array interpolation into a
+   * parenthesised list, and Postgres reads `any(($1, $2, …))` as one anonymous
+   * record (`42846 cannot cast type record to uuid[]`). `sql.join` keeps each id a
+   * scalar parameter; the list is bounded by the allocation set, so it always is.
+   *
+   * It reads under the caller's own identity like every other method here, so another
+   * society's ids are simply absent — and an empty id list short-circuits before the
+   * query, because `= any('{}')` is a round trip that can only answer nothing.
+   * A member missing from the answer is left to the caller: `display_name` is
+   * `NOT NULL` and non-blank, so a gap is a corrupt read, not a legitimate state.
+   */
+  async listMemberNames(
+    societyId: SocietyId,
+    memberIds: readonly MemberId[],
+    actor: UserId,
+  ): Promise<ReadonlyMap<MemberId, string>> {
+    if (memberIds.length === 0) return new Map<MemberId, string>();
+
+    const ids = sql.join(
+      memberIds.map((memberId) => sql`${memberId}::uuid`),
+      sql`, `,
+    );
+
+    return this.run(actor, async (tx) => {
+      const rows = parse(
+        participantMemberNameRowListSchema,
+        await query(
+          tx,
+          sql`
+            select id, display_name
+              from public.members
+             where society_id = ${societyId}::uuid
+               and id in (${ids})
+          `,
+        ),
+        "member name",
+      );
+
+      return new Map(
+        rows.map((row) => [asMemberId(row.id), row.display_name] as const),
+      );
     });
   }
 

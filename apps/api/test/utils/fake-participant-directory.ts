@@ -7,9 +7,11 @@ import {
 } from "@ses/domain";
 import type {
   BuildingId,
+  ExpenseMemberNameReader,
   ExpenseParticipantReader,
   ExpenseSocietyPolicy,
   ExpenseSocietyReader,
+  MemberId,
   MemberRole,
   MembershipStatus,
   OccupancyType,
@@ -43,6 +45,17 @@ import type {
  *
  * It deliberately does **not** apply eligibility, routing or ordering — a fake that
  * resolved anything would let a broken resolver pass.
+ *
+ * ## T066's fourth port
+ *
+ * `listMemberNames` was added here rather than in a fake of its own because it answers
+ * a question about the *same* rows this class already seeds: `members`. The
+ * production binding is `useExisting` to the participant adapter for exactly that
+ * reason, and a separate fake would need a second copy of every member fixture —
+ * which is the drift a world-object fake exists to prevent. The name it returns is
+ * the participant's own `displayName` when the fixture sets one and the id otherwise,
+ * so a suite that asserts "the snapshot recorded the name at publish time" controls
+ * both halves with one seed.
  */
 
 /** A uuid-shaped id from a readable label — the domain suites' own helper shape. */
@@ -115,11 +128,13 @@ export class FakeParticipantDirectory
   implements
     ExpenseParticipantReader,
     ExpenseSocietyReader,
-    StructureMembershipReader
+    StructureMembershipReader,
+    ExpenseMemberNameReader
 {
   private readonly memberships = new Map<string, SocietyMembership>();
   private readonly directories = new Map<string, SocietyParticipantDirectory>();
   private readonly policies = new Map<string, boolean>();
+  private readonly memberNames = new Map<string, string>();
 
   /** Every port call, in order — so a test can assert that a refusal cost no read. */
   readonly calls: string[] = [];
@@ -150,10 +165,16 @@ export class FakeParticipantDirectory
     this.policies.set(societyId, value);
   }
 
+  /** The display name one member's publish snapshot will record. */
+  seedMemberName(memberId: MemberId, name: string): void {
+    this.memberNames.set(memberId, name);
+  }
+
   reset(): void {
     this.memberships.clear();
     this.directories.clear();
     this.policies.clear();
+    this.memberNames.clear();
     this.calls.length = 0;
   }
 
@@ -186,5 +207,27 @@ export class FakeParticipantDirectory
     return policy === undefined
       ? null
       : { settings: { billVacantFlats: policy } };
+  }
+
+  async listMemberNames(
+    societyId: SocietyId,
+    memberIds: readonly MemberId[],
+    _actor: UserId,
+  ): Promise<ReadonlyMap<MemberId, string>> {
+    this.calls.push("listMemberNames");
+    // Scoped to the society's own roster, so a member of another society cannot be
+    // named through this fake — the tenancy the real adapter gets from its join.
+    const roster = new Set(
+      (this.directories.get(societyId)?.members ?? []).map(
+        (member) => member.id,
+      ),
+    );
+
+    const names = new Map<MemberId, string>();
+    for (const memberId of memberIds) {
+      if (!roster.has(memberId)) continue;
+      names.set(memberId, this.memberNames.get(memberId) ?? memberId);
+    }
+    return names;
   }
 }

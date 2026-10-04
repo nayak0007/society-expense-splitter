@@ -36,3 +36,34 @@ export const EXPENSE_CLOCK = Symbol("EXPENSE_CLOCK");
 export const EXPENSE_APPROVAL_POLICY_READER = Symbol(
   "EXPENSE_APPROVAL_POLICY_READER",
 );
+
+/**
+ * The publishing write path — T066's `ExpenseSplitRepository`.
+ *
+ * A token of its own rather than a method on `EXPENSE_REPOSITORY`: the two ports are
+ * two tables' writers (`expenses` and `expense_splits`, joined by one definer
+ * function), they are bound to two adapters, and the e2e suite substitutes them
+ * independently — a fake that had to reproduce both would be the god-object the
+ * ports exist to avoid.
+ */
+export const EXPENSE_SPLIT_REPOSITORY = Symbol("EXPENSE_SPLIT_REPOSITORY");
+
+/**
+ * The member-name read the publish snapshot needs — T066.
+ *
+ * Bound with `useExisting` to the participant adapter, which is already the module's
+ * one reader of `members`: a second adapter reading the same table would be the
+ * duplication `ParticipantMember`'s docstring rules out, and this port answers a
+ * question that adapter can answer with the query it already owns.
+ */
+export const EXPENSE_MEMBER_NAME_READER = Symbol("EXPENSE_MEMBER_NAME_READER");
+
+/**
+ * Where a committed publication's event goes — SAD §3.2's dispatch seam.
+ *
+ * Bound today to an in-process publisher that records the event on the log; T107
+ * replaces the binding with the orchestrator's queue. The *contract* — called after
+ * commit, for fresh publications only, failures never propagated — is T066's, and
+ * the unit suite observes it through this token.
+ */
+export const EXPENSE_EVENT_PUBLISHER = Symbol("EXPENSE_EVENT_PUBLISHER");

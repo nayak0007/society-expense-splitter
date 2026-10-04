@@ -17,17 +17,23 @@ import {
 import {
   EXPENSE_APPROVAL_POLICY_READER,
   EXPENSE_CLOCK,
+  EXPENSE_EVENT_PUBLISHER,
+  EXPENSE_MEMBER_NAME_READER,
   EXPENSE_REPOSITORY,
+  EXPENSE_SPLIT_REPOSITORY,
 } from "./application/expense.tokens";
 import { CreateExpenseUseCase } from "./application/use-cases/create-expense.use-case";
 import { DeleteDraftUseCase } from "./application/use-cases/delete-draft.use-case";
 import { GetExpenseUseCase } from "./application/use-cases/get-expense.use-case";
 import { ListExpensesUseCase } from "./application/use-cases/list-expenses.use-case";
 import { PreviewSplitUseCase } from "./application/use-cases/preview-split.use-case";
+import { PublishExpenseUseCase } from "./application/use-cases/publish-expense.use-case";
 import { UpdateExpenseUseCase } from "./application/use-cases/update-expense.use-case";
 import { ExpenseCategoryRepositoryPostgres } from "./infrastructure/category.repository";
+import { LoggingExpenseEventPublisher } from "./infrastructure/expense-event.publisher";
 import { ExpenseRepositoryPostgres } from "./infrastructure/expense.repository";
 import { ExpenseParticipantRepositoryPostgres } from "./infrastructure/participant.repository";
+import { ExpenseSplitRepositoryPostgres } from "./infrastructure/split.repository";
 import { ExpenseCategoriesController } from "./presentation/categories.controller";
 import { ExpensesController } from "./presentation/expenses.controller";
 
@@ -167,6 +173,26 @@ import { ExpensesController } from "./presentation/expenses.controller";
     GetExpenseUseCase,
     ListExpensesUseCase,
     DeleteDraftUseCase,
+    // T066's publication. The split repository is a second adapter (one transaction
+    // around the `expense_publish()` definer function plus the retry record); the
+    // member-name read borrows the participant adapter, so the module
+    // still has exactly one reader of `members`; and the event publisher is the
+    // post-commit seam T107 will re-bind.
+    ExpenseSplitRepositoryPostgres,
+    {
+      provide: EXPENSE_SPLIT_REPOSITORY,
+      useExisting: ExpenseSplitRepositoryPostgres,
+    },
+    {
+      provide: EXPENSE_MEMBER_NAME_READER,
+      useExisting: ExpenseParticipantRepositoryPostgres,
+    },
+    LoggingExpenseEventPublisher,
+    {
+      provide: EXPENSE_EVENT_PUBLISHER,
+      useExisting: LoggingExpenseEventPublisher,
+    },
+    PublishExpenseUseCase,
   ],
 })
 export class ExpensesModule {}

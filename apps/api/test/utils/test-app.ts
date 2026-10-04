@@ -8,10 +8,13 @@ import type {
   ApartmentRepository,
   BuildingRepository,
   ExpenseCategoryRepository,
+  ExpenseEventPublisher,
+  ExpenseMemberNameReader,
   ExpenseParticipantReader,
   ExpenseReferenceReader,
   ExpenseRepository,
   ExpenseSocietyReader,
+  ExpenseSplitRepository,
   InvitationRepository,
   InvitationTokenPort,
   MemberRepository,
@@ -37,7 +40,12 @@ import {
   EXPENSE_CATEGORY_REPOSITORY,
   EXPENSE_REFERENCE_READER,
 } from "../../src/modules/expenses/application/expense-category.tokens";
-import { EXPENSE_REPOSITORY } from "../../src/modules/expenses/application/expense.tokens";
+import {
+  EXPENSE_EVENT_PUBLISHER,
+  EXPENSE_MEMBER_NAME_READER,
+  EXPENSE_REPOSITORY,
+  EXPENSE_SPLIT_REPOSITORY,
+} from "../../src/modules/expenses/application/expense.tokens";
 import {
   EXPENSE_PARTICIPANT_READER,
   EXPENSE_SOCIETY_READER,
@@ -213,6 +221,33 @@ export type TestAppOptions = {
    */
   expenses?: ExpenseRepository;
   /**
+   * Substitutes the publishing write path (T066) — the `expense_publish()` definer
+   * function's caller and the `idempotency_records` writer.
+   *
+   * A tenth seam, and it is deliberately *not* folded into `expenses`: the two are two
+   * ports, two adapters and two tables in production, and the publish suite needs them
+   * pointed at the same in-memory world (see `fake-split-repository.ts` for why the
+   * fake takes the expense fake rather than duplicating its store).
+   */
+  splits?: ExpenseSplitRepository;
+  /**
+   * Substitutes the member-name read T066's snapshot records.
+   *
+   * Separate from `participants` even though one adapter satisfies both in production, for
+   * the reason every seam here is separate: a suite has to be able to make the name read
+   * answer *differently* from the resolution — a rename between resolution and snapshot is
+   * exactly the case the snapshot exists for — without also changing who is chargeable.
+   */
+  memberNames?: ExpenseMemberNameReader;
+  /**
+   * Substitutes the post-commit event dispatch (T066).
+   *
+   * The one seam whose *ordering* is the assertion: a suite inspects the world from
+   * inside `dispatch` and asserts the bill is already published there. Leaving it real
+   * would log and prove nothing.
+   */
+  events?: ExpenseEventPublisher;
+  /**
    * Substitutes the caller's membership read used by the building use cases.
    *
    * Separate from `reader` (which `SocietyGuard` uses) even though both are
@@ -331,6 +366,17 @@ export async function createTestApp(
   }
   if (options.expenses !== undefined) {
     builder.overrideProvider(EXPENSE_REPOSITORY).useValue(options.expenses);
+  }
+  if (options.splits !== undefined) {
+    builder.overrideProvider(EXPENSE_SPLIT_REPOSITORY).useValue(options.splits);
+  }
+  if (options.memberNames !== undefined) {
+    builder
+      .overrideProvider(EXPENSE_MEMBER_NAME_READER)
+      .useValue(options.memberNames);
+  }
+  if (options.events !== undefined) {
+    builder.overrideProvider(EXPENSE_EVENT_PUBLISHER).useValue(options.events);
   }
 
   const moduleRef = await builder.compile();

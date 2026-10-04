@@ -39,6 +39,7 @@
 export * from "./shared/clock";
 export * from "./shared/errors";
 export * from "./shared/ids";
+export * from "./shared/idempotency";
 export * from "./shared/money";
 export * from "./shared/money.vo";
 export * from "./shared/payment-sources";

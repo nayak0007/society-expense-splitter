@@ -39,6 +39,19 @@ import type { DomainErrorInit } from "../shared/errors";
  *    would force the UI to match on message text to tell "rename it" from
  *    "deactivate it instead".
  *
+ * T066 adds the two refusals publishing owns, and each is its own code rather than
+ * a borrowed `validation`/`conflict` because a client acts differently on each:
+ *
+ *  - `idempotency_key_reuse` — the same `Idempotency-Key` was used for a *different*
+ *    request. The catalogue has the code verbatim (`IDEMPOTENCY_KEY_REUSE`), and
+ *    rendering it as a generic conflict would leave a client retrying a key it must
+ *    stop using;
+ *  - `unassigned_participants` — the resolved participant set contains at least one
+ *    billable flat with nobody to address the charge to. Publication is refused
+ *    rather than published short (see the publish use case's note): the refusal is
+ *    what stops a bill from silently omitting a flat, and the flagged flats travel
+ *    in `details` so the treasurer knows exactly what to fix.
+ *
  * A union per module rather than one global list, exactly as `InvitationError` and
  * `MemberError` record: the API's `Record<ExpenseErrorCode, ErrorCode>` mapper then
  * *fails the build* when a code gains no HTTP meaning, which is the property that
@@ -55,6 +68,8 @@ export const EXPENSE_ERROR_CODES = [
   "conflict",
   "version_mismatch",
   "category_has_expenses",
+  "idempotency_key_reuse",
+  "unassigned_participants",
   "unknown",
 ] as const;
 

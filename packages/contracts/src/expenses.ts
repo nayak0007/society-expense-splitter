@@ -11,6 +11,8 @@ import {
   EXPENSE_VENDOR_NAME_MAX_LENGTH,
   FLOOR_MAX,
   FLOOR_MIN,
+  IDEMPOTENCY_KEY_MAX_LENGTH,
+  IDEMPOTENCY_KEY_MIN_LENGTH,
   OCCUPANCY_STATUSES,
   PARTICIPANT_SCOPES,
   PAYMENT_SOURCES,
@@ -671,3 +673,93 @@ export const expenseListResponseSchema = z.object({
   hasMore: z.boolean(),
 });
 export type ExpenseListResponseDto = z.infer<typeof expenseListResponseSchema>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Publishing — Roadmap T066
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The `Idempotency-Key` header on the wire — SAD §7.7's mandatory key.
+ *
+ * The bounds are `@ses/domain`'s (`IDEMPOTENCY_KEY_MIN_LENGTH`/`_MAX_LENGTH`), the
+ * same constants the use case checks, so the pipe and the use case cannot disagree
+ * about what a usable key is. It is used as a **header** schema —
+ * `@HeaderParam("idempotency-key", new ZodPipe(idempotencyKeySchema))`, the
+ * piped-header decorator at `common/decorators/header-param.decorator.ts` (Nest's own
+ * `@Headers` takes no pipe) — which is why it is a bare string schema rather than a
+ * field of the body: an absent header reaches the pipe as `undefined` and is refused
+ * as syntactic (`400`), exactly like an absent body key, while a present-but-unusable
+ * one is a value failure (`422`). The reported `field` is the wire header name,
+ * `idempotency-key`, matching how `SocietyGuard` reports `x-society-id`.
+ */
+export const idempotencyKeySchema = z
+  .string()
+  .trim()
+  .min(IDEMPOTENCY_KEY_MIN_LENGTH)
+  .max(IDEMPOTENCY_KEY_MAX_LENGTH);
+export type IdempotencyKeyPayload = z.infer<typeof idempotencyKeySchema>;
+
+/**
+ * `POST /expenses/:expenseId/publish` — the request is one number.
+ *
+ * ## Why there is nothing else in it
+ *
+ * Publishing is an *authoritative* recomputation, not a submission of the values a
+ * client computed. The expense's amount, category, split strategy/basis, split
+ * config and participant selector are read from the persisted row; the participants
+ * are resolved from current society state; the allocation is the split engine's. So
+ * the only facts the request can carry are the ones the server cannot derive:
+ * **which version of the row the caller believed it was publishing**. That is
+ * T065's optimistic lock, and it is required rather than defaulted for the reason
+ * `updateExpenseSchema` records — a lock a caller may omit is not a lock.
+ *
+ * Deliberately absent, `strictObject` so they are refused rather than ignored:
+ * computed allocations (the stale-preview problem — T064's output is information,
+ * never an authorisation), `societyId` (the `X-Society-Id` header is the scope),
+ * `createdBy` (the caller's membership), `status` (the lifecycle is the server's),
+ * `publishedAt` (the database's clock), and `splitConfig`/`participantSelector`
+ * (editing is T065's door; publishing re-reads what is stored).
+ */
+export const publishExpenseSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+});
+export type PublishExpensePayload = z.infer<typeof publishExpenseSchema>;
+
+/**
+ * The PRD §8.3 `splitSummary` — what the publish actually wrote.
+ *
+ * Measured over the **persisted** `expense_splits` rows rather than over the
+ * computed allocations, which is the difference between reporting an intention and
+ * reporting a bill. `totalPaise` is the conservation fact the acceptance criteria
+ * assert (`SUM(splits) = amount`); `minPaise`/`maxPaise` are the PRD's own
+ * "cheapest and dearest flat" facts; `participantCount` is the number of rows.
+ */
+export const expenseSplitSummarySchema = z.object({
+  participantCount: z.number().int(),
+  totalPaise: z.number().int(),
+  minPaise: z.number().int(),
+  maxPaise: z.number().int(),
+});
+export type ExpenseSplitSummaryDto = z.infer<typeof expenseSplitSummarySchema>;
+
+/**
+ * `POST /expenses/:expenseId/publish` — the published expense and its split summary.
+ *
+ * The expense is the same `expenseSchema` every other route returns, read back from
+ * the row the transition wrote (`status: "published"`, `publishedAt` and `version`
+ * the database's own), so a caller never reconstructs published state from what it
+ * hoped to write. `splitSummary` is the PRD's response shape; `duesCreated` is
+ * deliberately absent — dues are T067's write, and reporting a count here would be
+ * reporting a write that did not happen.
+ *
+ * The replay signal is a **header** (`Idempotency-Replayed: true`, SAD §7.7) rather
+ * than a field, and it is meaningful because the body is byte-identical either way:
+ * a retry after a lost response must parse as the original success.
+ */
+export const publishExpenseResponseSchema = z.object({
+  expense: expenseSchema,
+  splitSummary: expenseSplitSummarySchema,
+});
+export type PublishExpenseResponseDto = z.infer<
+  typeof publishExpenseResponseSchema
+>;
