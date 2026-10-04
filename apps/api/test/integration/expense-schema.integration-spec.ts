@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { sql } from "drizzle-orm";
@@ -1714,6 +1714,23 @@ describe("the documented Down block", () => {
       // object it creates is guarded, so apply → down → apply is a cycle and not a
       // one-way door.
       await tx.unsafe(source);
+
+      // Replaying #21 at HEAD means replaying **every later file over it**, because
+      // the forward-only history has objects attached to the tables the block just
+      // dropped: T067's `uq_dues_split` index and `trg_due_billable_write` trigger
+      // live on `dues`, so `DROP TABLE public.dues` removes them and only the files
+      // that created them can put them back. Without this the rehearsal would leave
+      // this shared container at a schema no migration describes, and any spec that
+      // ran after it would fail (measured: T067's own suite did, before this loop
+      // existed).
+      const laterFiles = readdirSync(resolveMigrationsDir())
+        .filter((entry) => entry > filename && entry.endsWith(".sql"))
+        .sort();
+      for (const later of laterFiles) {
+        await tx.unsafe(
+          readFileSync(join(resolveMigrationsDir(), later), "utf8"),
+        );
+      }
 
       const [restored] = await tx<
         {

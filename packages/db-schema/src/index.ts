@@ -5,7 +5,8 @@
  *
  * Table definitions arrive with the modules that own them — the expense domain's
  * six landed with T060 (`src/postgres/{expense-categories,expenses,expense-splits,
- * expense-revisions,expense-gst-details,dues}.ts`) — and the package deliberately
+ * expense-revisions,expense-gst-details,dues}.ts`) and `member-balances.ts` with
+ * T067 — and the package deliberately
  * carries no empty placeholder modules, because an empty schema file makes
  * `drizzle-kit generate` produce a migration that changes nothing.
  *
@@ -22,3 +23,4 @@ export * from "./postgres/expense-revisions";
 export * from "./postgres/expense-splits";
 export * from "./postgres/expenses";
 export * from "./postgres/dues";
+export * from "./postgres/member-balances";

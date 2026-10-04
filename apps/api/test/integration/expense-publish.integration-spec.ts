@@ -442,11 +442,13 @@ describe("PublishExpenseUseCase against real storage", () => {
     expect(publication.summary.total.paise).toBe(total);
     expect(publication.summary.participantCount).toBe(rows.length);
 
-    // And the other three financial tables are still untouched: the transaction
-    // wrote splits, not receivables.
+    // Since T067 the same transaction also writes the receivable half: one
+    // principal due per split (asserted in detail by
+    // `member-balances.integration-spec.ts`). The other financial tables remain
+    // untouched.
     expect(await financialCounts()).toMatchObject({
       expense_splits: 4,
-      dues: 0,
+      dues: 4,
       expense_revisions: 0,
       expense_gst_details: 0,
     });
@@ -491,7 +493,9 @@ describe("PublishExpenseUseCase against real storage", () => {
          and weight is not null
     `;
     expect(weights?.count).toBe("64");
-    expect(await financialCounts()).toMatchObject({ dues: 0 });
+    // One due per split at T067's scale too — the balance half is measured in
+    // `member-balances.integration-spec.ts`'s own 64-flat proof.
+    expect(await financialCounts()).toMatchObject({ dues: 64 });
   });
 
   it("snapshots the member name and flat number on every persisted row", async () => {

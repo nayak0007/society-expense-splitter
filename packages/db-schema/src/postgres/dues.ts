@@ -13,11 +13,18 @@
  * **`paid_paise` is a derived value and is not client-writable.** SAD §8.6 invariant 3
  * says it "must equal the sum of verified allocations"; the migration therefore grants
  * `SELECT` on this table and nothing else, so no client can mark its own bill paid.
- * The policies that let a payment path write it arrive with that path (T067/T068).
+ * The policies that let a payment path write it arrive with that path (T079+);
+ * T067 creates the rows themselves, from splits, inside the definer publishing
+ * transaction, and adds `uq_dues_split` so one allocation cannot be billed twice.
  *
- * `amount_paise` has no positivity check, deliberately: an `adjustment` is how a credit
- * is issued — the PRD's void flow converts payments to "an advance credit on the
- * member's account" — so a negative amount is a real row.
+ * `amount_paise` carries no CHECK of its own, but read it together with the
+ * constraint above: `paid_paise BETWEEN 0 AND amount_paise` is unsatisfiable for a
+ * negative amount, so a due is always a **non-negative obligation**. That is the
+ * settled model, not an accident (T067): credits and advance balances live on
+ * `member_balances` (`advance_paise` / a signed `outstanding_paise`), never as a
+ * negative due, so the PRD's void flow needs no weakening of this constraint.
+ * `kind = 'adjustment'` is a positive correction line, not a credit: the credit
+ * side of an adjustment is the member's balance.
  */
 
 import {

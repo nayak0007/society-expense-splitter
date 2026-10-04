@@ -21,6 +21,10 @@
  *                 lifecycle rules and its repository/token ports. It reads the
  *                 member module's matrix for who may invite whom rather than
  *                 restating it.
+ *  - `payment/`  — the Payments module: T067's `dues-calculator` (the PRD §3.5
+ *                 outstanding formula and the balance projection the publishing
+ *                 transaction expresses in SQL). Payments, allocation and
+ *                 statements arrive with T079+.
  *  - `expense/`  — the Expenses module (T061–T063): the Expense aggregate, its
  *                 lifecycle state machine and the split-total invariant, the
  *                 `ExpenseSplit` value object and the two domain events; the
@@ -83,3 +87,4 @@ export * from "./member/permission-evaluator";
 export * from "./member/ports";
 export * from "./member/resource-authorization";
 export * from "./member/role-rules";
+export * from "./payment/dues-calculator";

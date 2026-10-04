@@ -26,21 +26,22 @@ module.exports = {
    * task; functions and statements are pinned at the same 80 rather than left
    * open, so the row is not quietly looser than the sentences above it.
    *
-   * TWO OF SAD §15.2'S ROWS CANNOT BE DECLARED YET, AND NOT FOR A DOCUMENTATION
+   * ONE OF SAD §15.2'S ROWS CANNOT BE DECLARED YET, AND NOT FOR A DOCUMENTATION
    * REASON. Jest 30 fails the whole run — non-zero, before any comparison — when
    * a threshold path matches no file that was collected:
    *
    *   Jest: Coverage data for ./src/payment/** was not found.
    *
    * Measured while writing this file. That is why the table's
-   * `**\/payment-allocator*` and `**\/dues-calculator*` rows (which the roadmap
-   * will land at `src/payment/allocator.service.ts` under T079 and
-   * `src/payment/dues-calculator.ts` under T080) are NOT written here as a
+   * `**\/payment-allocator*` row (which the roadmap will land at
+   * `src/payment/allocator.service.ts` under T079) is NOT written here as a
    * placeholder: a provisional row does not sit dormant waiting for the code, it
    * turns every unrelated pull request red with a configuration error. The same
-   * defect was latent in `apps/api`'s use-case glob until this task removed it.
-   * Both rows are therefore recorded in `docs/guides/TEST_COVERAGE.md` §5 and
-   * belong to whichever task creates the files.
+   * defect was latent in `apps/api`'s use-case glob until the previous task
+   * removed it. That row is therefore recorded in
+   * `docs/guides/TEST_COVERAGE.md` §5 and belongs to whichever task creates the
+   * file; `**\/dues-calculator*` was that row's sibling and is now declared
+   * below, because T067 created `src/payment/dues-calculator.ts`.
    *
    * Measured today (see `docs/guides/TEST_COVERAGE.md` for the command):
    * global 89.7 statements / 91.27 branches / 84.83 functions / 91.23 lines,
@@ -55,5 +56,9 @@ module.exports = {
     // value object. A path row rather than an aspiration in prose — the financial
     // core's rules are the ones a diluted global number would hide.
     "./src/expense/**": { lines: 90, branches: 90 },
+    // SAD §15.2's own row for `**/dues-calculator*`: 100 / 100, and Roadmap
+    // T067's blocking acceptance ("100% coverage on the calculator"). Declared
+    // here in the task that created the file, per §5's rule.
+    "./src/payment/dues-calculator*": { lines: 100, branches: 100 },
   },
 };

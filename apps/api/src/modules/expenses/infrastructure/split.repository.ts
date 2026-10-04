@@ -42,15 +42,22 @@ import {
  *   ├─ read the idempotency record for (caller, key)        ── replay? return it, write nothing
  *   ├─ select … from public.expense_publish(id, society, version, allocations)
  *   │     └─ definer: membership → expense.publish → row lock → lifecycle → version
- *   │                → conservation → splits → status/published_at (one SQL call)
+ *   │                → conservation → splits → dues (one per split)
+ *   │                → member_balances upsert → status/published_at (one SQL call)
  *   └─ insert the idempotency record (the response a replay must return)
- * COMMIT   (the deferred chk_split_total() trigger judges the final state)
+ * COMMIT   (the deferred chk_split_total() and trg_due_billable_write triggers
+ *           judge the final state)
  * ```
  *
  * Everything between `BEGIN` and `COMMIT` is one Postgres transaction: the splits,
- * the transition and the retry record are written together or not at all, which is
- * T066's whole acceptance criterion ("splits, dues, balances and audit all written or
- * none"). The definer function is what makes the *transition* writable at all —
+ * the receivables, the balances, the transition and the retry record are written
+ * together or not at all, which is T066's whole acceptance criterion ("splits, dues,
+ * balances and audit all written or none" — audit rows remain T050's absent half,
+ * recorded in the T066/T067 reports). The dues and balances landed in T067 inside
+ * the *same* function, not as a second call this repository makes: a separate write
+ * would be a second commit or a second path, and the balance delta's arithmetic
+ * would have to leave SQL (where the conflicting row's lock serialises it) for an
+ * application read-modify-write. The definer function is what makes the *transition* writable at all —
  * `published_at` is not in the `authenticated` UPDATE grant (T060 withheld the
  * lifecycle stamps deliberately) — and the repository is what makes the retry
  * record part of the same commit.

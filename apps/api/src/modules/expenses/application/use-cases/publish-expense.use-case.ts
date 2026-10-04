@@ -123,11 +123,20 @@ import type { PreviewSplitConfig } from "./preview-split.use-case";
  * caught and logged. A notification that cannot be sent must never un-publish a bill
  * (SAD §3.2), and a rolled-back publication must never announce itself.
  *
+ * ## Dues and balances are created by the transaction, not by this file
+ *
+ * Since T067 the same `expense_publish()` transaction writes the receivable half:
+ * one principal `dues` row per persisted split (paisa for paisa, with the due date
+ * the migration documents) and the set-based `member_balances` upsert, all before
+ * the commit this method waits on. The contract here is unchanged — the request and
+ * the response are exactly T066's — and the orchestration deliberately does not
+ * move into the application: nothing in this file reads a balance, computes a due
+ * or writes either table, so there is no second publication path and no
+ * `SELECT balance → JS → UPDATE` to race. The database's own deferred triggers
+ * (`chk_split_total()`, `trg_due_billable_write`) judge the committed state.
+ *
  * ## What this use case deliberately does not do
  *
- *  - **No dues, no balances.** T067 extends the publishing transaction to create
- *    receivables from these splits; the split is the bill, the due is the
- *    receivable, and T066 stops at the bill (recorded as a boundary, not forgotten).
  *  - **No revisions.** Editing a published expense writes `expense_revisions` —
  *    T068's recalculation flow.
  *  - **No approval policy.** T070 ("expenses at or above the threshold cannot be

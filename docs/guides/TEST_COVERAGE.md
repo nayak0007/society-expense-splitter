@@ -46,7 +46,8 @@ SAD §15.2's table, with the row-by-row home in this repository:
 | `packages/split-engine/**`                         | `packages/split-engine/jest.config.js` (`global`) | 100 / 100 |
 | `packages/domain/src/shared/money*`                | `packages/domain/jest.config.js`                  | 100 / 100 |
 | `packages/domain/src/member/permission-evaluator*` | `packages/domain/jest.config.js`                  | 100 / 100 |
-| `**/payment-allocator*`, `**/dues-calculator*`     | **not declared** — see §5                         | 100 / 100 |
+| `**/dues-calculator*`                              | `packages/domain/jest.config.js` (T067)           | 100 / 100 |
+| `**/payment-allocator*`                            | **not declared** — see §5                         | 100 / 100 |
 | `apps/api/src/modules/**/use-cases/**`             | **not declared** — see §5                         | 90 / 85   |
 | everything else                                    | `global` in each config                           | 80 / 70   |
 
@@ -313,8 +314,7 @@ config:
 
 | Row                                    | Where it will live                                             | Why it is absent                     |
 | -------------------------------------- | -------------------------------------------------------------- | ------------------------------------ |
-| `**/payment-allocator*`                | `packages/domain/src/payment/` (T079's `allocator.service.ts`) | no `src/payment/` directory yet      |
-| `**/dues-calculator*`                  | `packages/domain/src/payment/` (T080)                          | same                                 |
+| `**/payment-allocator*`                | `packages/domain/src/payment/` (T079's `allocator.service.ts`) | no `allocator.service.ts` yet        |
 | `apps/api/src/modules/**/use-cases/**` | `apps/api/jest.config.cjs`                                     | no `use-cases/` directory in the API |
 
 **The use-case row has also drifted from the code.** SAD §15.2 scopes 90 / 85 to
