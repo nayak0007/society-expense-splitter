@@ -130,6 +130,11 @@ export const RAISED_EXCEPTION = {
   expenseNotPublishable: "EXPENSE_NOT_PUBLISHABLE",
   expenseVersionMismatch: "EXPENSE_VERSION_MISMATCH",
   splitMismatch: "SPLIT_MISMATCH",
+  // T068's recalculation refusals (ADR-0009).
+  expenseNotRecalculable: "EXPENSE_NOT_RECALCULABLE",
+  expenseRecalcFieldNotEditable: "EXPENSE_RECALC_FIELD_NOT_EDITABLE",
+  expenseRecalcInvalidField: "EXPENSE_RECALC_INVALID_FIELD",
+  duePaidExceedsNewAmount: "DUE_PAID_EXCEEDS_NEW_AMOUNT",
 } as const;
 
 /**
@@ -241,6 +246,47 @@ export function expenseErrorFromPostgres(
         return expenseError(
           "split_mismatch",
           "The splits do not sum to the expense amount.",
+          withHint(),
+        );
+      }
+      if (message.includes(RAISED_EXCEPTION.expenseNotRecalculable)) {
+        // The refused state travels in `DETAIL` (the function read it under the
+        // row lock), the same shape `EXPENSE_NOT_PUBLISHABLE` uses.
+        const from = candidate.detail;
+        return expenseError(
+          "invalid_transition",
+          "Only a published expense can be recalculated. Drafts are edited and void expenses are final.",
+          {
+            ...withHint(),
+            ...(typeof from === "string" && from !== "" ? { from } : {}),
+          },
+        );
+      }
+      if (message.includes(RAISED_EXCEPTION.expenseRecalcFieldNotEditable)) {
+        return expenseError(
+          "validation",
+          "A published expense may change only its title, description, vendor, amount, split strategy/basis/configuration, participants or change note.",
+          { ...withHint(), field: "body" },
+        );
+      }
+      if (message.includes(RAISED_EXCEPTION.expenseRecalcInvalidField)) {
+        const field = candidate.detail;
+        return expenseError(
+          "validation",
+          "Please check the details and try again.",
+          {
+            ...withHint(),
+            ...(typeof field === "string" && field !== "" ? { field } : {}),
+          },
+        );
+      }
+      if (message.includes(RAISED_EXCEPTION.duePaidExceedsNewAmount)) {
+        // ADR-0009 §13: the whole revision was refused atomically. The message is
+        // stable and actionable; the database's sentence (with the due id) stays in
+        // `hint` for an operator, never as the client's copy.
+        return expenseError(
+          "paid_obligation",
+          "The recalculated obligation would be below a verified payment. Issue a credit adjustment instead.",
           withHint(),
         );
       }

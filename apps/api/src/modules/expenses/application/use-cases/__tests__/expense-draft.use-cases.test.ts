@@ -20,6 +20,7 @@ import type {
   ExpenseListQuery,
   ExpenseMembershipReader,
   ExpensePage,
+  ExpenseRecalculation,
   ExpenseRecord,
   ExpenseRepository,
   SocietyId,
@@ -37,6 +38,8 @@ import {
   ListExpensesUseCase,
 } from "../list-expenses.use-case";
 import { GetExpenseUseCase } from "../get-expense.use-case";
+import { RecalculateExpenseUseCase } from "../recalculate-expense.use-case";
+import type { RecalculateExpenseCommand } from "../recalculate-expense.use-case";
 import { UpdateExpenseUseCase } from "../update-expense.use-case";
 
 /**
@@ -432,11 +435,56 @@ function recordFixture(overrides: Partial<ExpenseRecord> = {}): ExpenseRecord {
   };
 }
 
+/**
+ * T068's published door, recorded — the *dispatch* is what this file observes.
+ *
+ * A stub rather than the real `RecalculateExpenseUseCase`, because the recalculation's
+ * own rules (the pipeline, the patch allow-list, the field mapping) are that class's
+ * suite and PostgreSQL is the integration suite's; this file's subject is which door a
+ * stored status opens and what travels through it. The cast is the price of the class's
+ * private collaborators — the constructor's type is what keeps a *draft* path from
+ * reaching for this stub accidentally, which is the property that matters here.
+ */
+class FakeRecalculation {
+  readonly calls: {
+    readonly actor: UserId;
+    readonly expenseId: ExpenseId;
+    readonly patch: RecalculateExpenseCommand;
+  }[] = [];
+  failure?: Error | undefined;
+
+  recalculate(
+    actor: UserId,
+    _societyId: SocietyId,
+    expenseId: ExpenseId,
+    patch: RecalculateExpenseCommand,
+  ): Promise<ExpenseRecalculation> {
+    this.calls.push({ actor, expenseId, patch });
+    if (this.failure !== undefined) return Promise.reject(this.failure);
+    return Promise.resolve({
+      expense: recordFixture({
+        status: "published",
+        publishedAt: "2026-10-01T00:00:00.000Z",
+        version: 5,
+      }),
+      summary: {
+        duesUpdated: 2,
+        duesSuperseded: 0,
+        duesCreated: 0,
+        totalDelta: Money.fromPaise(100_00),
+        affectedMembers: 2,
+        blockedByPaidSplits: 0,
+      },
+    });
+  }
+}
+
 interface Rig {
   readonly expenses: FakeExpenses;
   readonly categories: FakeCategories;
   readonly memberships: FakeMemberships;
   readonly policies: FakePolicies;
+  readonly recalculation: FakeRecalculation;
   readonly create: CreateExpenseUseCase;
   readonly update: UpdateExpenseUseCase;
   readonly get: GetExpenseUseCase;
@@ -458,11 +506,14 @@ function makeRig(): Rig {
   categories.seed(categoryFixture(OTHER_CATEGORY, SOCIETY));
   policies.seed(SOCIETY, 1_000_000n);
 
+  const recalculation = new FakeRecalculation();
+
   return {
     expenses,
     categories,
     memberships,
     policies,
+    recalculation,
     create: new CreateExpenseUseCase(
       expenses,
       categories,
@@ -476,6 +527,10 @@ function makeRig(): Rig {
       memberships,
       policies,
       CLOCK,
+      // The published door's target: a recorder, so the dispatch is observable
+      // without the recalculation's own rules (that class's suite, and PostgreSQL's)
+      // being restated here.
+      recalculation as unknown as RecalculateExpenseUseCase,
     ),
     get: new GetExpenseUseCase(expenses),
     list: new ListExpensesUseCase(expenses),
@@ -718,10 +773,15 @@ describe("UpdateExpenseUseCase", () => {
       recordFixture({ description: "Covers Oct", vendorName: "Kone" }),
     );
 
-    const record = await rig.update.update(ADMIN, SOCIETY, RECORD_ID, {
-      expectedVersion: 1,
-      title: "Lift AMC — revised",
-    });
+    const { expense: record } = await rig.update.update(
+      ADMIN,
+      SOCIETY,
+      RECORD_ID,
+      {
+        expectedVersion: 1,
+        title: "Lift AMC — revised",
+      },
+    );
 
     expect(record.title).toBe("Lift AMC — revised");
     expect(record.version).toBe(2);
@@ -745,12 +805,17 @@ describe("UpdateExpenseUseCase", () => {
       }),
     );
 
-    const record = await rig.update.update(ADMIN, SOCIETY, RECORD_ID, {
-      expectedVersion: 1,
-      description: null,
-      vendorName: null,
-      paidByMemberId: null,
-    });
+    const { expense: record } = await rig.update.update(
+      ADMIN,
+      SOCIETY,
+      RECORD_ID,
+      {
+        expectedVersion: 1,
+        description: null,
+        vendorName: null,
+        paidByMemberId: null,
+      },
+    );
 
     expect(record.description).toBeNull();
     expect(record.vendorName).toBeNull();
@@ -781,12 +846,69 @@ describe("UpdateExpenseUseCase", () => {
     expect(rig.expenses.records.get(RECORD_ID)?.version).toBe(3);
   });
 
-  it("refuses a published expense with invalid_transition, before any write", async () => {
+  it("revises a published expense through T068's door, never the draft write", async () => {
     const rig = makeRig();
     rig.expenses.seed(
       recordFixture({
         status: "published",
         publishedAt: "2026-10-01T00:00:00.000Z",
+        version: 4,
+      }),
+    );
+
+    const outcome = await rig.update.update(ADMIN, SOCIETY, RECORD_ID, {
+      expectedVersion: 4,
+      title: "Lift AMC — revised",
+      amountPaise: 900_00,
+      splitStrategy: "percentage",
+      changeNote: "Revised after the AGM",
+    });
+
+    expect(rig.recalculation.calls).toHaveLength(1);
+    expect(rig.recalculation.calls[0]?.patch).toMatchObject({
+      expectedVersion: 4,
+      title: "Lift AMC — revised",
+      amountPaise: 900_00,
+      splitStrategy: "percentage",
+      changeNote: "Revised after the AGM",
+    });
+    // The row it answers with is the one the recalculation wrote, and the draft
+    // write never ran: a published bill is moved by the definer transaction alone.
+    expect(outcome.recalculation?.summary.duesUpdated).toBe(2);
+    expect(outcome.expense.version).toBe(5);
+    expect(rig.expenses.calls).not.toContain("update");
+  });
+
+  it("refuses a published patch naming an immutable field, before reading anything else", async () => {
+    const rig = makeRig();
+    rig.expenses.seed(
+      recordFixture({
+        status: "published",
+        publishedAt: "2026-10-01T00:00:00.000Z",
+        version: 4,
+      }),
+    );
+
+    const error = await failure(
+      rig.update.update(ADMIN, SOCIETY, RECORD_ID, {
+        expectedVersion: 4,
+        categoryId: OTHER_CATEGORY,
+      }),
+    );
+
+    expect(error.code).toBe("VALIDATION_ERROR");
+    expect(error.payload.field).toBe("categoryId");
+    expect(rig.recalculation.calls).toHaveLength(0);
+    expect(rig.expenses.calls).not.toContain("update");
+  });
+
+  it("refuses a void expense with invalid_transition, before any write", async () => {
+    const rig = makeRig();
+    rig.expenses.seed(
+      recordFixture({
+        status: "void",
+        voidedAt: "2026-10-01T00:00:00.000Z",
+        voidReason: "Duplicate of the September bill",
       }),
     );
 
@@ -798,8 +920,26 @@ describe("UpdateExpenseUseCase", () => {
     );
 
     expect(error.code).toBe("INVALID_TRANSITION");
-    expect(error.message).toMatch(/published/);
+    expect(error.message).toMatch(/void/);
     expect(rig.expenses.records.get(RECORD_ID)?.version).toBe(1);
+    expect(rig.recalculation.calls).toHaveLength(0);
+    expect(rig.expenses.calls).not.toContain("update");
+  });
+
+  it("refuses a change note on a draft edit, which has no revision to annotate", async () => {
+    const rig = makeRig();
+    rig.expenses.seed(recordFixture());
+
+    const error = await failure(
+      rig.update.update(ADMIN, SOCIETY, RECORD_ID, {
+        expectedVersion: 1,
+        title: "Draft revision",
+        changeNote: "Nothing to annotate yet",
+      }),
+    );
+
+    expect(error.code).toBe("VALIDATION_ERROR");
+    expect(error.payload.field).toBe("changeNote");
     expect(rig.expenses.calls).not.toContain("update");
   });
 
@@ -807,10 +947,15 @@ describe("UpdateExpenseUseCase", () => {
     const rig = makeRig();
     rig.expenses.seed(recordFixture({ createdBy: COMMITTEE_MEMBER }));
 
-    const record = await rig.update.update(COMMITTEE, SOCIETY, RECORD_ID, {
-      expectedVersion: 1,
-      title: "Committee revision",
-    });
+    const { expense: record } = await rig.update.update(
+      COMMITTEE,
+      SOCIETY,
+      RECORD_ID,
+      {
+        expectedVersion: 1,
+        title: "Committee revision",
+      },
+    );
 
     expect(record.title).toBe("Committee revision");
     expect(record.version).toBe(2);
@@ -870,10 +1015,15 @@ describe("UpdateExpenseUseCase", () => {
     const rig = makeRig();
     rig.expenses.seed(recordFixture());
 
-    const record = await rig.update.update(ADMIN, SOCIETY, RECORD_ID, {
-      expectedVersion: 1,
-      amountPaise: 1_000_001,
-    });
+    const { expense: record } = await rig.update.update(
+      ADMIN,
+      SOCIETY,
+      RECORD_ID,
+      {
+        expectedVersion: 1,
+        amountPaise: 1_000_001,
+      },
+    );
 
     expect(record.status).toBe("pending_approval");
     expect(record.amount.paise).toBe(1_000_001n);
@@ -885,10 +1035,15 @@ describe("UpdateExpenseUseCase", () => {
     const rig = makeRig();
     rig.expenses.seed(recordFixture({ createdBy: COMMITTEE_MEMBER }));
 
-    const record = await rig.update.update(COMMITTEE, SOCIETY, RECORD_ID, {
-      expectedVersion: 1,
-      amountPaise: 5_000_000,
-    });
+    const { expense: record } = await rig.update.update(
+      COMMITTEE,
+      SOCIETY,
+      RECORD_ID,
+      {
+        expectedVersion: 1,
+        amountPaise: 5_000_000,
+      },
+    );
 
     expect(record.status).toBe("draft");
     expect(rig.policies.calls).toBe(0);
@@ -903,10 +1058,15 @@ describe("UpdateExpenseUseCase", () => {
       }),
     );
 
-    const record = await rig.update.update(ADMIN, SOCIETY, RECORD_ID, {
-      expectedVersion: 1,
-      title: "Still waiting",
-    });
+    const { expense: record } = await rig.update.update(
+      ADMIN,
+      SOCIETY,
+      RECORD_ID,
+      {
+        expectedVersion: 1,
+        title: "Still waiting",
+      },
+    );
 
     expect(record.status).toBe("pending_approval");
     // Already submitted: the promotion rule is skipped rather than re-entered.
@@ -917,10 +1077,15 @@ describe("UpdateExpenseUseCase", () => {
     const rig = makeRig();
     rig.expenses.seed(recordFixture());
 
-    const record = await rig.update.update(ADMIN, SOCIETY, RECORD_ID, {
-      expectedVersion: 1,
-      categoryId: OTHER_CATEGORY as string,
-    });
+    const { expense: record } = await rig.update.update(
+      ADMIN,
+      SOCIETY,
+      RECORD_ID,
+      {
+        expectedVersion: 1,
+        categoryId: OTHER_CATEGORY as string,
+      },
+    );
 
     expect(record.categoryId).toBe(OTHER_CATEGORY);
     expect(rig.categories.reads).toBe(1);
@@ -990,10 +1155,15 @@ describe("UpdateExpenseUseCase", () => {
     );
     rig.expenses.seed(recordFixture({ splitStrategy: "equal" }));
 
-    const record = await rig.update.update(ADMIN, SOCIETY, RECORD_ID, {
-      expectedVersion: 1,
-      splitStrategy: "apartment",
-    });
+    const { expense: record } = await rig.update.update(
+      ADMIN,
+      SOCIETY,
+      RECORD_ID,
+      {
+        expectedVersion: 1,
+        splitStrategy: "apartment",
+      },
+    );
 
     expect(record.splitStrategy).toBe("apartment");
     expect(record.apartmentBasis).toBe("per_sqft_builtup");

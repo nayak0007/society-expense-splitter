@@ -21,10 +21,12 @@ import type {
   ExpenseDraftFields,
   ExpenseId,
   ExpenseMembershipReader,
+  ExpenseRecalculation,
   ExpenseRecord,
   ExpenseRepository,
   PaymentSource,
   SocietyId,
+  SocietyMembership,
   SplitStrategy,
   UserId,
 } from "@ses/domain";
@@ -50,6 +52,7 @@ import {
   resolveSplitPlan,
   type PreviewSplitConfig,
 } from "./preview-split.use-case";
+import { RecalculateExpenseUseCase } from "./recalculate-expense.use-case";
 
 /**
  * Edit an expense in `draft` or `pending_approval` — Roadmap T065, PRD §3.5.
@@ -107,6 +110,23 @@ export interface UpdateExpenseCommand {
   readonly apartmentBasis?: ApartmentBasis | null | undefined;
   readonly splitConfig?: PreviewSplitConfig | null | undefined;
   readonly participantSelector?: unknown;
+  /** T068's operator note; present only on a published revision. */
+  readonly changeNote?: string | undefined;
+}
+
+/**
+ * The two answers one `PATCH` can produce.
+ *
+ * A draft or pending edit answers the row it wrote and `recalculation: null`; a
+ * published edit answers the row this revision wrote **plus** the diff the database
+ * measured over the rows that committed (T068, ADR-0009). The controller branches on
+ * that field, which is the only place the two response shapes differ — the expense
+ * itself is the same DTO on both paths.
+ */
+export interface UpdateExpenseOutcome {
+  readonly expense: ExpenseRecord;
+  /** Present exactly when a published expense was revised. */
+  readonly recalculation: ExpenseRecalculation | null;
 }
 
 @Injectable()
@@ -121,15 +141,39 @@ export class UpdateExpenseUseCase {
     @Inject(EXPENSE_APPROVAL_POLICY_READER)
     private readonly policies: ExpenseApprovalPolicyReader,
     @Inject(EXPENSE_CLOCK) private readonly clock: Clock,
+    private readonly recalculateExpense: RecalculateExpenseUseCase,
   ) {}
 
-  /** Applies one patch, or refuses it with the reason the caller can act on. */
+  /**
+   * Applies one patch, or refuses it with the reason the caller can act on.
+   *
+   * ## The dispatch, and why it is here rather than in the controller
+   *
+   * `PATCH /expenses/:expenseId` addresses one row whose door depends on its status,
+   * and only the loaded row knows which door that is. A published expense is revised
+   * — T068's recalculation, which re-resolves, re-prices, re-writes the dues and
+   * records a revision — while a draft or pending row is edited as before (T065).
+   * Deciding it in the controller would mean loading the expense there, or routing on
+   * something the caller supplied; deciding it here costs the single load both paths
+   * already need.
+   *
+   * ## The published path refuses the fields it cannot change
+   *
+   * `expenseDate`, `categoryId`, `paymentSource` and `paidByMemberId` are legal on a
+   * draft and **immutable after publication** (`categoryId` because a category edit
+   * must not silently re-route a live bill; the rest for the reasons ADR-0009 §4
+   * records). They are refused by name with a `validation` error, never dropped: a
+   * client that sends one has a bug, and answering "saved" for a change that was not
+   * made is the worst possible answer. A `changeNote` on a *draft* edit is refused
+   * for the mirror-image reason — there is no revision row for it to annotate, and
+   * silently discarding an operator's note loses information.
+   */
   async update(
     actor: UserId,
     societyId: SocietyId,
     expenseId: ExpenseId,
     command: UpdateExpenseCommand,
-  ): Promise<ExpenseRecord> {
+  ): Promise<UpdateExpenseOutcome> {
     const membership = await loadMembershipOrNotFound(
       this.memberships,
       actor,
@@ -143,19 +187,28 @@ export class UpdateExpenseUseCase {
       expenseId,
     );
 
-    const allowed = canOnResource(
-      memberSnapshotOf(membership),
-      "expense.void",
-      snapshotOf(record),
-    );
-    if (!allowed) {
-      throw toAppError(expenseError("forbidden", EDIT_FORBIDDEN));
+    if (record.status === "published") {
+      assertPublishedEditAllowed(command);
+      const recalculation = await this.recalculateExpense.recalculate(
+        actor,
+        societyId,
+        expenseId,
+        {
+          expectedVersion: command.expectedVersion,
+          title: command.title,
+          description: command.description,
+          vendorName: command.vendorName,
+          amountPaise: command.amountPaise,
+          splitStrategy: command.splitStrategy,
+          apartmentBasis: command.apartmentBasis,
+          splitConfig: command.splitConfig,
+          participantSelector: command.participantSelector,
+          changeNote: command.changeNote ?? null,
+        },
+      );
+      return { expense: recalculation.expense, recalculation };
     }
 
-    // Checked before reconstitution, not only inside `edit()`: a published row
-    // cannot be rebuilt as an aggregate without its split set (T061's invariant),
-    // and the honest answer to "edit a published expense" is this refusal, not an
-    // invariant failure about splits the caller never sent.
     if (!isExpenseEditableStatus(record.status)) {
       throw toAppError(
         expenseError(
@@ -164,6 +217,43 @@ export class UpdateExpenseUseCase {
           { from: record.status },
         ),
       );
+    }
+
+    const expense = await this.updateEditable(
+      actor,
+      societyId,
+      record,
+      membership,
+      command,
+    );
+    return { expense, recalculation: null };
+  }
+
+  /** T065's draft/pending edit, unchanged — the record and membership are pre-loaded. */
+  private async updateEditable(
+    actor: UserId,
+    societyId: SocietyId,
+    record: ExpenseRecord,
+    membership: SocietyMembership,
+    command: UpdateExpenseCommand,
+  ): Promise<ExpenseRecord> {
+    if (command.changeNote !== undefined) {
+      throw toAppError(
+        expenseError(
+          "validation",
+          "A change note accompanies a published revision; a draft edit has no revision to annotate.",
+          { field: "changeNote" },
+        ),
+      );
+    }
+
+    const allowed = canOnResource(
+      memberSnapshotOf(membership),
+      "expense.void",
+      snapshotOf(record),
+    );
+    if (!allowed) {
+      throw toAppError(expenseError("forbidden", EDIT_FORBIDDEN));
     }
 
     const planTouched =
@@ -305,4 +395,51 @@ export class UpdateExpenseUseCase {
       throw toAppError(asExpenseError(error));
     }
   }
+}
+
+/**
+ * The fields a published edit may not carry, in one list, so the refusal cannot
+ * drift from the port's `ExpenseRecalculationFields` allow-list.
+ *
+ * The wire name travels with the column so the `validation` error names the input a
+ * form has to highlight (`categoryId`), which is the module's own convention.
+ */
+const IMMUTABLE_AFTER_PUBLICATION: readonly (readonly [
+  keyof UpdateExpenseCommand,
+  string,
+])[] = [
+  ["expenseDate", "expenseDate"],
+  ["categoryId", "categoryId"],
+  ["paymentSource", "paymentSource"],
+  ["paidByMemberId", "paidByMemberId"],
+];
+
+/**
+ * Refuses a published patch that names a field the revision cannot change.
+ *
+ * A **field error per offending field** would need the error vocabulary to carry a
+ * list; the module's shape is one field per refusal, so the first offending field in
+ * the list's own order is reported. That is deliberate: a form fixes one input at a
+ * time, and the client's next request surfaces the next refusal if it sent several —
+ * rather than a single message naming four boxes the client has to parse.
+ *
+ * `paidByMemberId` and `paymentSource` are refused although T068 could leave them
+ * alone: they are immutable because a revision must not restate who paid (the money
+ * already moved), and accepting-and-ignoring is exactly the silent no-op the product
+ * owner ruled out.
+ */
+function assertPublishedEditAllowed(command: UpdateExpenseCommand): void {
+  const offending = IMMUTABLE_AFTER_PUBLICATION.find(
+    ([key]) => command[key] !== undefined,
+  );
+  if (offending === undefined) return;
+
+  const [key, field] = offending;
+  throw toAppError(
+    expenseError(
+      "validation",
+      `A published expense cannot change ${key}: the date, the category and who paid are fixed once the bill is published. Revise the title, description, vendor, amount, split configuration or participants instead.`,
+      { field },
+    ),
+  );
 }

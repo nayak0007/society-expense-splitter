@@ -20,19 +20,23 @@ import {
   EXPENSE_EVENT_PUBLISHER,
   EXPENSE_MEMBER_NAME_READER,
   EXPENSE_REPOSITORY,
+  EXPENSE_REVISION_REPOSITORY,
   EXPENSE_SPLIT_REPOSITORY,
 } from "./application/expense.tokens";
 import { CreateExpenseUseCase } from "./application/use-cases/create-expense.use-case";
 import { DeleteDraftUseCase } from "./application/use-cases/delete-draft.use-case";
 import { GetExpenseUseCase } from "./application/use-cases/get-expense.use-case";
 import { ListExpensesUseCase } from "./application/use-cases/list-expenses.use-case";
+import { ListRevisionsUseCase } from "./application/use-cases/list-revisions.use-case";
 import { PreviewSplitUseCase } from "./application/use-cases/preview-split.use-case";
 import { PublishExpenseUseCase } from "./application/use-cases/publish-expense.use-case";
+import { RecalculateExpenseUseCase } from "./application/use-cases/recalculate-expense.use-case";
 import { UpdateExpenseUseCase } from "./application/use-cases/update-expense.use-case";
 import { ExpenseCategoryRepositoryPostgres } from "./infrastructure/category.repository";
 import { LoggingExpenseEventPublisher } from "./infrastructure/expense-event.publisher";
 import { ExpenseRepositoryPostgres } from "./infrastructure/expense.repository";
 import { ExpenseParticipantRepositoryPostgres } from "./infrastructure/participant.repository";
+import { ExpenseRevisionRepositoryPostgres } from "./infrastructure/revision.repository";
 import { ExpenseSplitRepositoryPostgres } from "./infrastructure/split.repository";
 import { ExpenseCategoriesController } from "./presentation/categories.controller";
 import { ExpensesController } from "./presentation/expenses.controller";
@@ -193,6 +197,20 @@ import { ExpensesController } from "./presentation/expenses.controller";
       useExisting: LoggingExpenseEventPublisher,
     },
     PublishExpenseUseCase,
+    // T068's recalculation. It reads through the same two adapters publication uses
+    // (the expense repository and the split writer, whose `expense_recalculate()`
+    // transaction owns the revision, the due lifecycle and the balance deltas) and
+    // re-runs the *same* resolution and engine path — there is no second split
+    // algorithm in the module. The revision-history read is a third adapter, bound
+    // through its own token because it is a different table with a different
+    // lifetime (append-only).
+    RecalculateExpenseUseCase,
+    ExpenseRevisionRepositoryPostgres,
+    {
+      provide: EXPENSE_REVISION_REPOSITORY,
+      useExisting: ExpenseRevisionRepositoryPostgres,
+    },
+    ListRevisionsUseCase,
   ],
 })
 export class ExpensesModule {}

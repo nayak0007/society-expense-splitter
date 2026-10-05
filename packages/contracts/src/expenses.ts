@@ -479,6 +479,9 @@ export type PreviewSplitResponseDto = z.infer<
  */
 const expenseDateSchema = z.iso.date();
 
+/** The PRD's `changeNote`, bounded like every other free-text field. */
+export const EXPENSE_CHANGE_NOTE_MAX_LENGTH = 500;
+
 /**
  * The form fields T061 handed to the create/update use cases (PRD §3.4).
  *
@@ -558,6 +561,17 @@ export const updateExpenseSchema = createExpenseSchema
   .extend({
     splitConfig: splitConfigSchema.nullable().optional(),
     participantSelector: participantSelectorSchema.nullable().optional(),
+    /**
+     * T068's operator note for a published revision (PRD's PATCH example carries
+     * `changeNote`). Stored on the `expense_revisions` row and never on the
+     * expense itself; optional, and only meaningful on a published edit.
+     */
+    changeNote: z
+      .string()
+      .trim()
+      .min(1)
+      .max(EXPENSE_CHANGE_NOTE_MAX_LENGTH)
+      .optional(),
   })
   .partial()
   .extend({ expectedVersion: z.number().int().min(1) })
@@ -762,4 +776,84 @@ export const publishExpenseResponseSchema = z.object({
 });
 export type PublishExpenseResponseDto = z.infer<
   typeof publishExpenseResponseSchema
+>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Published recalculation and revision history — Roadmap T068, ADR-0009
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The diff a committed recalculation reports — PRD §8's `recalculation` object.
+ *
+ * `duesUpdated` counts retained dues whose amount actually changed (a title-only
+ * edit reports zero), `duesSuperseded` and `duesCreated` the other two lifecycle
+ * moves, and `totalDeltaPaise` is **signed**: positive when members owe more,
+ * negative when less. `blockedByPaidSplits` is the PRD's field and is always `0`
+ * on a successful commit — a revision that would put an obligation below a
+ * verified payment raises `409 CONFLICT` with
+ * `DUE_PAID_EXCEEDS_NEW_AMOUNT` instead of returning.
+ *
+ * All amounts are integer paise, like every money field on this wire.
+ */
+export const expenseRecalculationSchema = z.object({
+  duesUpdated: z.number().int().nonnegative(),
+  duesSuperseded: z.number().int().nonnegative(),
+  duesCreated: z.number().int().nonnegative(),
+  totalDeltaPaise: z.number().int(),
+  affectedMembers: z.number().int().nonnegative(),
+  blockedByPaidSplits: z.number().int().nonnegative(),
+});
+export type ExpenseRecalculationDto = z.infer<
+  typeof expenseRecalculationSchema
+>;
+
+/**
+ * `PATCH /expenses/:expenseId` on a published row — the expense plus its diff.
+ *
+ * The expense is the same `expenseSchema` every other route returns (the row the
+ * revision wrote, `version` bumped by the database's own trigger), so a client
+ * that already renders an expense needs no second shape. A draft or
+ * pending_approval edit still answers `expenseResponseSchema` unchanged; the
+ * diff is only meaningful where something was recalculated.
+ */
+export const recalculateExpenseResponseSchema = z.object({
+  expense: expenseSchema,
+  recalculation: expenseRecalculationSchema,
+});
+export type RecalculateExpenseResponseDto = z.infer<
+  typeof recalculateExpenseResponseSchema
+>;
+
+/**
+ * One `expense_revisions` row — PRD §3.5.3's "edited" chip and its tap-through
+ * history.
+ *
+ * `version` is the **pre-edit** version: the revision describes the state that
+ * existed as expense version V before the edit that produced V+1. `snapshot` is
+ * that state — the allocation-driving configuration and the authoritative splits
+ * — and is deliberately typed as opaque records rather than re-modelled here:
+ * the history is what the row says, and a client rendering it reads the same
+ * fields the live expense carries (`amount_paise` as a digit string, per the
+ * money convention). Rows are append-only; there is no update or delete route.
+ */
+export const expenseRevisionSchema = z.object({
+  id: z.string(),
+  expenseId: z.string(),
+  version: z.number().int(),
+  snapshot: z.object({
+    expense: z.record(z.string(), z.unknown()),
+    splits: z.array(z.record(z.string(), z.unknown())),
+  }),
+  changedBy: z.string(),
+  changeNote: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type ExpenseRevisionDto = z.infer<typeof expenseRevisionSchema>;
+
+/** `GET /expenses/:expenseId/revisions` — oldest first, so the history reads forward. */
+export const expenseRevisionsResponseSchema = z.object({
+  revisions: z.array(expenseRevisionSchema),
+});
+export type ExpenseRevisionsResponseDto = z.infer<
+  typeof expenseRevisionsResponseSchema
 >;

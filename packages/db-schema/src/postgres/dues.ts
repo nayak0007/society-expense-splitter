@@ -38,9 +38,11 @@ import {
 } from "drizzle-orm/pg-core";
 
 /**
- * The dues lifecycle (PRD §7.1): `pending → partial → paid`, plus `overdue`,
- * `waived`, `written_off` and the advance credit. Created by
- * `supabase/migrations/20261001120000_expense_schema.sql`.
+ * The dues lifecycle (PRD §7.1, ADR-0009): `pending → partial → paid`, plus
+ * `overdue`, `waived` and `written_off` as current states, and `superseded` as
+ * the historical state a recalculation (T068) or void (T069) moves a due to.
+ * `superseded` is appended by
+ * `supabase/migrations/20261007120000_due_status_superseded.sql`.
  */
 export const dueStatus = pgEnum("due_status", [
   "pending",
@@ -49,6 +51,7 @@ export const dueStatus = pgEnum("due_status", [
   "overdue",
   "waived",
   "written_off",
+  "superseded",
 ]);
 
 export const dues = {

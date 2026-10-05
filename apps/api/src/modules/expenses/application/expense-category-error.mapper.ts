@@ -62,6 +62,12 @@ export const ERROR_CODE_BY_EXPENSE_CODE: Readonly<
   // is — the state refused it — and the code is preserved on the wire so a client can
   // tell "rename it" from "deactivate it instead" without matching on message text.
   category_has_expenses: "CONFLICT",
+  // T068's paid-obligation block (ADR-0009 §13). 409, not 422: the payload is well
+  // formed and the *state* refuses it — the revision succeeds once the office issues
+  // a credit adjustment — which is the same reasoning `idempotency_key_reuse` and
+  // `category_has_expenses` follow. The detail code keeps the stable SQL identity so
+  // a client branches on `DUE_PAID_EXCEEDS_NEW_AMOUNT`, never on the sentence.
+  paid_obligation: "CONFLICT",
   unknown: "INTERNAL",
 };
 
@@ -76,6 +82,7 @@ export const ERROR_CODE_BY_EXPENSE_CODE: Readonly<
 const DETAIL_CODES: Readonly<Partial<Record<ExpenseErrorCode, string>>> = {
   conflict: "CATEGORY_NAME_TAKEN",
   category_has_expenses: "CATEGORY_HAS_EXPENSES",
+  paid_obligation: "DUE_PAID_EXCEEDS_NEW_AMOUNT",
 };
 
 /**

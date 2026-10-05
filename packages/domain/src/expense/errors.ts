@@ -52,6 +52,16 @@ import type { DomainErrorInit } from "../shared/errors";
  *    what stops a bill from silently omitting a flat, and the flagged flats travel
  *    in `details` so the treasurer knows exactly what to fix.
  *
+ * T068 adds the one refusal a published recalculation owns:
+ *
+ *  - `paid_obligation` — a recalculated obligation (including a removed
+ *    participant's zero) would fall below an already-verified payment. The whole
+ *    revision is refused atomically (ADR-0009 §13) and the caller is told to
+ *    issue a credit adjustment instead; T068 deliberately does not create that
+ *    credit. Its own code because the client's next action differs from every
+ *    `conflict` and `validation` refusal — it is a product workflow, not a bad
+ *    payload.
+ *
  * A union per module rather than one global list, exactly as `InvitationError` and
  * `MemberError` record: the API's `Record<ExpenseErrorCode, ErrorCode>` mapper then
  * *fails the build* when a code gains no HTTP meaning, which is the property that
@@ -70,6 +80,7 @@ export const EXPENSE_ERROR_CODES = [
   "category_has_expenses",
   "idempotency_key_reuse",
   "unassigned_participants",
+  "paid_obligation",
   "unknown",
 ] as const;
 

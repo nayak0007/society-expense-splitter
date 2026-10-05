@@ -584,24 +584,10 @@ describe("PATCH /v1/expenses/:expenseId — edit", () => {
     });
   });
 
-  it("refuses a published expense with INVALID_TRANSITION", async () => {
-    const expenseId = await createDraft();
-    const stored = [...expenses.state.records.values()][0]!;
-    expenses.seed({
-      ...stored,
-      status: "published",
-      publishedAt: "2026-10-01T00:00:00.000Z",
-    });
-
-    const response = await call("patch", `/v1/expenses/${expenseId}`, {
-      userId: ADMIN,
-      societyId: SOCIETY_A,
-      body: { expectedVersion: 1, title: "Too late" },
-    });
-
-    expect(response.status).toBe(409);
-    expect(response.body.error.code).toBe("INVALID_TRANSITION");
-  });
+  // A published expense's `PATCH` is **no longer** refused here: since T068 it is the
+  // recalculation door (200 with `{ expense, recalculation }`), and it is pinned in
+  // `expense-revision.e2e-spec.ts` — the suite that owns the published write, the
+  // revision it appends and the history route that reads it.
 
   it("lets a Committee Member edit their own draft", async () => {
     const expenseId = await createDraft({}, { userId: COMMITTEE });

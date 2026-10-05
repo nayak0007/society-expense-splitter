@@ -1,5 +1,9 @@
 import { Money, paise } from "@ses/domain";
-import type { ExpensePublication, ExpenseSplitSummary } from "@ses/domain";
+import type {
+  ExpensePublication,
+  ExpenseRecalculationSummary,
+  ExpenseSplitSummary,
+} from "@ses/domain";
 import { z } from "zod";
 
 import { expenseFromRow, expenseRowSchema } from "./expense.rows";
@@ -61,6 +65,54 @@ export const storedPublicationSchema = z.object({
 });
 
 export type StoredPublication = z.infer<typeof storedPublicationSchema>;
+
+/**
+ * The `recalculation` object `expense_recalculate()` returns — T068's diff.
+ *
+ * `totalDeltaPaise` is signed and arrives as text like every other amount, so no
+ * JSON number stands between a bigint and the wire. `blockedByPaidSplits` is the
+ * PRD's field and is `0` on every committed revision by construction: a blocked
+ * one raises instead of returning.
+ */
+export const recalculationRowSchema = z.object({
+  duesUpdated: z.coerce.number().int().nonnegative(),
+  duesSuperseded: z.coerce.number().int().nonnegative(),
+  duesCreated: z.coerce.number().int().nonnegative(),
+  totalDeltaPaise: z.string().regex(/^-?\d+$/),
+  affectedMembers: z.coerce.number().int().nonnegative(),
+  blockedByPaidSplits: z.coerce.number().int().nonnegative(),
+});
+
+export type RecalculationRow = z.infer<typeof recalculationRowSchema>;
+
+/** The row `select … from public.expense_recalculate(…)` produces. */
+export const recalculatedExpenseRowSchema = expenseRowSchema.extend({
+  recalculation: recalculationRowSchema,
+});
+
+export type RecalculatedExpenseRow = z.infer<
+  typeof recalculatedExpenseRowSchema
+>;
+
+/**
+ * The persisted row → the recalculation summary.
+ *
+ * `totalDelta` crosses through `BigInt` → `paise()` exactly like every other money
+ * value (ADR-0005); it is the one signed amount in this module, because a
+ * recalculation can lower obligations as well as raise them.
+ */
+export function recalculationSummaryFromRow(
+  row: RecalculationRow,
+): ExpenseRecalculationSummary {
+  return {
+    duesUpdated: row.duesUpdated,
+    duesSuperseded: row.duesSuperseded,
+    duesCreated: row.duesCreated,
+    totalDelta: Money.fromPaise(paise(BigInt(row.totalDeltaPaise))),
+    affectedMembers: row.affectedMembers,
+    blockedByPaidSplits: row.blockedByPaidSplits,
+  };
+}
 
 /** One row of `idempotency_records`, as the pre-check reads it. */
 export const idempotencyRecordRowSchema = z.object({

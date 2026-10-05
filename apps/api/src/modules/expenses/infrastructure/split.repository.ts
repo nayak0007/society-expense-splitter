@@ -5,8 +5,11 @@ import type {
   ExpenseId,
   ExpensePublication,
   ExpensePublicationLookup,
+  ExpenseRecalculation,
   ExpenseSplitRepository,
+  PublishExpenseAllocation,
   PublishExpenseRecordInput,
+  RecalculateExpenseRecordInput,
   SocietyId,
   UserId,
 } from "@ses/domain";
@@ -22,12 +25,18 @@ import {
   runQuery,
   type Row,
 } from "./expense.repository";
-import { expenseErrorFromPostgres, unexpectedShapeError } from "./expense.rows";
+import {
+  expenseErrorFromPostgres,
+  expenseFromRow,
+  unexpectedShapeError,
+} from "./expense.rows";
 import {
   idempotencyRecordRowSchema,
   publicationFromRow,
   publicationFromStored,
   publishedExpenseRowSchema,
+  recalculationSummaryFromRow,
+  recalculatedExpenseRowSchema,
   storedPublicationOf,
   storedPublicationSchema,
 } from "./split.rows";
@@ -91,6 +100,62 @@ import {
 @Injectable()
 export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
   constructor(private readonly unitOfWork: UnitOfWork) {}
+
+  /**
+   * T068's published-edit transaction — one call to `expense_recalculate()`.
+   *
+   * No retry record: a published edit is locked by `expectedVersion`, and a lost
+   * response is recovered by the client re-reading the expense (the response's new
+   * version makes that unambiguous). The whole revision — revision row, split and
+   * due lifecycle, balance deltas — is the definer function's single transaction;
+   * this method maps the plan and the editable fields into the function's jsonb
+   * inputs and classifies the row back out. Money and weights are digit strings,
+   * as on the publish path; the one exception is `amountPaise`, which the function
+   * reads as a JSON number because it is the expense's own column-scale value and
+   * the contract already bounds it at `Number.MAX_SAFE_INTEGER`.
+   */
+  async recalculate(
+    id: ExpenseId,
+    societyId: SocietyId,
+    input: RecalculateExpenseRecordInput,
+    actor: UserId,
+  ): Promise<ExpenseRecalculation> {
+    try {
+      return await this.run(actor, async (tx) => {
+        const rows = await runQuery(
+          tx,
+          sql`
+            select ${RECALCULATE_COLUMNS}
+              from public.expense_recalculate(
+                ${id}::uuid,
+                ${societyId}::uuid,
+                ${input.expectedVersion}::int,
+                ${JSON.stringify(fieldsForRecalculation(input))}::jsonb,
+                ${JSON.stringify(allocationsForPublish(input))}::jsonb,
+                ${input.changeNote ?? null}::text
+              )
+          `,
+        );
+
+        const [first] = rows;
+        if (first === undefined) {
+          throw unexpectedShapeError("recalculated expense");
+        }
+        const parsed = recalculatedExpenseRowSchema.safeParse(first);
+        if (!parsed.success) {
+          throw unexpectedShapeError("recalculated expense");
+        }
+        const row = parsed.data;
+
+        return {
+          expense: expenseFromRow(row),
+          summary: recalculationSummaryFromRow(row.recalculation),
+        };
+      });
+    } catch (error: unknown) {
+      throw enrichVersionMismatch(error, input.expectedVersion);
+    }
+  }
 
   /**
    * The publication this key already committed, or `null` — written nothing either way.
@@ -297,6 +362,56 @@ const PUBLISH_COLUMNS = sql.raw(
   [...EXPENSE_COLUMN_EXPRESSIONS, "split_summary"].join(", "),
 );
 
+/** The recalculation function's row: the expense's columns plus the diff. */
+const RECALCULATE_COLUMNS = sql.raw(
+  [...EXPENSE_COLUMN_EXPRESSIONS, "recalculation"].join(", "),
+);
+
+/**
+ * The published-editable fields, in the function's own key vocabulary.
+ *
+ * Only the keys the caller sent travel — the definer function distinguishes an
+ * absent key (unchanged) from a present `null` (clear) — and the camelCase names
+ * are the function's (`p_fields ? 'amountPaise'`), not a second spelling of the
+ * columns: this object never touches a table directly. `amountPaise` becomes a
+ * JSON number because the function's validation reads it as one; the bound the
+ * contract already enforced is re-asserted here, because a definer input should
+ * never be the place a value silently leaves the safe integer range.
+ */
+function fieldsForRecalculation(
+  input: RecalculateExpenseRecordInput,
+): Readonly<Record<string, unknown>> {
+  const fields = input.fields;
+  const payload: Record<string, unknown> = {};
+  if (fields.title !== undefined) payload["title"] = fields.title;
+  if (fields.description !== undefined)
+    payload["description"] = fields.description;
+  if (fields.vendorName !== undefined)
+    payload["vendorName"] = fields.vendorName;
+  if (fields.amountPaise !== undefined) {
+    if (fields.amountPaise > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw expenseError(
+        "invariant",
+        "The amount is above the range this wire can carry exactly.",
+        { field: "amountPaise" },
+      );
+    }
+    payload["amountPaise"] = Number(fields.amountPaise);
+  }
+  if (fields.splitStrategy !== undefined) {
+    payload["splitStrategy"] = fields.splitStrategy;
+  }
+  if (fields.apartmentBasis !== undefined) {
+    payload["apartmentBasis"] = fields.apartmentBasis;
+  }
+  if (fields.splitConfig !== undefined)
+    payload["splitConfig"] = fields.splitConfig;
+  if (fields.participantSelector !== undefined) {
+    payload["participantSelector"] = fields.participantSelector;
+  }
+  return payload;
+}
+
 /**
  * The allocations, in the wire shape `expense_publish()` reads.
  *
@@ -306,9 +421,9 @@ const PUBLISH_COLUMNS = sql.raw(
  * time. This is a mapping, not a computation: nothing here adds, divides or re-rounds
  * an amount.
  */
-function allocationsForPublish(
-  input: PublishExpenseRecordInput,
-): readonly (Row & unknown)[] {
+function allocationsForPublish(input: {
+  readonly allocations: readonly PublishExpenseAllocation[];
+}): readonly (Row & unknown)[] {
   return input.allocations.map((allocation) => ({
     member_id: allocation.memberId,
     apartment_id: allocation.apartmentId,

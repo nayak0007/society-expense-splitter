@@ -369,6 +369,16 @@ class FakeSplits implements ExpenseSplitRepository {
     });
     return publication;
   }
+
+  /**
+   * T068's write, which this suite deliberately does not exercise — recalculation
+   * has its own suite (`recalculate-expense.use-case.test.ts`) and its real proof in
+   * the integration suite. It exists so the fake satisfies the port: a publish test
+   * that started to reach for a revision would fail here loudly rather than pass.
+   */
+  async recalculate(): Promise<never> {
+    throw new Error("not used by the publish suite");
+  }
 }
 
 /** The PRD §8.3 summary, measured over the allocations the write received. */

@@ -125,6 +125,56 @@ export function ApiExpensePublishErrors(): ClassDecorator & MethodDecorator {
  * `published`/`void` edit or a non-draft delete is `INVALID_TRANSITION`, also 409,
  * documented on the operations themselves.
  */
+/**
+ * The error responses T068's published revision can return — ADR-0009.
+ *
+ * The 404 is the module's usual indistinguishable-cases sentence, and the 403 names
+ * `expense.publish` explicitly: a revision moves money, so it is the **same cell**
+ * publication uses (Admin or Treasurer) — a Committee Member's `expense.void`
+ * draft-only grant does not reach it, which is exactly the distinction a client
+ * needs to render the right disabled state.
+ *
+ * The 409 carries three refusals and names all three, because a client acts
+ * differently on each: `VERSION_MISMATCH` (reload — `details[0].current` has the
+ * version), `INVALID_TRANSITION` (the expense is not published), and
+ * `DUE_PAID_EXCEEDS_NEW_AMOUNT` — the revision would put an obligation below an
+ * already-verified payment, so the whole revision was refused and the office must
+ * issue a credit adjustment instead (T086 owns that credit; T068 deliberately does
+ * not create it).
+ */
+export function ApiExpenseRecalculateErrors(): ClassDecorator &
+  MethodDecorator {
+  return ApiErrorResponses({
+    notFound:
+      "No such society or expense — or one the caller is not an active member of. This API deliberately does not distinguish these (PRD T041).",
+    forbidden:
+      "An active member whose role does not hold `expense.publish`: Admin or Treasurer. Revising a published bill is the same capability as publishing it, so a Committee Member's draft-only grant does not reach this route.",
+    conflict:
+      "The expense moved since the caller read it (`VERSION_MISMATCH`, with `details[0].current` carrying the current version); the expense is not published (`INVALID_TRANSITION`); or the revision would leave an obligation below a verified payment (`DUE_PAID_EXCEEDS_NEW_AMOUNT` — issue a credit adjustment instead, which T068 does not create).",
+  });
+}
+
+/**
+ * The error responses T068's revision-history read can return.
+ *
+ * A read, so no state can conflict: the 409 copy says so rather than documenting a
+ * status a client might retry on. The 403 is the catalogue's narrowest read cell —
+ * `expense.view` is every role but Guest — and the history is deliberately readable
+ * by the same members the expense itself is visible to: the "edited" chip and its
+ * tap-through are the transparency feature (PRD §3.5.3), not an officer-only audit
+ * log. An expense with no revisions answers an empty list, never a 404.
+ */
+export function ApiExpenseRevisionErrors(): ClassDecorator & MethodDecorator {
+  return ApiErrorResponses({
+    notFound:
+      "No such society or expense — or one the caller is not an active member of. An expense that has never been revised answers an empty list rather than 404. This API deliberately does not distinguish these (PRD T041).",
+    forbidden:
+      "An active member whose role does not hold `expense.view`: every role but Guest.",
+    conflict:
+      "Not produced by this route: the history is append-only and the read cannot conflict.",
+  });
+}
+
 export function ApiExpenseDraftErrors(): ClassDecorator & MethodDecorator {
   return ApiErrorResponses({
     notFound:

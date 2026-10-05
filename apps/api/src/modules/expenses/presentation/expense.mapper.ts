@@ -1,17 +1,26 @@
 import {
   expenseListResponseSchema,
   expenseResponseSchema,
+  expenseRevisionsResponseSchema,
   expenseSchema,
   publishExpenseResponseSchema,
+  recalculateExpenseResponseSchema,
 } from "@ses/contracts";
 import type {
   ExpenseDto,
   ExpenseListResponseDto,
   ExpenseResponseDto,
+  ExpenseRevisionsResponseDto,
   PublishExpenseResponseDto,
+  RecalculateExpenseResponseDto,
 } from "@ses/contracts";
 import { paiseToWire } from "@ses/domain";
-import type { ExpensePublication, ExpenseRecord } from "@ses/domain";
+import type {
+  ExpensePublication,
+  ExpenseRecalculation,
+  ExpenseRecord,
+  ExpenseRevisionRecord,
+} from "@ses/domain";
 
 import type { ExpenseListResult } from "../application/use-cases/list-expenses.use-case";
 
@@ -65,7 +74,7 @@ export function expenseToDto(record: ExpenseRecord): ExpenseDto {
   });
 }
 
-/** One expense, wrapped for `POST /expenses` and `PATCH /expenses/:expenseId`. */
+/** One expense, wrapped for `POST /expenses` and a draft `PATCH /expenses/:expenseId`. */
 export function expenseResponseToDto(
   record: ExpenseRecord,
 ): ExpenseResponseDto {
@@ -109,5 +118,59 @@ export function expensePublicationToDto(
       minPaise: paiseToWire(publication.summary.min.paise),
       maxPaise: paiseToWire(publication.summary.max.paise),
     },
+  });
+}
+
+/**
+ * A committed revision → the wire DTO — Roadmap T068.
+ *
+ * The expense travels through the same `expenseToDto` every other route uses, so the
+ * row is the one the database wrote (`version` bumped by its trigger, `updated_at`
+ * stamped) rather than the in-memory patch's view of it. The diff's `totalDelta`
+ * crosses through `paiseToWire` — the repository's single range-checked crossing
+ * point — and is the one **signed** amount on this wire, because a revision can lower
+ * obligations as well as raise them.
+ */
+export function recalculateExpenseToDto(
+  recalculation: ExpenseRecalculation,
+): RecalculateExpenseResponseDto {
+  return recalculateExpenseResponseSchema.parse({
+    expense: expenseToDto(recalculation.expense),
+    recalculation: {
+      duesUpdated: recalculation.summary.duesUpdated,
+      duesSuperseded: recalculation.summary.duesSuperseded,
+      duesCreated: recalculation.summary.duesCreated,
+      totalDeltaPaise: paiseToWire(recalculation.summary.totalDelta.paise),
+      affectedMembers: recalculation.summary.affectedMembers,
+      blockedByPaidSplits: recalculation.summary.blockedByPaidSplits,
+    },
+  });
+}
+
+/**
+ * The revision history → the wire DTO — Roadmap T068.
+ *
+ * No mapping of the snapshot's members beyond copying them: they are the stored
+ * history, and re-modelling them here would be the second, narrower model of a
+ * revision the port deliberately avoids. The parse still runs, so a row whose
+ * envelope is not `{expense, splits}` fails at this boundary rather than reaching a
+ * client as a shape it cannot render.
+ */
+export function expenseRevisionsToDto(
+  revisions: readonly ExpenseRevisionRecord[],
+): ExpenseRevisionsResponseDto {
+  return expenseRevisionsResponseSchema.parse({
+    revisions: revisions.map((revision) => ({
+      id: revision.id,
+      expenseId: revision.expenseId,
+      version: revision.version,
+      snapshot: {
+        expense: revision.snapshot.expense,
+        splits: [...revision.snapshot.splits],
+      },
+      changedBy: revision.changedBy,
+      changeNote: revision.changeNote,
+      createdAt: revision.createdAt,
+    })),
   });
 }

@@ -62,8 +62,35 @@ export const DUE_KINDS = ["principal", "late_fee", "adjustment"] as const;
 export type DueKind = (typeof DUE_KINDS)[number];
 
 /**
+ * The full `public.due_status` vocabulary — PRD §3.6 plus ADR-0009's historical
+ * state. Exported so no caller re-spells a status string: the recalculation's
+ * classification, the RPC's predicate and the Drizzle mirror all read the same
+ * list.
+ */
+export const DUE_STATUSES = [
+  "pending",
+  "partial",
+  "paid",
+  "overdue",
+  "waived",
+  "written_off",
+  "superseded",
+] as const;
+export type DueStatus = (typeof DUE_STATUSES)[number];
+
+/**
+ * The historical state ADR-0009 defines: a due that existed as a real obligation
+ * and is no longer part of current state. It keeps its id, its original amount
+ * and its paid history, is excluded from current-principal conservation and from
+ * `member_balances`, and is never deleted.
+ */
+export const SUPERSEDED_DUE_STATUS = "superseded" as const;
+
+/**
  * The due statuses that are still an open receivable. `paid` is settled, and
  * `waived`/`written_off` are the two documented ways a charge stops being owed.
+ * `superseded` is historical and is deliberately absent: a superseded due must
+ * not contribute to outstanding.
  */
 export const OUTSTANDING_DUE_STATUSES = [
   "pending",

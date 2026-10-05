@@ -697,6 +697,66 @@ export interface ExpenseSplitSummary {
 }
 
 /**
+ * The published-editable fields one recalculation may change — ADR-0009 §18.
+ *
+ * The type is the allow-list: `expenseDate`, `dueDate`, `categoryId`,
+ * `paidByMemberId`, `paymentSource` and the lifecycle/approval fields are absent
+ * by construction, and the contract + use case reject them explicitly rather
+ * than dropping them. Only fields the caller actually sent are present; the
+ * definer function merges them into the stored row.
+ */
+export interface ExpenseRecalculationFields {
+  readonly title?: string | undefined;
+  readonly description?: string | null | undefined;
+  readonly vendorName?: string | null | undefined;
+  readonly amountPaise?: bigint | undefined;
+  readonly splitStrategy?: SplitStrategy | undefined;
+  readonly apartmentBasis?: ApartmentBasis | null | undefined;
+  readonly splitConfig?: Readonly<Record<string, unknown>> | undefined;
+  readonly participantSelector?: Readonly<Record<string, unknown>> | undefined;
+}
+
+/**
+ * What `ExpenseSplitRepository.recalculate` writes — the plan plus the fields.
+ *
+ * No idempotency key: a published edit is an optimistic-locked PATCH keyed on
+ * `expectedVersion` (T065's lock), and a retry with a stale version is refused
+ * by the row lock rather than replayed. A lost response is recovered by the
+ * client re-reading the expense, which the response's new version makes
+ * unambiguous.
+ */
+export interface RecalculateExpenseRecordInput {
+  /** The version the caller believed it was editing — the optimistic lock. */
+  readonly expectedVersion: number;
+  readonly fields: ExpenseRecalculationFields;
+  readonly allocations: readonly PublishExpenseAllocation[];
+  readonly changeNote?: string | null | undefined;
+}
+
+/**
+ * The summary of one committed recalculation, measured from the rows it wrote.
+ *
+ * `totalDelta` is **signed**: a decrease is negative, an increase positive, and
+ * a title-only edit is zero. `blockedByPaidSplits` is `0` on every commit that
+ * succeeded — its presence is the PRD §3.5.3 field, and a non-zero value is
+ * impossible because a blocked revision raises instead of returning.
+ */
+export interface ExpenseRecalculationSummary {
+  readonly duesUpdated: number;
+  readonly duesSuperseded: number;
+  readonly duesCreated: number;
+  readonly totalDelta: Money;
+  readonly affectedMembers: number;
+  readonly blockedByPaidSplits: number;
+}
+
+/** What one committed recalculation produced: the row it updated and its diff. */
+export interface ExpenseRecalculation {
+  readonly expense: ExpenseRecord;
+  readonly summary: ExpenseRecalculationSummary;
+}
+
+/**
  * The publishing write path — Roadmap T066's `split.repository.ts`.
  *
  * ## One method, because it is one transaction
@@ -754,6 +814,70 @@ export interface ExpenseSplitRepository {
     input: PublishExpenseRecordInput,
     actor: UserId,
   ): Promise<ExpensePublication>;
+
+  /**
+   * Revise one published expense, atomically — T068's write path, ADR-0009.
+   *
+   * The implementation runs the whole revision in the `expense_recalculate()`
+   * definer transaction: BEFORE revision snapshot, retained dues/splits updated
+   * in place, removed dues superseded (never deleted), added dues created,
+   * exact balance deltas, `oldest_due_date` recomputed, and exactly one
+   * `expense_revisions` row. Failure semantics are part of the contract:
+   * `not_found` for an expense outside the caller's society; `forbidden` when
+   * the caller's role cannot publish; `invalid_transition` when the row is not
+   * `published`; `version_mismatch` carrying the row's current version;
+   * `split_mismatch` when the plan does not sum to the amount; and
+   * `paid_obligation` when a new obligation is below an already-verified
+   * payment — the whole revision is refused and the caller is instructed to
+   * issue a credit adjustment instead.
+   */
+  recalculate(
+    id: ExpenseId,
+    societyId: SocietyId,
+    input: RecalculateExpenseRecordInput,
+    actor: UserId,
+  ): Promise<ExpenseRecalculation>;
+}
+
+/**
+ * One stored `expense_revisions` row — PRD §3.5.3's tap-through history.
+ *
+ * `version` is the pre-edit version and `snapshot` the BEFORE state the revision
+ * replaced (ADR-0009 §17): the allocation-driving configuration of the expense
+ * plus its authoritative splits. The snapshot travels as opaque records because
+ * the history is what the row says — a client renders the same fields the live
+ * expense carries, and a shape the API cannot represent should fail at the
+ * boundary rather than be silently re-modelled into a different history.
+ */
+export interface ExpenseRevisionRecord {
+  readonly id: string;
+  readonly expenseId: ExpenseId;
+  readonly version: number;
+  readonly snapshot: {
+    readonly expense: Readonly<Record<string, unknown>>;
+    readonly splits: readonly Readonly<Record<string, unknown>>[];
+  };
+  readonly changedBy: MemberId;
+  readonly changeNote: string | null;
+  readonly createdAt: string;
+}
+
+/**
+ * The revision history read — T068's `revision.repository.ts`.
+ *
+ * A read-only port: revisions are append-only (SAD §8.1 revokes UPDATE and
+ * DELETE), so the only operation is "the history of one expense". Visibility is
+ * the database's (`expense_revisions_select_member` → `can_view_expenses`), so a
+ * caller outside the society reads nothing; the use case answers `not_found` for
+ * a foreign id before this is reached.
+ */
+export interface ExpenseRevisionRepository {
+  /** Oldest first, so the history reads forward from the published state. */
+  listForExpense(
+    expenseId: ExpenseId,
+    societyId: SocietyId,
+    actor: UserId,
+  ): Promise<readonly ExpenseRevisionRecord[]>;
 }
 
 /**

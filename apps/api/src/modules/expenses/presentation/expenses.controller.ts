@@ -25,12 +25,14 @@ import {
   createExpenseSchema,
   expenseListResponseSchema,
   expenseResponseSchema,
+  expenseRevisionsResponseSchema,
   idempotencyKeySchema,
   listExpensesQuerySchema,
   previewSplitRequestSchema,
   previewSplitResponseSchema,
   publishExpenseSchema,
   publishExpenseResponseSchema,
+  recalculateExpenseResponseSchema,
   updateExpenseSchema,
 } from "@ses/contracts";
 import type {
@@ -61,6 +63,7 @@ import { CreateExpenseUseCase } from "../application/use-cases/create-expense.us
 import { DeleteDraftUseCase } from "../application/use-cases/delete-draft.use-case";
 import { GetExpenseUseCase } from "../application/use-cases/get-expense.use-case";
 import { ListExpensesUseCase } from "../application/use-cases/list-expenses.use-case";
+import { ListRevisionsUseCase } from "../application/use-cases/list-revisions.use-case";
 import { PreviewSplitUseCase } from "../application/use-cases/preview-split.use-case";
 import { PublishExpenseUseCase } from "../application/use-cases/publish-expense.use-case";
 import { UpdateExpenseUseCase } from "../application/use-cases/update-expense.use-case";
@@ -68,12 +71,16 @@ import {
   expenseListToDto,
   expensePublicationToDto,
   expenseResponseToDto,
+  expenseRevisionsToDto,
+  recalculateExpenseToDto,
 } from "./expense.mapper";
 import { expenseSplitPreviewToDto } from "./expense-preview.mapper";
 import {
   ApiExpenseDraftErrors,
   ApiExpensePreviewErrors,
   ApiExpensePublishErrors,
+  ApiExpenseRecalculateErrors,
+  ApiExpenseRevisionErrors,
 } from "./openapi";
 
 /**
@@ -126,6 +133,7 @@ export class ExpensesController {
     private readonly listExpenses: ListExpensesUseCase,
     private readonly deleteDraft: DeleteDraftUseCase,
     private readonly publishExpense: PublishExpenseUseCase,
+    private readonly listRevisions: ListRevisionsUseCase,
   ) {}
 
   /**
@@ -294,28 +302,48 @@ export class ExpensesController {
   }
 
   /**
-   * Edit a draft or pending expense — PRD §3.5's "freely editable while draft or
-   * pending_approval".
+   * Edit an expense — PRD §3.5's "freely editable while draft" **and** T068's
+   * recalculation for a published one.
    *
-   * `expectedVersion` is required: the write is one atomic statement keyed on it
-   * (`WHERE version = expectedVersion AND status IN ('draft','pending_approval')`),
-   * and a caller that lost the race receives `409 VERSION_MISMATCH` carrying the
-   * row's current version. An absent field is left unchanged and an explicit `null`
-   * clears a nullable one. A published or void expense is refused — its door is
-   * T068's recalculation and T069's void.
+   * One address, two doors, and the stored row decides which: a draft or
+   * `pending_approval` expense is edited as a draft (`{ expense }`), while a
+   * **published** expense is revised — participants re-resolved, the split
+   * re-priced, the dues moved and one revision recorded, all in one transaction —
+   * and answers `{ expense, recalculation }` with the diff measured over the rows
+   * that committed (ADR-0009).
+   *
+   * `expectedVersion` is required on both doors, because both are writes keyed on
+   * it: a caller that lost the race receives `409 VERSION_MISMATCH` carrying the
+   * row's current version. On the published door the optimistic lock is the **only**
+   * lock — there is no idempotency record, because a retry with a stale version is
+   * refused rather than replayed and the reload-and-retry is unambiguous.
+   *
+   * An omitted field is left unchanged and an explicit `null` clears a nullable one.
+   * Four fields are immutable after publication — `expenseDate`, `categoryId`,
+   * `paymentSource`, `paidByMemberId` — and are refused with a field error rather
+   * than dropped, and `changeNote` (T068's operator note, stored on the revision) is
+   * refused on a draft edit, which has no revision to annotate. A `void` expense is
+   * refused on both doors: T069 owns reversal by voiding.
    */
   @Patch(":expenseId")
   @RequirePermission("expense.void")
   @ApiExpenseDraftErrors()
+  @ApiExpenseRecalculateErrors()
   @ApiOperation({
     summary: "Edit an expense",
     description:
-      "Admin, Treasurer, or a Committee Member editing their own draft. Requires `expectedVersion`; a stale version answers 409 VERSION_MISMATCH with the current version in `details`. Only draft and pending_approval expenses are editable. An omitted field is unchanged; `null` clears a nullable field. Crossing the society's approval threshold while editing promotes a draft to pending_approval for Admin/Treasurer callers.",
+      "Admin, Treasurer, or a Committee Member editing their own draft. Requires `expectedVersion`; a stale version answers 409 VERSION_MISMATCH with the current version in `details`. A draft or pending_approval expense is edited (an omitted field is unchanged; `null` clears a nullable field; crossing the approval threshold promotes a draft to pending_approval for Admin/Treasurer callers) and answers `{ expense }`. A **published** expense is recalculated by Admin/Treasurer: the participants are re-resolved and the split re-priced from the persisted row, the dues move through their lifecycle without deleting one, a BEFORE snapshot is recorded, and the response carries the resulting diff. A revision that would leave an obligation below a verified payment is refused whole with 409 DUE_PAID_EXCEEDS_NEW_AMOUNT.",
   })
   @ApiParam({ name: "expenseId", description: "Expense UUID." })
   @ApiOkResponse({
-    description: "The updated expense.",
-    schema: envelopeSchemaOf(expenseResponseSchema),
+    description:
+      "The updated expense. A draft or pending_approval edit answers `{ expense }`; a published edit answers `{ expense, recalculation }`, where `recalculation` reports how many dues were updated, superseded and created, the signed total delta and the affected member count — all measured over the rows the revision committed.",
+    schema: {
+      oneOf: [
+        envelopeSchemaOf(expenseResponseSchema),
+        envelopeSchemaOf(recalculateExpenseResponseSchema),
+      ],
+    },
   })
   async update(
     @Ctx() context: RequestCtx,
@@ -324,13 +352,62 @@ export class ExpensesController {
   ) {
     const { userId } = requireActor(context);
     const { society } = requireSociety(context);
-    const record = await this.updateExpense.update(
+    const outcome = await this.updateExpense.update(
       asUserId(userId),
       society.id,
       asExpenseId(expenseId),
       body,
     );
-    return expenseResponseToDto(record);
+
+    // The one place the two doors differ on the wire: a revision reports what it
+    // changed, a draft edit has nothing to report. The expense DTO is the same
+    // mapping either way.
+    return outcome.recalculation === null
+      ? expenseResponseToDto(outcome.expense)
+      : recalculateExpenseToDto(outcome.recalculation);
+  }
+
+  /**
+   * The revision history of one expense — PRD §3.5.3's "edited" chip, tapped through.
+   *
+   * Oldest first, so the history reads forward from the state the first revision
+   * replaced, and every entry carries the **pre-edit** version plus the complete
+   * BEFORE snapshot (ADR-0009 §17) — the configuration and the authoritative splits
+   * that existed before the edit, which is what makes a bill reconstructible rather
+   * than merely annotated.
+   *
+   * Readable by every role that can see the expense (`expense.view`, every role but
+   * Guest) and scoped by the same `X-Society-Id` and RLS identity as the expense
+   * itself: another tenant's history is structurally invisible, and an id the caller
+   * cannot see answers 404. An expense that has never been revised answers an empty
+   * list, not a 404 — it has a history, and that history is empty.
+   */
+  @Get(":expenseId/revisions")
+  @RequirePermission("expense.view")
+  @ApiExpenseRevisionErrors()
+  @ApiOperation({
+    summary: "List an expense's revisions",
+    description:
+      "Every revision of one expense, oldest first. Each entry carries the pre-edit `version` and the complete BEFORE snapshot the edit replaced — the expense's allocation-driving configuration and its authoritative splits — plus the editor and their optional note. Readable by every member who can see the expense; append-only, with no update or delete route.",
+  })
+  @ApiParam({ name: "expenseId", description: "Expense UUID." })
+  @ApiOkResponse({
+    description:
+      "The revision history, oldest first. An expense that has never been revised answers `{ revisions: [] }`.",
+    schema: envelopeSchemaOf(expenseRevisionsResponseSchema),
+  })
+  async revisions(
+    @Ctx() context: RequestCtx,
+    @Param("expenseId", new ZodPipe(expenseIdParam)) expenseId: string,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    const revisions = await this.listRevisions.list(
+      asUserId(userId),
+      society.id,
+      asExpenseId(expenseId),
+    );
+    return expenseRevisionsToDto(revisions);
   }
 
   /**

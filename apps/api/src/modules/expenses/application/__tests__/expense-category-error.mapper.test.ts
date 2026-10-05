@@ -31,6 +31,7 @@ describe("ERROR_CODE_BY_EXPENSE_CODE", () => {
       "invalid_transition",
       "invariant",
       "not_found",
+      "paid_obligation",
       "split_mismatch",
       "unassigned_participants",
       "unknown",

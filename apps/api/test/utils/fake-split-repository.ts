@@ -5,15 +5,20 @@ import type {
   ExpenseId,
   ExpensePublication,
   ExpensePublicationLookup,
+  ExpenseRecalculation,
+  ExpenseRecalculationSummary,
+  ExpenseRecord,
   ExpenseSplitRepository,
   ExpenseSplitSummary,
   PublishExpenseAllocation,
   PublishExpenseRecordInput,
+  RecalculateExpenseRecordInput,
   SocietyId,
   UserId,
 } from "@ses/domain";
 
 import type { FakeExpenseRepository } from "./fake-expense-repository";
+import type { FakeRevisionRepository } from "./fake-revision-repository";
 
 /**
  * An in-memory `ExpenseSplitRepository` for HTTP-level tests — Roadmap T066.
@@ -86,6 +91,7 @@ export interface FakeSplitRepository extends ExpenseSplitRepository {
 export function createFakeSplitRepository(
   expenses: FakeExpenseRepository,
   now: Clock = systemClock,
+  revisions?: FakeRevisionRepository,
 ): FakeSplitRepository {
   const records = new Map<string, StoredPublication>();
   const splits = new Map<ExpenseId, readonly PublishExpenseAllocation[]>();
@@ -201,6 +207,192 @@ export function createFakeSplitRepository(
       });
       return publication;
     },
+
+    /**
+     * T068's revision, in memory — the definer transaction's observable effects.
+     *
+     * It reproduces what a suite must be able to assert through the HTTP surface:
+     * the same four refusals the port promises (`not_found`, `invalid_transition`,
+     * `version_mismatch`, `split_mismatch`), the row's new version and fields, the
+     * persisted allocations, **one** appended revision carrying the PRE-edit version
+     * and the BEFORE state, and the signed diff measured between the two split sets.
+     * Nothing here decides the due lifecycle, the balance deltas or the
+     * paid-obligation block — those are PostgreSQL's and the integration suite's.
+     */
+    async recalculate(
+      id: ExpenseId,
+      societyId: SocietyId,
+      input: RecalculateExpenseRecordInput,
+      _actor: UserId,
+    ): Promise<ExpenseRecalculation> {
+      calls.push("recalculate");
+
+      const record = expenses.state.records.get(id);
+      if (record === undefined || record.societyId !== societyId) {
+        throw expenseError(
+          "not_found",
+          "That expense is not available to you.",
+        );
+      }
+      if (record.status !== "published") {
+        throw expenseError(
+          "invalid_transition",
+          `A ${record.status} expense cannot be recalculated.`,
+          { from: record.status, to: "published" },
+        );
+      }
+      if (record.version !== input.expectedVersion) {
+        throw expenseError(
+          "version_mismatch",
+          "This expense was changed by someone else. Reload it and try again.",
+          {
+            field: "expectedVersion",
+            expectedVersion: input.expectedVersion,
+            currentVersion: record.version,
+          },
+        );
+      }
+
+      const amount = input.fields.amountPaise ?? record.amount.paise;
+      const summary = summarise(input.allocations);
+      if (summary.total.paise !== amount) {
+        throw expenseError(
+          "split_mismatch",
+          "The split allocations do not sum to the expense amount.",
+          { expected: amount, actual: summary.total.paise },
+        );
+      }
+
+      const before = record;
+      const previous = splits.get(id) ?? [];
+      const updatedAt = now.nowIso();
+      const recalculated: ExpenseRecord = {
+        ...record,
+        title: input.fields.title ?? record.title,
+        description: input.fields.description ?? record.description,
+        vendorName: input.fields.vendorName ?? record.vendorName,
+        amount: Money.fromPaise(amount),
+        splitStrategy: input.fields.splitStrategy ?? record.splitStrategy,
+        apartmentBasis:
+          input.fields.apartmentBasis === undefined
+            ? record.apartmentBasis
+            : input.fields.apartmentBasis,
+        splitConfig: input.fields.splitConfig ?? record.splitConfig,
+        participantSelector:
+          input.fields.participantSelector ?? record.participantSelector,
+        updatedAt,
+        version: record.version + 1,
+      };
+      expenses.state.records.set(id, recalculated);
+      splits.set(id, [...input.allocations]);
+
+      revisions?.append({
+        expenseId: id,
+        version: before.version,
+        snapshot: revisionSnapshotOf(before, previous),
+        changedBy: before.createdBy,
+        changeNote: input.changeNote ?? null,
+        createdAt: updatedAt,
+      });
+
+      return {
+        expense: recalculated,
+        summary: diffOf(previous, input.allocations, amount),
+      };
+    },
+  };
+}
+
+/**
+ * The BEFORE snapshot the definer function stores — the state the revision replaced.
+ *
+ * `amount_paise` travels as a digit string and the splits carry the four facts that
+ * priced them, which is exactly what a tap-through screen reconstructs a bill from.
+ */
+function revisionSnapshotOf(
+  record: ExpenseRecord,
+  splits: readonly PublishExpenseAllocation[],
+): {
+  readonly expense: Readonly<Record<string, unknown>>;
+  readonly splits: readonly Readonly<Record<string, unknown>>[];
+} {
+  return {
+    expense: {
+      id: record.id,
+      societyId: record.societyId,
+      categoryId: record.categoryId,
+      title: record.title,
+      description: record.description,
+      amountPaise: record.amount.paise.toString(),
+      expenseDate: record.expenseDate,
+      vendorName: record.vendorName,
+      paymentSource: record.paymentSource,
+      paidByMemberId: record.paidByMemberId,
+      splitStrategy: record.splitStrategy,
+      apartmentBasis: record.apartmentBasis,
+      splitConfig: record.splitConfig ?? {},
+      participantSelector: record.participantSelector ?? {},
+      status: record.status,
+      version: record.version,
+    },
+    splits: splits.map((split) => ({
+      memberId: split.memberId,
+      apartmentId: split.apartmentId,
+      amountPaise: split.amount.paise.toString(),
+      weight: split.weight.toString(),
+    })),
+  };
+}
+
+/**
+ * The signed diff between the two split sets, in the shape the RPC reports.
+ *
+ * A flat in both sets with a different amount is a **retained** due that moved (an
+ * equal amount is not an update — that is what makes a title-only revision report
+ * zero); a flat only in the old set is superseded; a flat only in the new set is
+ * created. `totalPaise` is `SUM(new) − SUM(old)`, so the sign is the direction members
+ * moved. **No** paid-obligation block is modelled: the fake has no payments, and the
+ * real refusal is PostgreSQL's.
+ */
+function diffOf(
+  previous: readonly PublishExpenseAllocation[],
+  next: readonly PublishExpenseAllocation[],
+  amount: bigint,
+): ExpenseRecalculationSummary {
+  const before = new Map(previous.map((split) => [split.apartmentId, split]));
+  const after = new Map(next.map((split) => [split.apartmentId, split]));
+
+  let duesUpdated = 0;
+  let duesSuperseded = 0;
+  let duesCreated = 0;
+  const members = new Set<string>();
+
+  for (const [apartmentId, split] of before) {
+    members.add(split.memberId);
+    const replacement = after.get(apartmentId);
+    if (replacement === undefined) {
+      if (split.amount.paise > 0n) duesSuperseded += 1;
+      continue;
+    }
+    if (replacement.amount.paise !== split.amount.paise) duesUpdated += 1;
+  }
+  for (const [apartmentId, split] of after) {
+    members.add(split.memberId);
+    if (!before.has(apartmentId) && split.amount.paise > 0n) duesCreated += 1;
+  }
+
+  const previousTotal = previous.reduce(
+    (sum, split) => sum + split.amount.paise,
+    0n,
+  );
+
+  return {
+    duesUpdated,
+    duesSuperseded,
+    duesCreated,
+    totalDelta: Money.fromPaise(amount - previousTotal),
+    affectedMembers: members.size,
+    blockedByPaidSplits: 0,
   };
 }
 

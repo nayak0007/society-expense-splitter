@@ -356,7 +356,8 @@ describe("draft persistence against real storage", () => {
       created.id,
       { expectedVersion: 1, title: "Lift AMC — revised" },
     );
-    expect(second.version).toBe(2);
+    expect(second.expense.version).toBe(2);
+    expect(second.recalculation).toBeNull();
 
     const third = await updateExpense.update(
       fixture.adminUserId,
@@ -364,7 +365,7 @@ describe("draft persistence against real storage", () => {
       created.id,
       { expectedVersion: 2, description: "Covers Oct–Dec" },
     );
-    expect(third.version).toBe(3);
+    expect(third.expense.version).toBe(3);
 
     const [row] = await owner<
       { version: number; title: string; description: string }[]

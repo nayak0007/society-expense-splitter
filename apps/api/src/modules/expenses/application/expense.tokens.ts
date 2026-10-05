@@ -67,3 +67,16 @@ export const EXPENSE_MEMBER_NAME_READER = Symbol("EXPENSE_MEMBER_NAME_READER");
  * the unit suite observes it through this token.
  */
 export const EXPENSE_EVENT_PUBLISHER = Symbol("EXPENSE_EVENT_PUBLISHER");
+
+/**
+ * The revision-history read — T068's `ExpenseRevisionRepository`.
+ *
+ * Its own token rather than a method on `EXPENSE_REPOSITORY`, for the reason
+ * `EXPENSE_SPLIT_REPOSITORY` has one: it is a different table with a different
+ * lifetime (append-only, SAD §8.1), and the e2e suite substitutes it independently —
+ * a fake that had to answer revisions *and* expenses would be the god-object the
+ * ports exist to avoid.
+ */
+export const EXPENSE_REVISION_REPOSITORY = Symbol(
+  "EXPENSE_REVISION_REPOSITORY",
+);

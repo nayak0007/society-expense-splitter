@@ -17,6 +17,7 @@ import type {
   ExpenseSplitRepository,
   InvitationRepository,
   InvitationTokenPort,
+  ExpenseRevisionRepository,
   MemberRepository,
   SocietyRepository,
   StructureMembershipReader,
@@ -44,6 +45,7 @@ import {
   EXPENSE_EVENT_PUBLISHER,
   EXPENSE_MEMBER_NAME_READER,
   EXPENSE_REPOSITORY,
+  EXPENSE_REVISION_REPOSITORY,
   EXPENSE_SPLIT_REPOSITORY,
 } from "../../src/modules/expenses/application/expense.tokens";
 import {
@@ -231,6 +233,16 @@ export type TestAppOptions = {
    */
   splits?: ExpenseSplitRepository;
   /**
+   * Substitutes the revision-history read (T068) — the `expense_revisions` reader.
+   *
+   * An eleventh seam, and it is bound separately from `splits` for the reason the two
+   * ports are separate: the revision *write* belongs to the recalculation transaction
+   * (so the split fake appends to this store, exactly as the definer function writes
+   * the row), while the read is a route of its own whose authorization and response
+   * shape the e2e suite asserts here.
+   */
+  revisions?: ExpenseRevisionRepository;
+  /**
    * Substitutes the member-name read T066's snapshot records.
    *
    * Separate from `participants` even though one adapter satisfies both in production, for
@@ -377,6 +389,11 @@ export async function createTestApp(
   }
   if (options.events !== undefined) {
     builder.overrideProvider(EXPENSE_EVENT_PUBLISHER).useValue(options.events);
+  }
+  if (options.revisions !== undefined) {
+    builder
+      .overrideProvider(EXPENSE_REVISION_REPOSITORY)
+      .useValue(options.revisions);
   }
 
   const moduleRef = await builder.compile();
