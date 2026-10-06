@@ -139,6 +139,12 @@ const NARROWED_ROUTES: readonly string[] = [
   // to the creator, which is the Roadmap's own sentence ("hard-deletable by their
   // creator only").
   "ExpensesController DELETE /expenses/:expenseId",
+  // T069's void. The same 🟡 cell, narrowed against the stored row's snapshot
+  // (`snapshotOf`): `expense.void` is Admin/Treasurer full and Committee Member on
+  // *their own drafts*, and `VoidExpenseUseCase` calls `canOnResource` with the
+  // persisted row, whose `published` flag is what refuses the Committee Member — a
+  // draft is not voidable at all, so their grant cannot reach a published bill.
+  "ExpensesController POST /expenses/:expenseId/void",
 ];
 
 async function collectRoutes(

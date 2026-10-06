@@ -20,6 +20,7 @@ import {
   SPLIT_STRATEGIES,
   SPLIT_WARNING_CODES,
   UNASSIGNED_REASONS,
+  VOID_REASON_MIN_LENGTH,
   WING_NAME_MAX_LENGTH,
 } from "@ses/domain";
 import { z } from "zod";
@@ -857,3 +858,82 @@ export const expenseRevisionsResponseSchema = z.object({
 export type ExpenseRevisionsResponseDto = z.infer<
   typeof expenseRevisionsResponseSchema
 >;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Voiding — Roadmap T069, ADR-0010
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `POST /expenses/:expenseId/void` — the lock and the reason, and nothing else.
+ *
+ * ## Why the request carries no financial input
+ *
+ * Voiding is an authoritative server-side reversal: which dues exist, what was
+ * paid against them and what credit that becomes are all read from the persisted
+ * rows inside the definer transaction. A client cannot send an amount, a credit,
+ * a member or an allocation — accepting one would be accepting an accounting
+ * decision from the caller (the same rule `publishExpenseSchema` records).
+ *
+ * ## `reason`
+ *
+ * Trimmed, at least `VOID_REASON_MIN_LENGTH` characters, no control characters —
+ * exactly the rule `createVoidReason` applies in the domain, and the same
+ * constant, so the wire and the entity cannot disagree about what a usable reason
+ * is. The length is checked on the *trimmed* value: ten spaces is not a reason.
+ * No maximum is imposed here because the column is `text` and the domain sets
+ * none; inventing one would be a bound with nothing behind it.
+ *
+ * `expectedVersion` is required rather than defaulted, for the reason
+ * `updateExpenseSchema` and `publishExpenseSchema` both record — a lock a caller
+ * may omit is not a lock. There is deliberately **no** `Idempotency-Key`: a void
+ * is not a retryable money-moving POST, and a second attempt meets a terminal
+ * void expense with `409 INVALID_TRANSITION` instead of being replayed.
+ */
+export const voidExpenseSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+  reason: z
+    .string()
+    .trim()
+    .min(VOID_REASON_MIN_LENGTH)
+    // eslint-disable-next-line no-control-regex
+    .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
+      message: "The void reason contains characters that are not allowed.",
+    }),
+});
+export type VoidExpensePayload = z.infer<typeof voidExpenseSchema>;
+
+/**
+ * What one committed void reversed — PRD §8's void summary.
+ *
+ * `creditsIssuedPaise` is the total `paid_paise` the void converted into
+ * `advance_paise` on the members' balances (ADR-0010 Decision 2): the payments
+ * were already made, so the money did not arrive — it changed classification
+ * from *applied* to *available credit*, and this figure is what the office
+ * needs to reconcile. `affectedMembers` counts every member whose balance moved,
+ * including one whose due was unpaid (whose `total_due` fell with no credit).
+ *
+ * All amounts are integer paise, like every money field on this wire.
+ */
+export const expenseVoidSummarySchema = z.object({
+  duesSuperseded: z.number().int().nonnegative(),
+  creditsIssuedPaise: z.number().int().nonnegative(),
+  affectedMembers: z.number().int().nonnegative(),
+});
+export type ExpenseVoidSummaryDto = z.infer<typeof expenseVoidSummarySchema>;
+
+/**
+ * `POST /expenses/:expenseId/void` — the voided expense and what it reversed.
+ *
+ * The expense is the same `expenseSchema` every other route returns, read back
+ * from the row the transition wrote (`status: "void"`, `voidedAt`, `voidedBy`,
+ * `voidReason` and the version the trigger bumped), so a client never
+ * reconstructs the voided state from what it hoped to write. The bill's splits
+ * and its historical dues are **not** deleted (ADR-0010 Decision 1) and are read
+ * through the existing routes; the summary is what avoiding cannot be read from
+ * the expense row alone.
+ */
+export const voidExpenseResponseSchema = z.object({
+  expense: expenseSchema,
+  summary: expenseVoidSummarySchema,
+});
+export type VoidExpenseResponseDto = z.infer<typeof voidExpenseResponseSchema>;

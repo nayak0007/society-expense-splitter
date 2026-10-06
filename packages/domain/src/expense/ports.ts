@@ -757,6 +757,44 @@ export interface ExpenseRecalculation {
 }
 
 /**
+ * What `ExpenseSplitRepository.voidExpense` writes — T069's request, ADR-0010.
+ *
+ * Two facts and no more: the version the caller believed it was voiding (the
+ * optimistic lock, required for the reason `RecalculateExpenseRecordInput`
+ * records — a lock the caller can omit is not a lock) and the reason, already
+ * trimmed and validated by `Expense.void_()`/the contract and re-validated
+ * inside the definer function. No idempotency key: void has no retry record, and
+ * a second attempt meets a terminal `void` expense with `invalid_transition`
+ * rather than being replayed as a success.
+ */
+export interface VoidExpenseRecordInput {
+  readonly expectedVersion: number;
+  /** ≥ 10 characters after trimming, no control characters (PRD §3.5). */
+  readonly reason: string;
+}
+
+/**
+ * The summary of one committed void, measured from the rows it wrote.
+ *
+ * `creditsIssued` is the total `paid_paise` the void converted into
+ * `member_balances.advance_paise` (ADR-0010 Decision 2) — a magnitude, not a
+ * new obligation, and deliberately not a payment row: T069 creates the credit,
+ * T079 later consumes it. `affectedMembers` counts the members whose balance
+ * moved at all, including an unpaid due's `total_due` move.
+ */
+export interface ExpenseVoidSummary {
+  readonly duesSuperseded: number;
+  readonly creditsIssued: Money;
+  readonly affectedMembers: number;
+}
+
+/** What one committed void produced: the row it stamped and its summary. */
+export interface ExpenseVoid {
+  readonly expense: ExpenseRecord;
+  readonly summary: ExpenseVoidSummary;
+}
+
+/**
  * The publishing write path — Roadmap T066's `split.repository.ts`.
  *
  * ## One method, because it is one transaction
@@ -837,6 +875,34 @@ export interface ExpenseSplitRepository {
     input: RecalculateExpenseRecordInput,
     actor: UserId,
   ): Promise<ExpenseRecalculation>;
+
+  /**
+   * Void one published expense, atomically — T069's write path, ADR-0010.
+   *
+   * The implementation runs the whole reversal in the `expense_void()` definer
+   * transaction: every current principal due superseded **without deleting
+   * anything** (its id, amount, `paid_paise` and split link survive, and
+   * `expense_splits` is not touched), exact `member_balances` deltas
+   * (`total_due -= A`, `total_paid -= P`, `advance += P`, `outstanding -= A`),
+   * `oldest_due_date` recomputed from the authoritative open dues, and the
+   * expense stamped `status = 'void'` / `voided_at` / `voided_by` / `void_reason`
+   * with its version bumped by the shared trigger. No `expense_revisions` row is
+   * written: a void is not an edit.
+   *
+   * Failure semantics are part of the contract: `not_found` for an expense
+   * outside the caller's society; `forbidden` when the caller's role cannot void;
+   * `invalid_transition` when the row is not `published` (including a second
+   * void); `version_mismatch` carrying the row's current version; `validation`
+   * for a reason the domain refuses; and `void_due_state_unsupported` when a
+   * current obligation of the expense is in a state voiding has no accounting
+   * rule for — the whole void is refused and nothing is written.
+   */
+  voidExpense(
+    id: ExpenseId,
+    societyId: SocietyId,
+    input: VoidExpenseRecordInput,
+    actor: UserId,
+  ): Promise<ExpenseVoid>;
 }
 
 /**

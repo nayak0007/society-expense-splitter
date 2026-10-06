@@ -3,6 +3,7 @@ import type {
   ExpensePublication,
   ExpenseRecalculationSummary,
   ExpenseSplitSummary,
+  ExpenseVoidSummary,
 } from "@ses/domain";
 import { z } from "zod";
 
@@ -111,6 +112,39 @@ export function recalculationSummaryFromRow(
     totalDelta: Money.fromPaise(paise(BigInt(row.totalDeltaPaise))),
     affectedMembers: row.affectedMembers,
     blockedByPaidSplits: row.blockedByPaidSplits,
+  };
+}
+
+/**
+ * The `void_summary` object `expense_void()` returns — T069's reversal report.
+ *
+ * `creditsIssuedPaise` arrives as text like every other amount, so no JSON number
+ * stands between a bigint and the wire; it is the total `paid_paise` the void
+ * converted to `advance_paise`. A magnitude, never negative — a due cannot be
+ * overpaid (`chk_dues_paid_within_amount`), and a non-principal current due makes
+ * the whole void refuse rather than report a figure the deltas would not match.
+ */
+export const voidSummaryRowSchema = z.object({
+  duesSuperseded: z.coerce.number().int().nonnegative(),
+  creditsIssuedPaise: z.string().regex(/^\d+$/),
+  affectedMembers: z.coerce.number().int().nonnegative(),
+});
+
+export type VoidSummaryRow = z.infer<typeof voidSummaryRowSchema>;
+
+/** The row `select … from public.expense_void(…)` produces. */
+export const voidedExpenseRowSchema = expenseRowSchema.extend({
+  void_summary: voidSummaryRowSchema,
+});
+
+export type VoidedExpenseRow = z.infer<typeof voidedExpenseRowSchema>;
+
+/** The persisted row → the void summary, crossing the money at `BigInt` → `paise()`. */
+export function voidSummaryFromRow(row: VoidSummaryRow): ExpenseVoidSummary {
+  return {
+    duesSuperseded: row.duesSuperseded,
+    creditsIssued: Money.fromPaise(paise(BigInt(row.creditsIssuedPaise))),
+    affectedMembers: row.affectedMembers,
   };
 }
 

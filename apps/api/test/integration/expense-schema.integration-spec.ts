@@ -695,10 +695,14 @@ describe("chk_split_total", () => {
 
     const committed = await attemptCommit(async (tx) => {
       // Voiding a published expense must not require rewriting its splits: the
-      // obligation ends when the status does.
+      // obligation ends when the status does. The lifecycle stamps are required by
+      // `chk_expenses_void_complete` (migration #30), which is orthogonal to the split
+      // total this describe block is about — the point here is only that no split row
+      // has to move.
       await tx`
         update public.expenses
-           set status = 'void', void_reason = 'Duplicate of last month''s bill'
+           set status = 'void', void_reason = 'Duplicate of last month''s bill',
+               voided_at = now(), voided_by = ${society.adminMemberId}::uuid
          where id = ${expenseId}::uuid
       `;
     });

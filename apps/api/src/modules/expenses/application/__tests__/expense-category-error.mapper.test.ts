@@ -37,6 +37,7 @@ describe("ERROR_CODE_BY_EXPENSE_CODE", () => {
       "unknown",
       "validation",
       "version_mismatch",
+      "void_due_state_unsupported",
       "void_reason_too_short",
     ]);
   });
@@ -83,6 +84,13 @@ describe("ERROR_CODE_BY_EXPENSE_CODE", () => {
         ERROR_CODE_BY_EXPENSE_CODE.unassigned_participants
       ],
     ).toBe(422);
+    // T069's fail-closed void refusal (ADR-0010): the payload is well formed and
+    // the *state* refuses it, so 409 — the same answer `paid_obligation` gets.
+    expect(
+      HTTP_STATUS_BY_ERROR_CODE[
+        ERROR_CODE_BY_EXPENSE_CODE.void_due_state_unsupported
+      ],
+    ).toBe(409);
   });
 
   it("keeps the lifecycle codes mapped for the routes that will reuse them", () => {

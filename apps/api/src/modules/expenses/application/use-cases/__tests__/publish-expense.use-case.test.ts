@@ -379,6 +379,16 @@ class FakeSplits implements ExpenseSplitRepository {
   async recalculate(): Promise<never> {
     throw new Error("not used by the publish suite");
   }
+
+  /**
+   * T069's write, likewise out of scope here — voiding has its own suites
+   * (`expense-void.integration-spec.ts` for the transaction,
+   * `expense-void.e2e-spec.ts` for the route). Present so the fake satisfies the
+   * port, and loud rather than silent if this suite ever reaches for one.
+   */
+  async voidExpense(): Promise<never> {
+    throw new Error("not used by the publish suite");
+  }
 }
 
 /** The PRD §8.3 summary, measured over the allocations the write received. */

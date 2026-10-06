@@ -5,6 +5,7 @@ import {
   expenseSchema,
   publishExpenseResponseSchema,
   recalculateExpenseResponseSchema,
+  voidExpenseResponseSchema,
 } from "@ses/contracts";
 import type {
   ExpenseDto,
@@ -13,6 +14,7 @@ import type {
   ExpenseRevisionsResponseDto,
   PublishExpenseResponseDto,
   RecalculateExpenseResponseDto,
+  VoidExpenseResponseDto,
 } from "@ses/contracts";
 import { paiseToWire } from "@ses/domain";
 import type {
@@ -20,6 +22,7 @@ import type {
   ExpenseRecalculation,
   ExpenseRecord,
   ExpenseRevisionRecord,
+  ExpenseVoid,
 } from "@ses/domain";
 
 import type { ExpenseListResult } from "../application/use-cases/list-expenses.use-case";
@@ -143,6 +146,27 @@ export function recalculateExpenseToDto(
       totalDeltaPaise: paiseToWire(recalculation.summary.totalDelta.paise),
       affectedMembers: recalculation.summary.affectedMembers,
       blockedByPaidSplits: recalculation.summary.blockedByPaidSplits,
+    },
+  });
+}
+
+/**
+ * A committed void → the wire DTO — Roadmap T069, ADR-0010.
+ *
+ * The expense travels through the same `expenseToDto` every other route uses, so
+ * the row is the one the definer transaction stamped (`status: "void"`,
+ * `voidedAt`/`voidedBy`/`voidReason` set, `version` bumped by the trigger) rather
+ * than the in-memory pre-void record's view of it. `creditsIssuedPaise` crosses
+ * through `paiseToWire` — the single range-checked crossing point — so a credit
+ * above `Number.MAX_SAFE_INTEGER` throws loudly instead of rounding.
+ */
+export function voidExpenseToDto(voided: ExpenseVoid): VoidExpenseResponseDto {
+  return voidExpenseResponseSchema.parse({
+    expense: expenseToDto(voided.expense),
+    summary: {
+      duesSuperseded: voided.summary.duesSuperseded,
+      creditsIssuedPaise: paiseToWire(voided.summary.creditsIssued.paise),
+      affectedMembers: voided.summary.affectedMembers,
     },
   });
 }

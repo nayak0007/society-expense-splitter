@@ -32,6 +32,7 @@ import { PreviewSplitUseCase } from "./application/use-cases/preview-split.use-c
 import { PublishExpenseUseCase } from "./application/use-cases/publish-expense.use-case";
 import { RecalculateExpenseUseCase } from "./application/use-cases/recalculate-expense.use-case";
 import { UpdateExpenseUseCase } from "./application/use-cases/update-expense.use-case";
+import { VoidExpenseUseCase } from "./application/use-cases/void-expense.use-case";
 import { ExpenseCategoryRepositoryPostgres } from "./infrastructure/category.repository";
 import { LoggingExpenseEventPublisher } from "./infrastructure/expense-event.publisher";
 import { ExpenseRepositoryPostgres } from "./infrastructure/expense.repository";
@@ -211,6 +212,12 @@ import { ExpensesController } from "./presentation/expenses.controller";
       useExisting: ExpenseRevisionRepositoryPostgres,
     },
     ListRevisionsUseCase,
+    // T069's void. It reads through the same two adapters publication and
+    // recalculation use — the expense repository for the row, and the split
+    // writer, whose `expense_void()` transaction owns the due supersession, the
+    // balance deltas and the void stamps — and dispatches `expense.voided`
+    // through the same post-commit publisher, strictly after the transaction.
+    VoidExpenseUseCase,
   ],
 })
 export class ExpensesModule {}

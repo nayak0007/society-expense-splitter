@@ -68,6 +68,12 @@ export const ERROR_CODE_BY_EXPENSE_CODE: Readonly<
   // `category_has_expenses` follow. The detail code keeps the stable SQL identity so
   // a client branches on `DUE_PAID_EXCEEDS_NEW_AMOUNT`, never on the sentence.
   paid_obligation: "CONFLICT",
+  // T069's fail-closed void refusal (ADR-0010). 409 for the same reason
+  // `paid_obligation`: the payload is well formed and the *state* refuses it —
+  // voiding succeeds once the unsupported obligation is resolved. The detail code
+  // is the stable SQL identity, so a client branches on `DUE_STATE_UNSUPPORTED`
+  // rather than on the sentence.
+  void_due_state_unsupported: "CONFLICT",
   unknown: "INTERNAL",
 };
 
@@ -83,6 +89,7 @@ const DETAIL_CODES: Readonly<Partial<Record<ExpenseErrorCode, string>>> = {
   conflict: "CATEGORY_NAME_TAKEN",
   category_has_expenses: "CATEGORY_HAS_EXPENSES",
   paid_obligation: "DUE_PAID_EXCEEDS_NEW_AMOUNT",
+  void_due_state_unsupported: "DUE_STATE_UNSUPPORTED",
 };
 
 /**

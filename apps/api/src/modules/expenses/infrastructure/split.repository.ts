@@ -7,11 +7,13 @@ import type {
   ExpensePublicationLookup,
   ExpenseRecalculation,
   ExpenseSplitRepository,
+  ExpenseVoid,
   PublishExpenseAllocation,
   PublishExpenseRecordInput,
   RecalculateExpenseRecordInput,
   SocietyId,
   UserId,
+  VoidExpenseRecordInput,
 } from "@ses/domain";
 import { z } from "zod";
 
@@ -39,6 +41,8 @@ import {
   recalculatedExpenseRowSchema,
   storedPublicationOf,
   storedPublicationSchema,
+  voidedExpenseRowSchema,
+  voidSummaryFromRow,
 } from "./split.rows";
 
 /**
@@ -150,6 +154,58 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
         return {
           expense: expenseFromRow(row),
           summary: recalculationSummaryFromRow(row.recalculation),
+        };
+      });
+    } catch (error: unknown) {
+      throw enrichVersionMismatch(error, input.expectedVersion);
+    }
+  }
+
+  /**
+   * T069's void transaction — one call to `expense_void()`, ADR-0010.
+   *
+   * No retry record and no second write: the whole reversal (the due
+   * supersession, the balance deltas, the recomputed `oldest_due_date` and the
+   * expense's void stamps) is the definer function's single transaction, and a
+   * stale `expectedVersion` is refused by the row lock rather than replayed. The
+   * two inputs are the optimistic lock and the operator's reason; nothing
+   * financial travels from here, because a client cannot be allowed to state what
+   * a reversal is worth.
+   */
+  async voidExpense(
+    id: ExpenseId,
+    societyId: SocietyId,
+    input: VoidExpenseRecordInput,
+    actor: UserId,
+  ): Promise<ExpenseVoid> {
+    try {
+      return await this.run(actor, async (tx) => {
+        const rows = await runQuery(
+          tx,
+          sql`
+            select ${VOID_COLUMNS}
+              from public.expense_void(
+                ${id}::uuid,
+                ${societyId}::uuid,
+                ${input.expectedVersion}::int,
+                ${input.reason}::text
+              )
+          `,
+        );
+
+        const [first] = rows;
+        if (first === undefined) {
+          throw unexpectedShapeError("voided expense");
+        }
+        const parsed = voidedExpenseRowSchema.safeParse(first);
+        if (!parsed.success) {
+          throw unexpectedShapeError("voided expense");
+        }
+        const row = parsed.data;
+
+        return {
+          expense: expenseFromRow(row),
+          summary: voidSummaryFromRow(row.void_summary),
         };
       });
     } catch (error: unknown) {
@@ -365,6 +421,11 @@ const PUBLISH_COLUMNS = sql.raw(
 /** The recalculation function's row: the expense's columns plus the diff. */
 const RECALCULATE_COLUMNS = sql.raw(
   [...EXPENSE_COLUMN_EXPRESSIONS, "recalculation"].join(", "),
+);
+
+/** The void function's row: the expense's columns plus the reversal summary. */
+const VOID_COLUMNS = sql.raw(
+  [...EXPENSE_COLUMN_EXPRESSIONS, "void_summary"].join(", "),
 );
 
 /**

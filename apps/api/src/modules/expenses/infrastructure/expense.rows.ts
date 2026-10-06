@@ -135,6 +135,12 @@ export const RAISED_EXCEPTION = {
   expenseRecalcFieldNotEditable: "EXPENSE_RECALC_FIELD_NOT_EDITABLE",
   expenseRecalcInvalidField: "EXPENSE_RECALC_INVALID_FIELD",
   duePaidExceedsNewAmount: "DUE_PAID_EXCEEDS_NEW_AMOUNT",
+  // T069's void refusals (ADR-0010).
+  expenseNotVoidable: "EXPENSE_NOT_VOIDABLE",
+  expenseVoidReasonTooShort: "EXPENSE_VOID_REASON_TOO_SHORT",
+  expenseVoidReasonInvalid: "EXPENSE_VOID_REASON_INVALID",
+  expenseVoidDueStateUnsupported: "EXPENSE_VOID_DUE_STATE_UNSUPPORTED",
+  expenseVoidDueKindUnsupported: "EXPENSE_VOID_DUE_KIND_UNSUPPORTED",
 } as const;
 
 /**
@@ -278,6 +284,50 @@ export function expenseErrorFromPostgres(
             ...withHint(),
             ...(typeof field === "string" && field !== "" ? { field } : {}),
           },
+        );
+      }
+      if (message.includes(RAISED_EXCEPTION.expenseNotVoidable)) {
+        // The refused *state* travels in `DETAIL` (the function read it under the
+        // row lock), so a second void can name "void" without a second query.
+        const from = candidate.detail;
+        return expenseError(
+          "invalid_transition",
+          "Only a published expense can be voided. A draft is edited or deleted, and a void expense is final.",
+          {
+            ...withHint(),
+            ...(typeof from === "string" && from !== "" ? { from } : {}),
+          },
+        );
+      }
+      if (
+        message.includes(RAISED_EXCEPTION.expenseVoidReasonTooShort) ||
+        message.includes(RAISED_EXCEPTION.expenseVoidReasonInvalid)
+      ) {
+        // The definer function's own re-check of the domain's rule. The message is
+        // the domain's wording (`createVoidReason`) so the two paths cannot be told
+        // apart, and `field: "reason"` is the wire name the form highlights.
+        return expenseError(
+          message.includes(RAISED_EXCEPTION.expenseVoidReasonTooShort)
+            ? "void_reason_too_short"
+            : "validation",
+          message.includes(RAISED_EXCEPTION.expenseVoidReasonTooShort)
+            ? "Give a reason of at least 10 characters — residents see it."
+            : "The void reason contains characters that are not allowed.",
+          { ...withHint(), field: "reason" },
+        );
+      }
+      if (
+        message.includes(RAISED_EXCEPTION.expenseVoidDueStateUnsupported) ||
+        message.includes(RAISED_EXCEPTION.expenseVoidDueKindUnsupported)
+      ) {
+        // ADR-0010's fail-closed rule: a current obligation voiding has no
+        // accounting rule for refuses the whole operation. The database's own
+        // sentence (naming the state or kind) stays in `hint` for an operator; the
+        // client gets the stable `DUE_STATE_UNSUPPORTED` detail code.
+        return expenseError(
+          "void_due_state_unsupported",
+          "This expense has an obligation this app cannot reverse yet. Nothing was changed — resolve the obligation first.",
+          withHint(),
         );
       }
       if (message.includes(RAISED_EXCEPTION.duePaidExceedsNewAmount)) {

@@ -10,11 +10,13 @@ import type {
   ExpenseRecord,
   ExpenseSplitRepository,
   ExpenseSplitSummary,
+  ExpenseVoid,
   PublishExpenseAllocation,
   PublishExpenseRecordInput,
   RecalculateExpenseRecordInput,
   SocietyId,
   UserId,
+  VoidExpenseRecordInput,
 } from "@ses/domain";
 
 import type { FakeExpenseRepository } from "./fake-expense-repository";
@@ -86,6 +88,13 @@ export interface FakeSplitRepository extends ExpenseSplitRepository {
   failNextPublish(error: Error): void;
   /** Runs just before the write path decides — the suite's race window. */
   beforePublish(hook: () => void): void;
+  /**
+   * Makes the next `voidExpense` throw **before** writing anything — T069's
+   * stand-in for a refused/rolled-back void (a `waived` due, a lock loss, a
+   * database error). Nothing is stamped, so the suite can assert the expense is
+   * still `published` and that no `expense.voided` event was dispatched.
+   */
+  failNextVoid(error: Error): void;
 }
 
 export function createFakeSplitRepository(
@@ -98,6 +107,7 @@ export function createFakeSplitRepository(
   const calls: string[] = [];
   const failures: Error[] = [];
   const hooks: (() => void)[] = [];
+  const voidFailures: Error[] = [];
 
   function replayOf(
     stored: StoredPublication,
@@ -122,6 +132,10 @@ export function createFakeSplitRepository(
 
     beforePublish(hook) {
       hooks.push(hook);
+    },
+
+    failNextVoid(error) {
+      voidFailures.push(error);
     },
 
     async findPublication(
@@ -298,6 +312,87 @@ export function createFakeSplitRepository(
       return {
         expense: recalculated,
         summary: diffOf(previous, input.allocations, amount),
+      };
+    },
+
+    /**
+     * T069's void, in memory — the definer transaction's *observable* effects.
+     *
+     * It reproduces what an HTTP-level suite must be able to assert: the three
+     * refusals the port promises in the order the function produces them
+     * (`not_found` for an absent or another society's expense, `invalid_transition`
+     * for anything that is not `published` — including a second void, which is a
+     * refusal and never a replay — and `version_mismatch` carrying the row's
+     * **current** version), and, on success, the row's void stamps, the bumped
+     * version and a summary measured over the splits this fake holds.
+     *
+     * It deliberately does **not** model the reversal itself: the due
+     * supersession, the exact balance deltas, the credit conversion and the
+     * fail-closed due-state refusal are PostgreSQL's in `expense_void()`, and only
+     * the integration suite — real container, real definer function, real
+     * policies — can prove them. `creditsIssued` is therefore always zero here,
+     * which is honest for a fake with no dues.
+     *
+     * `voidedBy` is the row's `createdBy`: the real function reads the actor's own
+     * membership through `auth.uid()`, which this fake has no members table to
+     * resolve, and the e2e fixtures void an expense the same member created.
+     */
+    async voidExpense(
+      id: ExpenseId,
+      societyId: SocietyId,
+      input: VoidExpenseRecordInput,
+      _actor: UserId,
+    ): Promise<ExpenseVoid> {
+      calls.push("voidExpense");
+
+      const failure = voidFailures.shift();
+      if (failure !== undefined) throw failure;
+
+      const record = expenses.state.records.get(id);
+      if (record === undefined || record.societyId !== societyId) {
+        throw expenseError(
+          "not_found",
+          "That expense is not available to you.",
+        );
+      }
+      if (record.status !== "published") {
+        throw expenseError(
+          "invalid_transition",
+          `A ${record.status} expense cannot be voided.`,
+          { from: record.status, to: "void" },
+        );
+      }
+      if (record.version !== input.expectedVersion) {
+        throw expenseError(
+          "version_mismatch",
+          "This expense was changed by someone else. Reload it and try again.",
+          {
+            field: "expectedVersion",
+            expectedVersion: input.expectedVersion,
+            currentVersion: record.version,
+          },
+        );
+      }
+
+      const voidedAt = now.nowIso();
+      const voided: ExpenseRecord = {
+        ...record,
+        status: "void",
+        voidedAt,
+        voidedBy: record.createdBy,
+        voidReason: input.reason,
+        updatedAt: voidedAt,
+        version: record.version + 1,
+      };
+      expenses.state.records.set(id, voided);
+
+      return {
+        expense: voided,
+        summary: {
+          duesSuperseded: (splits.get(id) ?? []).length,
+          creditsIssued: Money.zero(),
+          affectedMembers: 0,
+        },
       };
     },
   };

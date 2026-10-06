@@ -62,6 +62,15 @@ import type { DomainErrorInit } from "../shared/errors";
  *    `conflict` and `validation` refusal — it is a product workflow, not a bad
  *    payload.
  *
+ * T069 adds the one refusal voiding owns, and like `paid_obligation` it exists
+ * because the *database* is what refuses:
+ *
+ *  - `void_due_state_unsupported` — the expense carries a current obligation
+ *    whose state (`waived`, `written_off`) or kind (`late_fee`, `adjustment`)
+ *    voiding has no accounting rule for. The whole void is refused and nothing is
+ *    written, rather than guessing what reversing such a row would mean
+ *    (ADR-0010's fail-closed rule).
+ *
  * A union per module rather than one global list, exactly as `InvitationError` and
  * `MemberError` record: the API's `Record<ExpenseErrorCode, ErrorCode>` mapper then
  * *fails the build* when a code gains no HTTP meaning, which is the property that
@@ -81,6 +90,7 @@ export const EXPENSE_ERROR_CODES = [
   "idempotency_key_reuse",
   "unassigned_participants",
   "paid_obligation",
+  "void_due_state_unsupported",
   "unknown",
 ] as const;
 

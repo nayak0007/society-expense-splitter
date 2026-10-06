@@ -155,6 +155,34 @@ export function ApiExpenseRecalculateErrors(): ClassDecorator &
 }
 
 /**
+ * The error responses T069's void route can return — ADR-0010.
+ *
+ * The 403 is `expense.void` for a **published** expense: Admin or Treasurer. A
+ * Committee Member's grant on that cell is own-drafts-only, and a draft is not
+ * voidable at all, so their request cannot succeed here — which is exactly the
+ * distinction a client needs to render the right disabled state.
+ *
+ * The 409 carries four refusals and names all four, because a client acts
+ * differently on each: `VERSION_MISMATCH` (reload — `details[0].current` has the
+ * version), `INVALID_TRANSITION` (not published, or already void — void is
+ * terminal, so a second attempt is a refusal and never a replay) and
+ * `DUE_STATE_UNSUPPORTED` (the expense carries an obligation this version cannot
+ * reverse; nothing was written). The 422 is the reason class:
+ * `void_reason_too_short` for a blank/one-word reason and `VALIDATION_ERROR` for
+ * control characters, both on `field: "reason"`.
+ */
+export function ApiExpenseVoidErrors(): ClassDecorator & MethodDecorator {
+  return ApiErrorResponses({
+    notFound:
+      "No such society or expense — or one the caller is not an active member of. This API deliberately does not distinguish these (PRD T041).",
+    forbidden:
+      "An active member whose role does not hold `expense.void` for a published expense: Admin or Treasurer. A Committee Member's grant on that cell covers their own drafts only, and a draft is not voidable.",
+    conflict:
+      "The expense moved since the caller read it (`VERSION_MISMATCH`, with `details[0].current` carrying the current version); the expense is not published, or has already been voided (`INVALID_TRANSITION` — void is terminal and a second attempt is never treated as a replay); or an obligation of the expense is in a state this app cannot reverse (`DUE_STATE_UNSUPPORTED`, and nothing was written).",
+  });
+}
+
+/**
  * The error responses T068's revision-history read can return.
  *
  * A read, so no state can conflict: the 409 copy says so rather than documenting a

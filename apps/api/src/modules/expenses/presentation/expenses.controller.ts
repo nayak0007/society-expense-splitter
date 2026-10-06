@@ -34,6 +34,8 @@ import {
   publishExpenseResponseSchema,
   recalculateExpenseResponseSchema,
   updateExpenseSchema,
+  voidExpenseSchema,
+  voidExpenseResponseSchema,
 } from "@ses/contracts";
 import type {
   CreateExpensePayload,
@@ -42,6 +44,7 @@ import type {
   PreviewSplitRequestPayload,
   PublishExpensePayload,
   UpdateExpensePayload,
+  VoidExpensePayload,
 } from "@ses/contracts";
 import { asExpenseId, asUserId } from "@ses/domain";
 import { z } from "zod";
@@ -67,12 +70,14 @@ import { ListRevisionsUseCase } from "../application/use-cases/list-revisions.us
 import { PreviewSplitUseCase } from "../application/use-cases/preview-split.use-case";
 import { PublishExpenseUseCase } from "../application/use-cases/publish-expense.use-case";
 import { UpdateExpenseUseCase } from "../application/use-cases/update-expense.use-case";
+import { VoidExpenseUseCase } from "../application/use-cases/void-expense.use-case";
 import {
   expenseListToDto,
   expensePublicationToDto,
   expenseResponseToDto,
   expenseRevisionsToDto,
   recalculateExpenseToDto,
+  voidExpenseToDto,
 } from "./expense.mapper";
 import { expenseSplitPreviewToDto } from "./expense-preview.mapper";
 import {
@@ -81,6 +86,7 @@ import {
   ApiExpensePublishErrors,
   ApiExpenseRecalculateErrors,
   ApiExpenseRevisionErrors,
+  ApiExpenseVoidErrors,
 } from "./openapi";
 
 /**
@@ -134,6 +140,7 @@ export class ExpensesController {
     private readonly deleteDraft: DeleteDraftUseCase,
     private readonly publishExpense: PublishExpenseUseCase,
     private readonly listRevisions: ListRevisionsUseCase,
+    private readonly voidExpense: VoidExpenseUseCase,
   ) {}
 
   /**
@@ -530,5 +537,60 @@ export class ExpensesController {
     }
 
     return expensePublicationToDto(publication);
+  }
+
+  /**
+   * Void a published expense — PRD §3.5's reversal, completed by T069.
+   *
+   * `200` rather than `201` or `204`: nothing is created and the caller needs the
+   * voided row back (its `voidedAt`, `voidedBy`, `voidReason` and bumped `version`)
+   * together with what the reversal did to the balances. The path is the PRD's
+   * (`POST /expenses/:eid/void` under the global `/v1`), and the action is the
+   * matrix's `expense.void` — Admin or Treasurer, because a Committee Member's
+   * grant on that cell is own-drafts-only and a draft is not voidable.
+   *
+   * The body is the version the caller read plus the mandatory reason; everything
+   * financial — which dues exist, what was paid against them, the exact balance
+   * deltas and the credit the payments become — is computed server-side from the
+   * persisted rows inside one `expense_void()` transaction (ADR-0010). No
+   * `Idempotency-Key`: a void is not a retryable money-moving POST, and a second
+   * attempt meets a terminal state with `409 INVALID_TRANSITION` rather than being
+   * replayed as a success.
+   *
+   * The bill's splits and its historical dues are **not** deleted — a void reverses
+   * obligations, it does not burn history (ADR-0010 Decision 1) — and the
+   * `summary` reports the reversal: how many dues were superseded, how much paid
+   * money became advance credit, and how many members' balances moved.
+   */
+  @Post(":expenseId/void")
+  @RequirePermission("expense.void")
+  @HttpCode(HttpStatus.OK)
+  @ApiExpenseDraftErrors()
+  @ApiExpenseVoidErrors()
+  @ApiOperation({
+    summary: "Void an expense",
+    description:
+      "Admin or Treasurer. Reverses a published expense in one transaction: every current principal due is superseded (its amount, paid history and split link preserved, its split untouched), and each member's balance moves by the exact deltas — total_due minus the obligation, total_paid minus what had been applied, advance_paise plus that same amount, outstanding minus the obligation. The paid amount becomes available member credit; it is not lost, and no payment or allocation row is invented. Requires the current `expectedVersion` and a reason of at least 10 characters. A second void is refused 409 INVALID_TRANSITION — void is terminal.",
+  })
+  @ApiParam({ name: "expenseId", description: "Expense UUID." })
+  @ApiOkResponse({
+    description:
+      "The voided expense (status `void`, with `voidedAt`, `voidedBy`, `voidReason` and the version the database stamped) plus the reversal summary: dues superseded, credits issued in paise and the affected member count — all measured over the rows the transaction committed.",
+    schema: envelopeSchemaOf(voidExpenseResponseSchema),
+  })
+  async void(
+    @Ctx() context: RequestCtx,
+    @Param("expenseId", new ZodPipe(expenseIdParam)) expenseId: string,
+    @Body(new ZodPipe(voidExpenseSchema)) body: VoidExpensePayload,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    const voided = await this.voidExpense.void(
+      asUserId(userId),
+      society.id,
+      asExpenseId(expenseId),
+      { expectedVersion: body.expectedVersion, reason: body.reason },
+    );
+    return voidExpenseToDto(voided);
   }
 }

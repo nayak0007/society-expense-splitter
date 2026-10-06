@@ -144,15 +144,21 @@ async function insertExpense(
   categoryId: string,
   status: "draft" | "void" = "draft",
 ): Promise<string> {
+  // A void row must satisfy `chk_expenses_void_complete` (migration #30): the
+  // lifecycle stamps and a reason of at least ten characters are required, because a
+  // voided bill is only ever produced by the definer RPC. These fixtures are the one
+  // direct-write exception, so they carry the stamps a real void would have.
   const [row] = await owner<{ id: string }[]>`
     insert into public.expenses (
       society_id, category_id, title, amount_paise, expense_date,
-      split_strategy, status, void_reason, created_by
+      split_strategy, status, void_reason, voided_at, voided_by, created_by
     )
     values (
       ${fixture.societyId}::uuid, ${categoryId}::uuid, 'Water tanker',
       10000::bigint, current_date, 'equal', ${status}::public.expense_status,
       ${status === "void" ? "Duplicate entry" : null}::varchar,
+      ${status === "void" ? new Date("2026-10-01T00:00:00.000Z") : null},
+      ${status === "void" ? fixture.adminMemberId : null}::uuid,
       ${fixture.adminMemberId}::uuid
     )
     returning id
