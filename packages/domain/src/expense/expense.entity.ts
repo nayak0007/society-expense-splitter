@@ -57,8 +57,11 @@ import type { ExpenseEvent } from "./events";
  *
  * ```text
  *   draft ──submitForApproval()──▶ pending_approval
- *     │                                   │
- *     └────────── publish(allocations) ───┘
+ *     │                                  │  ▲
+ *     │                   reject(reason) │  │ approve(by)   (T070, ADR-0011)
+ *     │                                  ▼  │
+ *     │                              pending_approval (approved)
+ *     └────────── publish(allocations) ──┘
  *                        │
  *                        ▼
  *                    published ──void_(reason, by)──▶ void   (terminal)
@@ -69,8 +72,13 @@ import type { ExpenseEvent } from "./events";
  * - `published` is reachable from either state, which is why the matrix below lists
  *   it twice — SAD §3.2's own sketch checks `draft || pending_approval`.
  * - `draft` cannot be voided: drafts are hard-deleted by their creator (PRD §3.5).
- *   `pending_approval` cannot be voided either — sending one back is an approval
- *   decision this task does not model.
+ *   `pending_approval` cannot be voided either.
+ * - `pending_approval → draft` (T070): a rejected expense goes back to being a
+ *   draft needing correction, and an edit that takes the amount below the current
+ *   threshold returns it to a draft because no approval is required any more. It
+ *   is reached **only** through `reject()` and `revertToDraft()`; there is still no
+ *   public setter for `status`, and the database refuses the same flip made by a
+ *   raw `UPDATE` (`guard_expense_approval_transition`, migration #31).
  * - `void` is terminal: no transition leaves it.
  */
 export const EXPENSE_STATUSES = [
@@ -94,7 +102,7 @@ export const EXPENSE_TRANSITIONS: Readonly<
   Record<ExpenseStatus, readonly ExpenseStatus[]>
 > = Object.freeze({
   draft: Object.freeze(["pending_approval", "published"] as const),
-  pending_approval: Object.freeze(["published"] as const),
+  pending_approval: Object.freeze(["draft", "published"] as const),
   published: Object.freeze(["void"] as const),
   void: Object.freeze([] as const),
 });
@@ -113,6 +121,18 @@ export const EXPENSE_MAX_FUTURE_DAYS = 30;
 
 /** PRD §3.5: a void reason is "required, min 10 chars". */
 export const VOID_REASON_MIN_LENGTH = 10;
+
+/**
+ * The minimum rejection reason — the void reason's own rule, reused (ADR-0011
+ * D2), because a rejection and a void are the same kind of operator prose: a
+ * sentence a member must be able to read and act on.
+ *
+ * Prefixed `EXPENSE_` because the member module already has a
+ * `REJECTION_REASON_MIN_LENGTH` for a join-request rejection (four characters), and
+ * the package barrel re-exports both modules: an unprefixed name here would be an
+ * ambiguous export, which `pnpm typecheck` refuses outright.
+ */
+export const EXPENSE_REJECTION_REASON_MIN_LENGTH = VOID_REASON_MIN_LENGTH;
 
 /** Runtime narrowing for a stored status (a row read, a request field). */
 export function isExpenseStatus(value: unknown): value is ExpenseStatus {
@@ -274,6 +294,44 @@ export function createVoidReason(raw: string): Result<string, ExpenseError> {
   return ok(value);
 }
 
+/**
+ * Normalises and validates a rejection reason — ADR-0011 D2.
+ *
+ * The *same* rule as `createVoidReason` — required, trimmed, at least ten
+ * characters, no control characters — deliberately reused rather than restated, so
+ * the two pieces of operator prose cannot drift apart. `field: "reason"` is the
+ * wire name the reject request uses (`rejectExpenseSchema`), which is what lets a
+ * form highlight the box the Admin typed in.
+ */
+export function createExpenseRejectionReason(
+  raw: string,
+): Result<string, ExpenseError> {
+  const trimmed = raw.trim();
+
+  if (trimmed.length < EXPENSE_REJECTION_REASON_MIN_LENGTH) {
+    return err(
+      expenseError(
+        "void_reason_too_short",
+        `Give a reason of at least ${EXPENSE_REJECTION_REASON_MIN_LENGTH} characters — the creator sees it.`,
+        { field: "reason" },
+      ),
+    );
+  }
+
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) {
+    return err(
+      expenseError(
+        "validation",
+        "The rejection reason contains characters that are not allowed.",
+        { field: "reason" },
+      ),
+    );
+  }
+
+  return ok(trimmed);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Creation and reconstitution inputs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -353,6 +411,17 @@ export interface ReconstituteExpenseProps {
   readonly voidedAt: string | null;
   readonly voidedBy: MemberId | null;
   readonly voidReason: string | null;
+  /**
+   * The approval stamps (T070, ADR-0011): the Admin membership and instant an
+   * approval was recorded, or `null`. They are set only by `approve()`, cleared by
+   * `edit()` and `reject()`, and never written by `publish()`.
+   */
+  readonly approvedBy: MemberId | null;
+  readonly approvedAt: string | null;
+  /** The rejection stamps, or `null`; cleared by `approve()` and `submitForApproval()`. */
+  readonly rejectedBy: MemberId | null;
+  readonly rejectedAt: string | null;
+  readonly rejectionReason: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly version: number;
@@ -384,6 +453,11 @@ interface ExpenseState {
   readonly voidedAt: string | null;
   readonly voidedBy: MemberId | null;
   readonly voidReason: string | null;
+  readonly approvedBy: MemberId | null;
+  readonly approvedAt: string | null;
+  readonly rejectedBy: MemberId | null;
+  readonly rejectedAt: string | null;
+  readonly rejectionReason: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly version: number;
@@ -410,6 +484,14 @@ export class Expense {
   private _voidedAt: string | null;
   private _voidedBy: MemberId | null;
   private _voidReason: string | null;
+  // The workflow stamps move only through `approve()`, `reject()`, `edit()` and
+  // `submitForApproval()` — the same reason `status` is private with a getter: a
+  // caller cannot assign "approved" from outside a rule.
+  private _approvedBy: MemberId | null;
+  private _approvedAt: string | null;
+  private _rejectedBy: MemberId | null;
+  private _rejectedAt: string | null;
+  private _rejectionReason: string | null;
   private _updatedAt: string;
   private _version: number;
 
@@ -429,6 +511,11 @@ export class Expense {
     this._voidedAt = props.voidedAt;
     this._voidedBy = props.voidedBy;
     this._voidReason = props.voidReason;
+    this._approvedBy = props.approvedBy;
+    this._approvedAt = props.approvedAt;
+    this._rejectedBy = props.rejectedBy;
+    this._rejectedAt = props.rejectedAt;
+    this._rejectionReason = props.rejectionReason;
     this._updatedAt = props.updatedAt;
     this._version = props.version;
   }
@@ -476,6 +563,11 @@ export class Expense {
         voidedAt: null,
         voidedBy: null,
         voidReason: null,
+        approvedBy: null,
+        approvedAt: null,
+        rejectedBy: null,
+        rejectedAt: null,
+        rejectionReason: null,
         createdAt: now,
         updatedAt: now,
         version: 1,
@@ -572,6 +664,44 @@ export class Expense {
       );
     }
 
+    // The workflow stamps are pairs, and the two decisions are mutually exclusive
+    // (ADR-0011). A row that carries half an approval, half a rejection, or both
+    // decisions at once is corrupt — no writer this module has can produce one, and
+    // the entity refuses to rebuild it rather than hand a caller a state the rest
+    // of the system cannot act on.
+    if ((props.approvedBy === null) !== (props.approvedAt === null)) {
+      return err(
+        expenseError(
+          "invariant",
+          "An approval must carry its author and its instant together.",
+          { field: "approvedBy" },
+        ),
+      );
+    }
+
+    const rejectionComplete =
+      (props.rejectedBy === null) === (props.rejectedAt === null) &&
+      (props.rejectedAt === null) === (props.rejectionReason === null);
+    if (!rejectionComplete) {
+      return err(
+        expenseError(
+          "invariant",
+          "A rejection must carry its reason, its instant and its author together.",
+          { field: "rejectionReason" },
+        ),
+      );
+    }
+
+    if (props.approvedAt !== null && props.rejectedAt !== null) {
+      return err(
+        expenseError(
+          "invariant",
+          "An expense cannot be approved and rejected at the same time.",
+          { field: "status" },
+        ),
+      );
+    }
+
     return ok(
       new Expense({
         id: props.id,
@@ -587,6 +717,11 @@ export class Expense {
         voidedAt: props.voidedAt,
         voidedBy: props.voidedBy,
         voidReason: props.voidReason,
+        approvedBy: props.approvedBy,
+        approvedAt: props.approvedAt,
+        rejectedBy: props.rejectedBy,
+        rejectedAt: props.rejectedAt,
+        rejectionReason: props.rejectionReason,
         createdAt: props.createdAt,
         updatedAt: props.updatedAt,
         version: props.version,
@@ -641,6 +776,41 @@ export class Expense {
 
   get voidReason(): string | null {
     return this._voidReason;
+  }
+
+  /** The Admin membership that approved this version, or `null` (T070). */
+  get approvedBy(): MemberId | null {
+    return this._approvedBy;
+  }
+
+  /** The instant the approval was recorded, or `null`. */
+  get approvedAt(): string | null {
+    return this._approvedAt;
+  }
+
+  /** The Admin membership that rejected this version, or `null`. */
+  get rejectedBy(): MemberId | null {
+    return this._rejectedBy;
+  }
+
+  get rejectedAt(): string | null {
+    return this._rejectedAt;
+  }
+
+  /** The reason the Admin gave, or `null`; required alongside the other two stamps. */
+  get rejectionReason(): string | null {
+    return this._rejectionReason;
+  }
+
+  /**
+   * Whether an Admin has approved the *current* content of this expense.
+   *
+   * The publication gate asks this — but the authoritative answer is the
+   * database's, evaluated against the **current** society threshold at publish
+   * time (ADR-0011 D4): this getter describes the row, it does not decide.
+   */
+  get isApproved(): boolean {
+    return this._approvedBy !== null && this._approvedAt !== null;
   }
 
   get updatedAt(): string {
@@ -727,6 +897,19 @@ export class Expense {
     if (changes.categoryId !== undefined) {
       this._categoryId = changes.categoryId;
     }
+
+    // An approval is bound to the exact content/version that was approved, so a
+    // successful edit invalidates it — conservatively, for *any* change, not only
+    // a money change (ADR-0011 D8). The call site then re-routes the expense from
+    // the new amount against the current threshold: back to `pending_approval`
+    // when approval is still required, or to `draft` when it is not.
+    //
+    // The database does this too, in `guard_expense_approval_transition()`
+    // (migration #31), because the lifecycle stamps are not client-writable and a
+    // raw edit must not be able to keep an approval it no longer deserves.
+    this._approvedBy = null;
+    this._approvedAt = null;
+
     this.touch(clock.nowIso());
     return ok(undefined);
   }
@@ -744,6 +927,120 @@ export class Expense {
     if (refused !== null) return err(refused);
 
     this._status = "pending_approval";
+
+    // Re-submitting a rejected draft clears the rejection it answers, and a fresh
+    // submission carries no approval — approval and rejection are mutually
+    // exclusive workflow states (ADR-0011 D8).
+    this._rejectedBy = null;
+    this._rejectedAt = null;
+    this._rejectionReason = null;
+    this._approvedBy = null;
+    this._approvedAt = null;
+
+    this.touch(clock.nowIso());
+    return ok(undefined);
+  }
+
+  /**
+   * `pending_approval → pending_approval`, one version later, with the approval
+   * stamped — T070 (ADR-0011).
+   *
+   * ## Approval is not publication
+   *
+   * This method deliberately does **not** call `publish()`: approving is the
+   * Admin's decision, publishing is T066's financial transaction (splits, dues,
+   * balances, stamps), and the two are separate facts. An approved expense stays
+   * `pending_approval` until an authorized publisher publishes it, which is what
+   * makes "publish refused for lack of approval" and "publish succeeds after
+   * approval" two different tests rather than one.
+   *
+   * ## What it owns
+   *
+   * The state check (`pending_approval` only — the matrix has no other source), the
+   * stamping of `approvedBy`/`approvedAt` from the caller's membership and the
+   * injected clock, and the clearing of any rejection metadata so the two decisions
+   * can never coexist on one row. Raises **no event**: the catalogue is closed
+   * (SAD §3.2, ADR-0011 D6) and notification is T107's.
+   */
+  approve(by: MemberId, clock: Clock): Result<void, ExpenseError> {
+    // Approval is `pending_approval → pending_approval`: the status does not
+    // change, so there is no matrix edge to consult — only the source state to
+    // check. (`EXPENSE_TRANSITIONS` describes *moves*, and a self-loop is not a
+    // move; listing it there would let `submitForApproval()` re-approve a row.)
+    if (this._status !== "pending_approval") {
+      return err(new InvalidTransitionError(this._status, "approved"));
+    }
+
+    const at = clock.nowIso();
+    this._approvedBy = by;
+    this._approvedAt = at;
+    this._rejectedBy = null;
+    this._rejectedAt = null;
+    this._rejectionReason = null;
+    this.touch(at);
+    return ok(undefined);
+  }
+
+  /**
+   * `pending_approval → draft` — T070's rejection (ADR-0011 D1/D2).
+   *
+   * A rejection is *not* a terminal state and there is no `rejected` status: the
+   * expense goes back to being a draft its creator may correct and submit again.
+   * The Admin's decision is recorded in the three stamps, and the approval (if one
+   * somehow existed on the same version) is cleared — the two decisions are
+   * opposites about the same version and must not coexist.
+   *
+   * The reason is validated **before** the state check, matching `void_()`'s order:
+   * the field error answers "what should I type", which is true regardless of the
+   * state, and it travels in `field: "reason"` — the wire name the reject request
+   * uses. Raises **no event** (ADR-0011 D6).
+   */
+  reject(
+    reason: string,
+    by: MemberId,
+    clock: Clock,
+  ): Result<void, ExpenseError> {
+    const rejectionReason = createExpenseRejectionReason(reason);
+    if (!rejectionReason.ok) return rejectionReason;
+
+    if (this._status !== "pending_approval") {
+      return err(new InvalidTransitionError(this._status, "draft"));
+    }
+
+    const at = clock.nowIso();
+    this._status = "draft";
+    this._approvedBy = null;
+    this._approvedAt = null;
+    this._rejectedBy = by;
+    this._rejectedAt = at;
+    this._rejectionReason = rejectionReason.value;
+    this.touch(at);
+    return ok(undefined);
+  }
+
+  /**
+   * `pending_approval → draft` for the *edit* path — T070 (ADR-0011 D8).
+   *
+   * Distinct from `reject()` because the two are different facts with different
+   * stamps: a rejection records an Admin's decision and its reason, while this is
+   * the *creator's* edit taking the amount below the current threshold — approval is
+   * no longer required, so the expense is simply a draft again. It clears any
+   * approval (an edit invalidates one) and records no rejection, because nobody
+   * rejected anything.
+   *
+   * Reached only from the submission routing in `submitAboveThreshold`, which is
+   * the one place that knows the current society threshold. The name is explicit on
+   * purpose: `status` still has no public setter, and the database refuses the same
+   * flip made by a raw `UPDATE` (migration #31's guard).
+   */
+  revertToDraft(clock: Clock): Result<void, ExpenseError> {
+    if (this._status !== "pending_approval") {
+      return err(new InvalidTransitionError(this._status, "draft"));
+    }
+
+    this._status = "draft";
+    this._approvedBy = null;
+    this._approvedAt = null;
     this.touch(clock.nowIso());
     return ok(undefined);
   }

@@ -40,7 +40,7 @@ import {
   CREATE_FORBIDDEN,
   loadCategoryOrNotFound,
   loadMembershipOrNotFound,
-  submitAboveThreshold,
+  routeForApproval,
   unwrap,
 } from "./expense-draft.support";
 import {
@@ -61,7 +61,7 @@ import {
  *   ├─ selector (createParticipantSelector)      (canonical, stored)
  *   ├─ resolveSplitPlan                          (T064's strategy/basis defaults)
  *   ├─ Expense.create(...)                       (T061's input rules)
- *   ├─ submitAboveThreshold(...)                 (PRD §2.2's rule)
+ *   ├─ routeForApproval(...)                     (PRD §2.2's rule, T070)
  *   └─ repository.create(...)                    (one INSERT, RLS-scoped)
  * ```
  *
@@ -188,9 +188,11 @@ export class CreateExpenseUseCase {
       }),
     );
 
-    await submitAboveThreshold(
+    // PRD §2.2's rule, in T070's form (ADR-0011 D3/D4): an expense **at or above**
+    // the current threshold enters `pending_approval`, for any caller the write
+    // policies admit — the Committee deadlock the audit found is fixed here.
+    await routeForApproval(
       expense,
-      membership,
       actor,
       societyId,
       this.policies,

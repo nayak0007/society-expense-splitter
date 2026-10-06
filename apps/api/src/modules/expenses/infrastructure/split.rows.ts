@@ -7,8 +7,14 @@ import type {
 } from "@ses/domain";
 import { z } from "zod";
 
-import { expenseFromRow, expenseRowSchema } from "./expense.rows";
-import type { ExpenseRow } from "./expense.rows";
+import {
+  NO_WORKFLOW_STAMPS,
+  expenseFromRow,
+  expenseRowSchema,
+  expenseWorkflowRowSchema,
+  expenseWorkflowStampsOf,
+} from "./expense.rows";
+import type { ExpenseRow, ExpenseWorkflowStamps } from "./expense.rows";
 
 /**
  * The database ⇄ domain boundary for the publishing path — Roadmap T066.
@@ -59,10 +65,19 @@ export const publishedExpenseRowSchema = expenseRowSchema.extend({
 
 export type PublishedExpenseRow = z.infer<typeof publishedExpenseRowSchema>;
 
-/** One stored idempotency record's body, in the shape the API wrote it. */
+/**
+ * One stored idempotency record's body, in the shape the API wrote it.
+ *
+ * `workflow` is the T070 addition (ADR-0011): the approval/rejection stamps of the
+ * row **as it was published**, so a replay describes the same approval state the
+ * live response did. It is optional because a record written before T070 does not
+ * carry it — that record's replay answers with no stamps rather than failing a
+ * parse, which is the only honest reading of a body that never held them.
+ */
 export const storedPublicationSchema = z.object({
   expense: expenseRowSchema,
   summary: splitSummaryRowSchema,
+  workflow: expenseWorkflowRowSchema.optional(),
 });
 
 export type StoredPublication = z.infer<typeof storedPublicationSchema>;
@@ -176,9 +191,10 @@ export function summaryFromRow(row: SplitSummaryRow): ExpenseSplitSummary {
 export function publicationFromRow(
   row: PublishedExpenseRow,
   replayed: boolean,
+  workflow: ExpenseWorkflowStamps = NO_WORKFLOW_STAMPS,
 ): ExpensePublication {
   return {
-    expense: expenseFromRow(row),
+    expense: expenseFromRow(row, workflow),
     summary: summaryFromRow(row.split_summary),
     replayed,
   };
@@ -191,6 +207,9 @@ export function publicationFromStored(
   return publicationFromRow(
     { ...stored.expense, split_summary: stored.summary },
     true,
+    stored.workflow === undefined
+      ? NO_WORKFLOW_STAMPS
+      : expenseWorkflowStampsOf(stored.workflow),
   );
 }
 
@@ -205,7 +224,18 @@ export function publicationFromStored(
  */
 export function storedPublicationOf(
   row: PublishedExpenseRow,
+  workflow: ExpenseWorkflowStamps = NO_WORKFLOW_STAMPS,
 ): StoredPublication {
   const { split_summary: summary, ...expense } = row;
-  return { expense: expense as ExpenseRow, summary };
+  return {
+    expense: expense as ExpenseRow,
+    summary,
+    workflow: {
+      approved_by: workflow.approvedBy,
+      approved_at: workflow.approvedAt,
+      rejected_by: workflow.rejectedBy,
+      rejected_at: workflow.rejectedAt,
+      rejection_reason: workflow.rejectionReason,
+    },
+  };
 }

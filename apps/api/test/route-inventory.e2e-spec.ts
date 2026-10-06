@@ -304,6 +304,29 @@ describe("route inventory", () => {
     );
   });
 
+  it("declares T070's two decisions against the Admin-only `expense.approve` cell", () => {
+    // Both routes are ✅ cells (Admin full, no qualification), so neither may appear
+    // in `NARROWED_ROUTES` — and there is deliberately no `/approval-queue` route:
+    // the queue is `GET /expenses?status=pending_approval` (ADR-0011 D7).
+    const decisions = routes.filter(
+      (route) =>
+        route.controller === "ExpensesController" &&
+        /^(approve|reject)$/.test(route.path.replace(/.*\//, "")),
+    );
+    expect(decisions.map(keyOf).sort()).toEqual([
+      "ExpensesController POST /expenses/:expenseId/approve",
+      "ExpensesController POST /expenses/:expenseId/reject",
+    ]);
+    for (const route of decisions) {
+      expect(route.permission).toBe("expense.approve");
+      expect(NARROWED_ROUTES).not.toContain(keyOf(route));
+    }
+
+    expect(
+      routes.filter((route) => /approval-queue/i.test(route.path)),
+    ).toEqual([]);
+  });
+
   it("inventories the guarded surface it claims to", () => {
     // A sanity check on coverage of the inventory's own claims: if the structure,
     // member, invitation and join-request surfaces are all header-scoped, their

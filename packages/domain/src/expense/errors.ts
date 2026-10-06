@@ -71,6 +71,17 @@ import type { DomainErrorInit } from "../shared/errors";
  *    written, rather than guessing what reversing such a row would mean
  *    (ADR-0010's fail-closed rule).
  *
+ * T070 adds the one refusal the approval workflow owns (ADR-0011):
+ *
+ *  - `approval_required` — an expense whose amount is at or above the society's
+ *    **current** `approval_threshold_paise` was about to become a bill without a
+ *    complete Admin approval. The whole publication is refused with no financial
+ *    write at all. It is its own code rather than a `forbidden`/`invalid_transition`
+ *    because the client's next action is specific and actionable — "send this for
+ *    approval" — and because the refusal is the *same fact* whichever writer
+ *    reached it (the `expense_publish()` precondition, the `BEFORE UPDATE` guard,
+ *    or the application's own pre-check).
+ *
  * A union per module rather than one global list, exactly as `InvitationError` and
  * `MemberError` record: the API's `Record<ExpenseErrorCode, ErrorCode>` mapper then
  * *fails the build* when a code gains no HTTP meaning, which is the property that
@@ -91,6 +102,7 @@ export const EXPENSE_ERROR_CODES = [
   "unassigned_participants",
   "paid_obligation",
   "void_due_state_unsupported",
+  "approval_required",
   "unknown",
 ] as const;
 

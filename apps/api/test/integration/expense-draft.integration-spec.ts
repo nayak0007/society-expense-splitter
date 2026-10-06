@@ -58,8 +58,10 @@ import {
  *     by the caller — the suite calls the repository directly to prove the SQL gate,
  *     not the use-case gate the e2e suite already covers.
  *  3. **RLS.** A Guest sees nothing (`can_view_expenses` excludes them) while a member
- *     sees the draft; a Committee Member's `pending_approval` insert is refused by the
- *     insert policy; every statement runs through `UnitOfWork` as a real identity.
+ *     sees the draft; a Committee Member's own `pending_approval` insert is accepted by
+ *     the insert policy since migration #31 (T070's deadlock fix — submission is the
+ *     creator's act, publication is not); every statement runs through `UnitOfWork` as
+ *     a real identity.
  *  4. **The column mapping.** Money crosses `bigint` as text exactly (a value past
  *     `int4`), `expense_date` stays a date, and the stored `jsonb` selector/config
  *     round-trip through `expenseFromRow`.
@@ -400,22 +402,22 @@ describe("draft persistence against real storage", () => {
     expect(row?.published_at).toBeNull();
   });
 
-  it("keeps a Committee Member's above-threshold expense a draft in the stored row", async () => {
+  it("routes a Committee Member's above-threshold expense into pending_approval — the T070 deadlock fix, in the stored row", async () => {
     const created = await createExpense.create(
       fixture.committeeUserId,
       fixture.societyId,
       basicCommand(fixture, { amountPaise: 5_000_000 }),
     );
 
-    expect(created.status).toBe("draft");
+    expect(created.status).toBe("pending_approval");
     const [row] = await owner<{ status: string }[]>`
       select status::text as status from public.expenses
        where id = ${created.id}::uuid
     `;
-    expect(row?.status).toBe("draft");
+    expect(row?.status).toBe("pending_approval");
   });
 
-  it("refuses a Committee Member writing pending_approval — the RLS insert policy", async () => {
+  it("accepts a Committee Member's pending_approval insert — the widened RLS insert policy", async () => {
     const entity = entityFor(fixture, {
       createdBy: fixture.committeeMemberId,
       amountPaise: 5_000_000,
@@ -424,17 +426,22 @@ describe("draft persistence against real storage", () => {
     if (!submitted.ok) throw submitted.error;
     expect(entity.status).toBe("pending_approval");
 
-    await expect(
-      repository.create(
-        { expense: entity, fields: fieldsFor() },
-        fixture.committeeUserId,
-      ),
-    ).rejects.toMatchObject({ code: "forbidden" });
+    // Migration #31 widened `expenses_insert_author` to `draft` **or**
+    // `pending_approval` for a `can_draft_expenses` caller: submitting is the
+    // creator's own act, and it is deliberately *not* permission to publish
+    // (approval stays Admin-only, and publication re-checks the threshold).
+    const created = await repository.create(
+      { expense: entity, fields: fieldsFor() },
+      fixture.committeeUserId,
+    );
 
-    const [row] = await owner<{ count: string }[]>`
-      select count(*)::text as count from public.expenses
+    expect(created.status).toBe("pending_approval");
+    const [row] = await owner<{ status: string; created_by: string }[]>`
+      select status::text as status, created_by from public.expenses
+       where id = ${created.id}::uuid
     `;
-    expect(row?.count).toBe("0");
+    expect(row?.status).toBe("pending_approval");
+    expect(row?.created_by).toBe(fixture.committeeMemberId);
   });
 });
 

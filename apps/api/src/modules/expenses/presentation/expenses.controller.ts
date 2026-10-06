@@ -22,6 +22,8 @@ import {
   ApiTags,
 } from "@nestjs/swagger";
 import {
+  approveExpenseSchema,
+  approveExpenseResponseSchema,
   createExpenseSchema,
   expenseListResponseSchema,
   expenseResponseSchema,
@@ -33,16 +35,20 @@ import {
   publishExpenseSchema,
   publishExpenseResponseSchema,
   recalculateExpenseResponseSchema,
+  rejectExpenseSchema,
+  rejectExpenseResponseSchema,
   updateExpenseSchema,
   voidExpenseSchema,
   voidExpenseResponseSchema,
 } from "@ses/contracts";
 import type {
+  ApproveExpensePayload,
   CreateExpensePayload,
   IdempotencyKeyPayload,
   ListExpensesQueryPayload,
   PreviewSplitRequestPayload,
   PublishExpensePayload,
+  RejectExpensePayload,
   UpdateExpensePayload,
   VoidExpensePayload,
 } from "@ses/contracts";
@@ -62,6 +68,7 @@ import { NoEnvelope } from "../../../common/decorators/no-envelope.decorator";
 import { RequirePermission } from "../../../common/decorators/require-permission.decorator";
 import { ZodPipe } from "../../../common/pipes/zod.pipe";
 import { envelopeSchemaOf } from "../../../common/swagger/zod-openapi";
+import { ApproveExpenseUseCase } from "../application/use-cases/approve-expense.use-case";
 import { CreateExpenseUseCase } from "../application/use-cases/create-expense.use-case";
 import { DeleteDraftUseCase } from "../application/use-cases/delete-draft.use-case";
 import { GetExpenseUseCase } from "../application/use-cases/get-expense.use-case";
@@ -69,6 +76,7 @@ import { ListExpensesUseCase } from "../application/use-cases/list-expenses.use-
 import { ListRevisionsUseCase } from "../application/use-cases/list-revisions.use-case";
 import { PreviewSplitUseCase } from "../application/use-cases/preview-split.use-case";
 import { PublishExpenseUseCase } from "../application/use-cases/publish-expense.use-case";
+import { RejectExpenseUseCase } from "../application/use-cases/reject-expense.use-case";
 import { UpdateExpenseUseCase } from "../application/use-cases/update-expense.use-case";
 import { VoidExpenseUseCase } from "../application/use-cases/void-expense.use-case";
 import {
@@ -81,10 +89,12 @@ import {
 } from "./expense.mapper";
 import { expenseSplitPreviewToDto } from "./expense-preview.mapper";
 import {
+  ApiExpenseApproveErrors,
   ApiExpenseDraftErrors,
   ApiExpensePreviewErrors,
   ApiExpensePublishErrors,
   ApiExpenseRecalculateErrors,
+  ApiExpenseRejectErrors,
   ApiExpenseRevisionErrors,
   ApiExpenseVoidErrors,
 } from "./openapi";
@@ -141,6 +151,8 @@ export class ExpensesController {
     private readonly publishExpense: PublishExpenseUseCase,
     private readonly listRevisions: ListRevisionsUseCase,
     private readonly voidExpense: VoidExpenseUseCase,
+    private readonly approveExpense: ApproveExpenseUseCase,
+    private readonly rejectExpense: RejectExpenseUseCase,
   ) {}
 
   /**
@@ -592,5 +604,105 @@ export class ExpensesController {
       { expectedVersion: body.expectedVersion, reason: body.reason },
     );
     return voidExpenseToDto(voided);
+  }
+
+  /**
+   * Approve a pending expense — the Admin's decision, completed by T070.
+   *
+   * `200` rather than `201`: nothing is created, and the caller needs the approved
+   * row back (its `approvedBy`, `approvedAt` and bumped `version`) — which is what
+   * makes "approved, awaiting publication" a state a client can render without a
+   * second read. The path is the product decision's (`POST /expenses/:eid/approve`
+   * under the global `/v1`) and the action is the matrix's `expense.approve` — a
+   * full Admin cell, so a Treasurer or Committee Member is refused by role.
+   *
+   * The whole payload is the version the Admin read. Everything else is the row's:
+   * the approver is the caller's own membership, the instant is the database's
+   * clock, and the *content* the approval applies to is the version the optimistic
+   * lock pins. No `Idempotency-Key`: an approval is not a retryable money-moving
+   * POST and a second attempt meets `409` rather than being replayed.
+   *
+   * Approval is **not** publication: the status stays `pending_approval`, no split
+   * is priced and no due is created. `POST /publish` remains the one financial path,
+   * and it re-evaluates the amount against the *current* threshold before writing
+   * anything (ADR-0011 D4).
+   */
+  @Post(":expenseId/approve")
+  @RequirePermission("expense.approve")
+  @HttpCode(HttpStatus.OK)
+  @ApiExpenseApproveErrors()
+  @ApiOperation({
+    summary: "Approve an expense",
+    description:
+      "Admin only. Records the approval of a pending_approval expense: `approvedBy`/`approvedAt` are stamped and any stale rejection metadata is cleared, all in one transaction with the row locked. The status deliberately stays `pending_approval` — approval is a decision, not a publication — and publishing remains a separate Admin/Treasurer act. Requires the current `expectedVersion`. An Admin may approve their own expense.",
+  })
+  @ApiParam({ name: "expenseId", description: "Expense UUID." })
+  @ApiOkResponse({
+    description:
+      "The approved expense: still `pending_approval`, with `approvedBy`, `approvedAt` and the version the database stamped. No financial row was written.",
+    schema: envelopeSchemaOf(approveExpenseResponseSchema),
+  })
+  async approve(
+    @Ctx() context: RequestCtx,
+    @Param("expenseId", new ZodPipe(expenseIdParam)) expenseId: string,
+    @Body(new ZodPipe(approveExpenseSchema)) body: ApproveExpensePayload,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    const approved = await this.approveExpense.approve(
+      asUserId(userId),
+      society.id,
+      asExpenseId(expenseId),
+      { expectedVersion: body.expectedVersion },
+    );
+    return expenseResponseToDto(approved);
+  }
+
+  /**
+   * Reject a pending expense — the Admin's other decision, completed by T070.
+   *
+   * `200` and the rejected row, for the same reasons the approve route answers with
+   * its own: nothing is created and the caller needs the authoritative state — here
+   * `status: "draft"` with `rejectedBy`/`rejectedAt`/`rejectionReason` set — to
+   * render the outcome. The path is the product decision's (`POST
+   * /expenses/:eid/reject`), the action is the same Admin cell `expense.approve`,
+   * and the body is the version plus the mandatory reason.
+   *
+   * Rejection is `pending_approval → draft` (ADR-0011 D1): there is no `rejected`
+   * status, because a rejected expense is one the creator corrects and resubmits. The
+   * three rejection stamps are the durable record of the decision, and a
+   * resubmission clears them. Nothing financial happens — no split, no due, no
+   * balance, no event — and the publisher's one path through `expense_publish()` is
+   * untouched.
+   */
+  @Post(":expenseId/reject")
+  @RequirePermission("expense.approve")
+  @HttpCode(HttpStatus.OK)
+  @ApiExpenseRejectErrors()
+  @ApiOperation({
+    summary: "Reject an expense",
+    description:
+      "Admin only. Returns a pending_approval expense to `draft` with a mandatory reason of at least 10 characters, recording `rejectedBy`/`rejectedAt`/`rejectionReason` and clearing the approval in one transaction with the row locked. The creator may then edit and resubmit, which clears the rejection stamps. Requires the current `expectedVersion`. No financial row is written.",
+  })
+  @ApiParam({ name: "expenseId", description: "Expense UUID." })
+  @ApiOkResponse({
+    description:
+      "The rejected expense: status `draft`, with `rejectedBy`, `rejectedAt`, `rejectionReason` set, the approval cleared and the version the database stamped. No financial row was written.",
+    schema: envelopeSchemaOf(rejectExpenseResponseSchema),
+  })
+  async reject(
+    @Ctx() context: RequestCtx,
+    @Param("expenseId", new ZodPipe(expenseIdParam)) expenseId: string,
+    @Body(new ZodPipe(rejectExpenseSchema)) body: RejectExpensePayload,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    const rejected = await this.rejectExpense.reject(
+      asUserId(userId),
+      society.id,
+      asExpenseId(expenseId),
+      { expectedVersion: body.expectedVersion, reason: body.reason },
+    );
+    return expenseResponseToDto(rejected);
   }
 }

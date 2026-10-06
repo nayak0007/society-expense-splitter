@@ -1,45 +1,34 @@
 import { Inject, Injectable } from "@nestjs/common";
-import {
-  asExpenseCategoryId,
-  asExpenseError,
-  asExpenseId,
-  asMemberId,
-  expenseError,
-  paise,
-} from "@ses/domain";
+import { asExpenseError } from "@ses/domain";
 import type {
-  ExpenseCursor,
-  ExpenseListQuery,
   ExpensePage,
-  ExpenseRecord,
   ExpenseRepository,
-  ExpenseStatus,
   SocietyId,
   UserId,
 } from "@ses/domain";
-import { z } from "zod";
 
 import { toAppError } from "../expense-category-error.mapper";
 import { EXPENSE_REPOSITORY } from "../expense.tokens";
+import {
+  buildExpenseListQuery,
+  toExpenseListResult,
+} from "./expense-draft.support";
+import type {
+  ExpenseListRequest,
+  ExpenseListResultPage,
+} from "./expense-draft.support";
+import { ListApprovalQueueUseCase } from "./list-approval-queue.use-case";
 
 /**
- * List a society's expenses — Roadmap T065, SAD §7.4/§7.5.
+ * List a society's expenses — Roadmap T065's endpoint, SAD §7.4/§7.5.
  *
  * ## One query, one page, one cursor
  *
- * The repository performs a single filtered statement; this use case only translates
- * — the contract's strings into the domain's types, the caller's cursor into the
- * sort tuple, and the next tuple back into an opaque string. No count query: SAD
- * §7.4 makes `total` optional and it is only cheap from a cache this module does not
- * have.
- *
- * ## The cursor is base64 of SAD §7.4's own sort tuple
- *
- * `{ expenseDate, id }`, exactly as the document sketches it. Decoding is strict and
- * a malformed cursor is a `validation` error naming `cursor` — not a silent
- * "start over", which would turn a client bug into duplicated rows on a screen. The
- * tuple is opaque to the client by construction, not by secrecy: it is validated
- * again on the way back in because a client can always send anything.
+ * The repository performs a single filtered statement; the query is assembled by
+ * `buildExpenseListQuery` (shared with the approval queue, so a filter cannot mean
+ * two things) and the page is translated by `toExpenseListResult`, which re-encodes
+ * the sort tuple as the opaque cursor. No count query: SAD §7.4 makes `total`
+ * optional and it is only cheap from a cache this module does not have.
  *
  * ## Filters are the SAD's, minus the three the schema cannot answer
  *
@@ -50,44 +39,38 @@ import { EXPENSE_REPOSITORY } from "../expense.tokens";
  * attachments are T071; the PRD's building scope lives inside `participant_selector`),
  * and a filter that quietly matches everything is worse than one that says it is not
  * there. The gap is recorded in T065's report.
+ *
+ * ## `status=pending_approval` is the approval queue, and it is served by the queue
+ *
+ * T070 adds no queue endpoint (ADR-0011 D7): the queue **is** this listing filtered
+ * to `pending_approval`, so that one filter value is delegated to
+ * `ListApprovalQueueUseCase`. The delegation is here rather than in the controller
+ * because it is a statement about *what the two views are* — the controller still
+ * calls one method and maps one result, and the queue's own file is the single place
+ * its facts (requester, amount, age) are documented.
  */
 @Injectable()
 export class ListExpensesUseCase {
   constructor(
     @Inject(EXPENSE_REPOSITORY)
     private readonly expenses: ExpenseRepository,
+    private readonly approvalQueue: ListApprovalQueueUseCase,
   ) {}
 
   async list(
     actor: UserId,
     societyId: SocietyId,
-    command: ListExpensesCommand,
-  ): Promise<ExpenseListResult> {
-    const query: ExpenseListQuery = {
-      ...(command.categoryId === undefined
-        ? {}
-        : { categoryId: asExpenseCategoryId(command.categoryId) }),
-      ...(command.status === undefined ? {} : { status: command.status }),
-      ...(command.dateFrom === undefined ? {} : { dateFrom: command.dateFrom }),
-      ...(command.dateTo === undefined ? {} : { dateTo: command.dateTo }),
-      ...(command.amountPaiseMin === undefined
-        ? {}
-        : { amountPaiseMin: paise(command.amountPaiseMin) }),
-      ...(command.amountPaiseMax === undefined
-        ? {}
-        : { amountPaiseMax: paise(command.amountPaiseMax) }),
-      ...(command.createdBy === undefined
-        ? {}
-        : { createdBy: asMemberId(command.createdBy) }),
-      ...(command.q === undefined ? {} : { search: command.q }),
-      ...(command.cursor === undefined
-        ? {}
-        : { cursor: decodeExpenseCursor(command.cursor) }),
-      limit: Math.min(
-        command.limit ?? DEFAULT_EXPENSE_PAGE_SIZE,
-        MAX_EXPENSE_PAGE_SIZE,
-      ),
-    };
+    command: ExpenseListRequest,
+  ): Promise<ExpenseListResultPage> {
+    if (command.status === "pending_approval") {
+      return this.approvalQueue.list(actor, societyId, command);
+    }
+
+    // The query is built **outside** the repository's `try`: assembling it can
+    // refuse on its own (a malformed cursor is a `validation` `AppError`), and the
+    // catch below is the domain-vocabulary seam — feeding an already-mapped
+    // `AppError` through it would turn a 422 into a 500.
+    const query = buildExpenseListQuery(command);
 
     let page: ExpensePage;
     try {
@@ -96,86 +79,22 @@ export class ListExpensesUseCase {
       throw toAppError(asExpenseError(error));
     }
 
-    return {
-      expenses: page.expenses,
-      nextCursor:
-        page.nextCursor === null ? null : encodeExpenseCursor(page.nextCursor),
-      hasMore: page.nextCursor !== null,
-    };
+    return toExpenseListResult(page);
   }
 }
-
-/** SAD §7.4: default 20, maximum 100 (the contract clamps; this is the floor). */
-export const DEFAULT_EXPENSE_PAGE_SIZE = 20;
-export const MAX_EXPENSE_PAGE_SIZE = 100;
 
 /** What the route hands the use case — already parsed by the contract schema. */
-export interface ListExpensesCommand {
-  readonly categoryId?: string | undefined;
-  readonly status?: ExpenseStatus | undefined;
-  readonly dateFrom?: string | undefined;
-  readonly dateTo?: string | undefined;
-  readonly amountPaiseMin?: number | undefined;
-  readonly amountPaiseMax?: number | undefined;
-  readonly createdBy?: string | undefined;
-  readonly q?: string | undefined;
-  readonly cursor?: string | undefined;
-  readonly limit?: number | undefined;
-}
+export type ListExpensesCommand = ExpenseListRequest;
 
 /** The page plus its wire cursor. */
-export interface ExpenseListResult {
-  readonly expenses: readonly ExpenseRecord[];
-  /** Base64 of `{ expenseDate, id }`, or `null` on the last page. */
-  readonly nextCursor: string | null;
-  readonly hasMore: boolean;
-}
+export type ExpenseListResult = ExpenseListResultPage;
 
-/** The decoded tuple, validated as strictly as the wire that carried it. */
-const cursorPayloadSchema = z.object({
-  expenseDate: z.iso.date(),
-  id: z.uuid(),
-});
-
-/**
- * The opaque cursor → the sort tuple, or a `validation` error naming `cursor`.
- *
- * `Buffer.from(..., "base64")` is forgiving of non-base64 input (it decodes what it
- * can and ignores the rest), which is exactly why the JSON parse and the schema
- * check follow: the pair is what makes a garbage cursor a refusal rather than a page
- * starting somewhere unintended.
- */
-export function decodeExpenseCursor(cursor: string): ExpenseCursor {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(Buffer.from(cursor, "base64").toString("utf8"));
-  } catch {
-    throw toAppError(
-      expenseError("validation", "The cursor is not valid.", {
-        field: "cursor",
-      }),
-    );
-  }
-
-  const parsed = cursorPayloadSchema.safeParse(raw);
-  if (!parsed.success) {
-    throw toAppError(
-      expenseError("validation", "The cursor is not valid.", {
-        field: "cursor",
-      }),
-    );
-  }
-
-  return {
-    expenseDate: parsed.data.expenseDate,
-    id: asExpenseId(parsed.data.id),
-  };
-}
-
-/** The sort tuple → the opaque cursor. The client never constructs one. */
-export function encodeExpenseCursor(cursor: ExpenseCursor): string {
-  return Buffer.from(
-    JSON.stringify({ expenseDate: cursor.expenseDate, id: cursor.id }),
-    "utf8",
-  ).toString("base64");
-}
+// Re-exported from the shared support module so the names this use case has always
+// published (the cursor codec, the page-size floor) keep resolving for callers and
+// tests that import them from here, while the definitions live in one place.
+export {
+  DEFAULT_EXPENSE_PAGE_SIZE,
+  MAX_EXPENSE_PAGE_SIZE,
+  decodeExpenseCursor,
+  encodeExpenseCursor,
+} from "./expense-draft.support";

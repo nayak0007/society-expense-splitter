@@ -174,7 +174,13 @@ beforeAll(async () => {
   categories = createFakeCategoryRepository();
   expenses = createFakeExpenseRepository();
   directory = new FakeParticipantDirectory();
-  splits = createFakeSplitRepository(expenses);
+  // T070: the fake publication path models the database's approval gate, so the
+  // HTTP surface can be asserted. PostgreSQL remains the authority (the integration
+  // suite proves the real `expense_publish()` precondition and the guard trigger).
+  splits = createFakeSplitRepository(expenses, undefined, undefined, {
+    thresholdPaiseOf: (societyId) =>
+      societies.get(societyId)?.settings.approvalThresholdPaise ?? null,
+  });
   events = createFakeEventPublisher();
 
   const societyRepository = createFakeSocietyRepository({
@@ -545,7 +551,7 @@ describe("POST /v1/expenses/:expenseId/publish — the happy path", () => {
     expect(response.body.data.expense.status).toBe("published");
   });
 
-  it("publishes a pending_approval expense — T070 narrows this later", async () => {
+  it("refuses an unapproved at-or-above-threshold publish with APPROVAL_REQUIRED", async () => {
     const expenseId = await createDraft({ amountPaise: 2_000_000 });
 
     const read = await call("get", `/v1/expenses/${expenseId}`, {
@@ -553,6 +559,48 @@ describe("POST /v1/expenses/:expenseId/publish — the happy path", () => {
       societyId: SOCIETY_A,
     });
     expect(read.body.data.expense.status).toBe("pending_approval");
+
+    const response = await publish(expenseId, {
+      body: { expectedVersion: 1 },
+    });
+
+    // T070 flips this from T066's permissive behaviour: the threshold rule gates the
+    // publication itself, so an unapproved high-value expense is a 409 conflict.
+    expect(response.status).toBe(409);
+    expect(response.body.error.code).toBe("CONFLICT");
+    expect(response.body.error.details[0]).toMatchObject({
+      code: "APPROVAL_REQUIRED",
+    });
+    // Nothing financial happened: the row is still awaiting a decision.
+    const after = await call("get", `/v1/expenses/${expenseId}`, {
+      userId: ADMIN,
+      societyId: SOCIETY_A,
+    });
+    expect(after.body.data.expense.status).toBe("pending_approval");
+    expect(splits.state.splits.size).toBe(0);
+    expect(events.dispatched).toHaveLength(0);
+  });
+
+  it("publishes an at-or-above-threshold expense once an Admin has approved it", async () => {
+    const expenseId = await createDraft({ amountPaise: 2_000_000 });
+
+    const approved = await call("post", `/v1/expenses/${expenseId}/approve`, {
+      userId: ADMIN,
+      societyId: SOCIETY_A,
+      body: { expectedVersion: 1 },
+    });
+    expect(approved.status).toBe(200);
+
+    const response = await publish(expenseId, {
+      body: { expectedVersion: 2 },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.expense.status).toBe("published");
+  });
+
+  it("still publishes a below-threshold draft without any approval", async () => {
+    const expenseId = await createDraft({ amountPaise: 400_000 });
 
     const response = await publish(expenseId, {
       body: { expectedVersion: 1 },

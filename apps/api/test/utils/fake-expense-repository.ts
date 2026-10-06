@@ -1,11 +1,15 @@
-import { expenseError } from "@ses/domain";
+import { expenseError, systemClock } from "@ses/domain";
 import type {
+  ApproveExpenseRecordInput,
+  Clock,
   CreateExpenseRecordInput,
   ExpenseId,
   ExpenseListQuery,
   ExpensePage,
   ExpenseRecord,
   ExpenseRepository,
+  MemberId,
+  RejectExpenseRecordInput,
   SocietyId,
   UpdateExpenseRecordInput,
   UserId,
@@ -53,17 +57,64 @@ export interface FakeExpenseRepository extends ExpenseRepository {
   };
   /** Inserts a record out of band, bypassing every rule. */
   seed(record: ExpenseRecord): void;
+  /**
+   * Makes the next `approve` throw **before** writing anything — the suite's
+   * stand-in for a refused or rolled-back decision. Nothing is stamped, so the
+   * suite can assert the row is untouched.
+   */
+  failNextApprove(error: Error): void;
+  /** Makes the next `reject` throw **before** writing anything. */
+  failNextReject(error: Error): void;
 }
 
-export function createFakeExpenseRepository(): FakeExpenseRepository {
+/**
+ * How the fake resolves a caller's membership id — the one production fact it
+ * cannot derive from the port's arguments.
+ *
+ * `expense_approve()`/`expense_reject()` stamp the **caller's** membership, which
+ * they read through `auth.uid()`; the fake has no `members` table, so a suite that
+ * wants the approver recorded faithfully hands it the same resolver the membership
+ * fixture uses. Without one the fake falls back to the row's creator, which is the
+ * honest answer for the single-member case and is what let the older suites keep
+ * calling `createFakeExpenseRepository()` with no argument.
+ */
+export interface FakeExpenseRepositoryOptions {
+  readonly memberIdOf?: (
+    societyId: SocietyId,
+    actor: UserId,
+  ) => MemberId | null;
+  /** The clock the approval/rejection stamps are read from; defaults to the system one. */
+  readonly clock?: Clock;
+}
+
+export function createFakeExpenseRepository(
+  options: FakeExpenseRepositoryOptions = {},
+): FakeExpenseRepository {
   const records = new Map<ExpenseId, ExpenseRecord>();
   const calls: string[] = [];
+  const approveFailures: Error[] = [];
+  const rejectFailures: Error[] = [];
+  const now = options.clock ?? systemClock;
+
+  const approverOf = (
+    record: ExpenseRecord,
+    societyId: SocietyId,
+    actor: UserId,
+  ): MemberId => options.memberIdOf?.(societyId, actor) ?? record.createdBy;
 
   return {
     state: { records, calls },
 
     seed(record) {
       records.set(record.id, record);
+    },
+
+    failNextApprove(error) {
+      approveFailures.push(error);
+    },
+
+    failNextReject(error) {
+      rejectFailures.push(error);
     },
 
     async create(
@@ -89,6 +140,13 @@ export function createFakeExpenseRepository(): FakeExpenseRepository {
         voidedAt: null,
         voidedBy: null,
         voidReason: null,
+        // T070's workflow stamps. A create always starts clean — the threshold rule
+        // may move the row to `pending_approval`, but nothing has been decided yet.
+        approvedBy: expense.approvedBy,
+        approvedAt: expense.approvedAt,
+        rejectedBy: expense.rejectedBy,
+        rejectedAt: expense.rejectedAt,
+        rejectionReason: expense.rejectionReason,
         createdAt: expense.createdAt,
         updatedAt: expense.updatedAt,
       };
@@ -159,6 +217,15 @@ export function createFakeExpenseRepository(): FakeExpenseRepository {
         voidedAt: stored.voidedAt,
         voidedBy: stored.voidedBy,
         voidReason: stored.voidReason,
+        // The aggregate is the post-edit state, so its stamps are the ones to write:
+        // `edit()` has already cleared any approval (D8's invalidation, which the
+        // database's BEFORE UPDATE guard enforces for raw writers) and
+        // `submitForApproval()` has already cleared the rejection stamps it answers.
+        approvedBy: expense.approvedBy,
+        approvedAt: expense.approvedAt,
+        rejectedBy: expense.rejectedBy,
+        rejectedAt: expense.rejectedAt,
+        rejectionReason: expense.rejectionReason,
         createdAt: stored.createdAt,
         updatedAt: expense.updatedAt,
       };
@@ -268,6 +335,140 @@ export function createFakeExpenseRepository(): FakeExpenseRepository {
         );
       }
       records.delete(id);
+    },
+
+    /**
+     * T070's approval, in memory — the definer transaction's observable effects.
+     *
+     * It reproduces the four refusals the port promises, in the order
+     * `expense_approve()` produces them: `not_found` (absent or another society),
+     * `invalid_transition` (not `pending_approval`), `version_mismatch` carrying the
+     * **current** version, and `EXPENSE_ALREADY_APPROVED` as an `invalid_transition`
+     * for a row that already carries both stamps — a second approval is a refusal,
+     * never a replay. On success it stamps `approvedBy`/`approvedAt`, clears any
+     * stale rejection metadata, and bumps the version by one, exactly as the definer
+     * function and `touch_updated_at()` do. The status deliberately does **not** move.
+     */
+    async approve(
+      id: ExpenseId,
+      societyId: SocietyId,
+      input: ApproveExpenseRecordInput,
+      actor: UserId,
+    ): Promise<ExpenseRecord> {
+      calls.push("approve");
+
+      const failure = approveFailures.shift();
+      if (failure !== undefined) throw failure;
+
+      const record = records.get(id);
+      if (record === undefined || record.societyId !== societyId) {
+        throw expenseError(
+          "not_found",
+          "That expense is not available to you.",
+        );
+      }
+      if (record.status !== "pending_approval") {
+        throw expenseError(
+          "invalid_transition",
+          `A ${record.status} expense cannot be approved.`,
+          { from: record.status, to: "approved" },
+        );
+      }
+      if (record.version !== input.expectedVersion) {
+        throw expenseError(
+          "version_mismatch",
+          "This expense was changed by someone else. Reload it and try again.",
+          {
+            field: "expectedVersion",
+            expectedVersion: input.expectedVersion,
+            currentVersion: record.version,
+          },
+        );
+      }
+      if (record.approvedBy !== null && record.approvedAt !== null) {
+        throw expenseError(
+          "invalid_transition",
+          "This expense has already been approved.",
+          { from: "approved", to: "approved" },
+        );
+      }
+
+      const approvedAt = now.nowIso();
+      const approved: ExpenseRecord = {
+        ...record,
+        approvedBy: approverOf(record, societyId, actor),
+        approvedAt,
+        rejectedBy: null,
+        rejectedAt: null,
+        rejectionReason: null,
+        updatedAt: approvedAt,
+        version: record.version + 1,
+      };
+      records.set(id, approved);
+      return approved;
+    },
+
+    /**
+     * T070's rejection, in memory — `pending_approval → draft` with its stamps.
+     *
+     * The refusals mirror `expense_reject()`'s order (`not_found`,
+     * `invalid_transition` for a row that is not awaiting approval, then
+     * `version_mismatch`), and on success the row returns to `draft` with the
+     * approval cleared and `rejectedBy`/`rejectedAt`/`rejectionReason` recorded. The
+     * reason is taken as sent: the domain and the contract have already validated it
+     * one level up, and the database re-checks it — the fake claims no rule of its own.
+     */
+    async reject(
+      id: ExpenseId,
+      societyId: SocietyId,
+      input: RejectExpenseRecordInput,
+      actor: UserId,
+    ): Promise<ExpenseRecord> {
+      calls.push("reject");
+
+      const failure = rejectFailures.shift();
+      if (failure !== undefined) throw failure;
+
+      const record = records.get(id);
+      if (record === undefined || record.societyId !== societyId) {
+        throw expenseError(
+          "not_found",
+          "That expense is not available to you.",
+        );
+      }
+      if (record.status !== "pending_approval") {
+        throw expenseError(
+          "invalid_transition",
+          `A ${record.status} expense cannot be rejected.`,
+          { from: record.status, to: "draft" },
+        );
+      }
+      if (record.version !== input.expectedVersion) {
+        throw expenseError(
+          "version_mismatch",
+          "This expense was changed by someone else. Reload it and try again.",
+          {
+            field: "expectedVersion",
+            expectedVersion: input.expectedVersion,
+            currentVersion: record.version,
+          },
+        );
+      }
+
+      const rejectedAt = now.nowIso();
+      const rejected: ExpenseRecord = {
+        ...record,
+        status: "draft",
+        approvedBy: null,
+        approvedAt: null,
+        rejectedBy: approverOf(record, societyId, actor),
+        rejectedAt,
+        rejectionReason: input.reason,
+        updatedAt: rejectedAt,
+        version: record.version + 1,
+      };
+      records.set(id, rejected);
+      return rejected;
     },
   };
 }

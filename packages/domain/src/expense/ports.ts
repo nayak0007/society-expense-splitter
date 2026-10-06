@@ -429,6 +429,17 @@ export interface ExpenseRecord extends ExpenseDraftFields {
   readonly voidedAt: string | null;
   readonly voidedBy: MemberId | null;
   readonly voidReason: string | null;
+  /**
+   * The approval stamps (T070, ADR-0011): who approved this exact version and
+   * when, or `null`. Read back from the row, so a stored read and a transition
+   * response describe the same facts.
+   */
+  readonly approvedBy: MemberId | null;
+  readonly approvedAt: string | null;
+  /** The rejection stamps, or `null`; all three are set together or not at all. */
+  readonly rejectedBy: MemberId | null;
+  readonly rejectedAt: string | null;
+  readonly rejectionReason: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -454,6 +465,32 @@ export interface UpdateExpenseRecordInput {
   readonly expense: Expense;
   readonly fields: ExpenseDraftFields;
   readonly expectedVersion: number;
+}
+
+/**
+ * What `approve` writes: the version the Admin believed it was approving.
+ *
+ * One fact and no more: an approval carries no money, no reason and no payload. The
+ * lock is required rather than defaulted for the reason `VoidExpenseRecordInput`
+ * records — a lock the caller can omit is not a lock — and a stale one is refused
+ * (`version_mismatch`) rather than silently approving a version the Admin never
+ * saw.
+ */
+export interface ApproveExpenseRecordInput {
+  readonly expectedVersion: number;
+}
+
+/**
+ * What `reject` writes: the lock plus the reason.
+ *
+ * The reason is already trimmed and validated by `Expense.reject()`/the contract
+ * and is re-validated inside the definer function, exactly as a void reason is, so
+ * a caller reaching the port outside the API meets the same refusal.
+ */
+export interface RejectExpenseRecordInput {
+  readonly expectedVersion: number;
+  /** ≥ 10 characters after trimming, no control characters (ADR-0011 D2). */
+  readonly reason: string;
 }
 
 /** The stable sort tuple SAD §7.4 names: `{ expenseDate, id }`, newest first. */
@@ -573,6 +610,47 @@ export interface ExpenseRepository {
     societyId: SocietyId,
     actor: UserId,
   ): Promise<void>;
+
+  /**
+   * Approve one `pending_approval` expense — T070's write path, ADR-0011.
+   *
+   * The implementation runs the whole approval in the `expense_approve()` definer
+   * transaction: Admin-only, the row locked, the lifecycle and the caller's version
+   * checked, then `approved_by` / `approved_at` stamped and stale rejection
+   * metadata cleared, with the version bumped by the shared trigger. The status does
+   * **not** move — approval is not publication — and no financial row is touched.
+   *
+   * Failure semantics are part of the contract: `not_found` for an expense outside
+   * the caller's society; `forbidden` when the caller is not an Admin; a
+   * `version_mismatch` carrying the row's **current** version when it moved; and
+   * `invalid_transition` when the row is not `pending_approval` or has already been
+   * approved. Nothing about SQLSTATE crosses this boundary.
+   */
+  approve(
+    id: ExpenseId,
+    societyId: SocietyId,
+    input: ApproveExpenseRecordInput,
+    actor: UserId,
+  ): Promise<ExpenseRecord>;
+
+  /**
+   * Reject one `pending_approval` expense — T070's write path, ADR-0011.
+   *
+   * `pending_approval → draft`, clearing the approval and recording
+   * `rejected_by` / `rejected_at` / `rejection_reason` in the `expense_reject()`
+   * definer transaction. No revision row, no split, no due, no balance: a rejection
+   * is a workflow decision, not a financial one.
+   *
+   * Failure semantics: `not_found`, `forbidden` (non-Admin), `version_mismatch`
+   * with the current version, `invalid_transition` for a row that is not awaiting
+   * approval, and `validation` for a reason the domain refuses.
+   */
+  reject(
+    id: ExpenseId,
+    societyId: SocietyId,
+    input: RejectExpenseRecordInput,
+    actor: UserId,
+  ): Promise<ExpenseRecord>;
 }
 
 /**

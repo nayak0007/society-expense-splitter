@@ -346,20 +346,30 @@ describe("POST /v1/expenses — create", () => {
     expect(response.body.data.expense.publishedAt).toBeNull();
   });
 
-  it("keeps an Admin's expense at exactly the threshold a draft — the PRD says above", async () => {
-    const response = await create(draftBody({ amountPaise: 1_000_000 }));
+  it("keeps an Admin's expense one paisa below the threshold a draft", async () => {
+    const response = await create(draftBody({ amountPaise: 999_999 }));
 
     expect(response.status).toBe(201);
     expect(response.body.data.expense.status).toBe("draft");
   });
 
-  it("keeps a Committee Member's above-threshold expense a draft — drafts only", async () => {
+  it("routes an Admin's expense at exactly the threshold into pending_approval — `>=`, not the old `>`", async () => {
+    const response = await create(draftBody({ amountPaise: 1_000_000 }));
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.expense.status).toBe("pending_approval");
+  });
+
+  it("routes a Committee Member's above-threshold expense into pending_approval — the deadlock fix", async () => {
     const response = await create(draftBody({ amountPaise: 5_000_000 }), {
       userId: COMMITTEE,
     });
 
+    // T070: the threshold alone decides, so an otherwise-authorized draft creator
+    // can submit their own expense for approval instead of being stranded with a
+    // draft they cannot promote (ADR-0011, the Committee submission deadlock).
     expect(response.status).toBe(201);
-    expect(response.body.data.expense.status).toBe("draft");
+    expect(response.body.data.expense.status).toBe("pending_approval");
     expect(response.body.data.expense.createdBy).toBe(
       membershipIdOf(COMMITTEE),
     );

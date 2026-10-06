@@ -45,7 +45,7 @@ import {
   loadExpenseOrNotFound,
   loadMembershipOrNotFound,
   snapshotOf,
-  submitAboveThreshold,
+  routeForApproval,
   unwrap,
 } from "./expense-draft.support";
 import {
@@ -68,7 +68,7 @@ import { RecalculateExpenseUseCase } from "./recalculate-expense.use-case";
  *   ├─ category, only when the patch needs it
  *   ├─ resolveSplitPlan, only when strategy/basis moved
  *   ├─ Expense.edit(...)                           (T061's input rules, one version)
- *   ├─ submitAboveThreshold(...)                   (draft → pending, full holders)
+ *   ├─ routeForApproval(...)                       (the threshold rule, T070)
  *   └─ repository.update(..., expectedVersion)     (atomic optimistic lock)
  * ```
  *
@@ -325,6 +325,17 @@ export class UpdateExpenseUseCase {
         voidedAt: record.voidedAt,
         voidedBy: record.voidedBy,
         voidReason: record.voidReason,
+        // T070's workflow stamps: reconstitution is a *read* of the stored row, so
+        // the aggregate starts from what the database holds. `edit()` below then
+        // invalidates an approval (ADR-0011 D8) and `routeForApproval` derives the
+        // resulting state from the new amount. They are carried rather than dropped
+        // because dropping them would make the entity's invariant checks
+        // (half a stamp is a corrupt row) impossible to apply.
+        approvedBy: record.approvedBy,
+        approvedAt: record.approvedAt,
+        rejectedBy: record.rejectedBy,
+        rejectedAt: record.rejectedAt,
+        rejectionReason: record.rejectionReason,
         createdAt: record.createdAt,
         updatedAt: record.updatedAt,
         version: record.version,
@@ -349,14 +360,11 @@ export class UpdateExpenseUseCase {
       ),
     );
 
-    await submitAboveThreshold(
-      entity,
-      membership,
-      actor,
-      societyId,
-      this.policies,
-      this.clock,
-    );
+    // T070's routing (ADR-0011 D3/D4/D8): `edit()` has already invalidated any
+    // approval, so this decides the resulting state from the **new** amount against
+    // the **current** threshold — `pending_approval` when approval is still
+    // required, `draft` when it is not.
+    await routeForApproval(entity, actor, societyId, this.policies, this.clock);
 
     const fields: ExpenseDraftFields = {
       description:

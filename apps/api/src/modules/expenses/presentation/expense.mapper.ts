@@ -72,6 +72,14 @@ export function expenseToDto(record: ExpenseRecord): ExpenseDto {
     voidedAt: record.voidedAt,
     voidedBy: record.voidedBy,
     voidReason: record.voidReason,
+    // T070's workflow stamps. They travel on every expense response because the
+    // queue (`GET /expenses?status=pending_approval`) is the same DTO: an Admin
+    // needs to see at a glance which entries are already approved.
+    approvedBy: record.approvedBy,
+    approvedAt: record.approvedAt,
+    rejectedBy: record.rejectedBy,
+    rejectedAt: record.rejectedAt,
+    rejectionReason: record.rejectionReason,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   });

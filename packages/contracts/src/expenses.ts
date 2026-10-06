@@ -6,6 +6,7 @@ import {
   CATEGORY_ICON_MAX_LENGTH,
   CATEGORY_NAME_MAX_LENGTH,
   EXPENSE_DESCRIPTION_MAX_LENGTH,
+  EXPENSE_REJECTION_REASON_MIN_LENGTH,
   EXPENSE_STATUSES,
   EXPENSE_TITLE_MAX_LENGTH,
   EXPENSE_VENDOR_NAME_MAX_LENGTH,
@@ -596,9 +597,11 @@ export type UpdateExpensePayload = z.infer<typeof updateExpenseSchema>;
  * canonically by `createParticipantSelector`, which is why the response schema has to
  * admit `includeVacant: null` — "not stated" is a real stored fact.
  *
- * Deliberately absent: `currency` (single-market server default), the approval stamps
- * (`approvedBy`/`approvedAt` arrive with T070), and the publish-time `splitSummary` —
- * no T065 route publishes anything.
+ * Deliberately absent: `currency` (single-market server default) and the
+ * publish-time `splitSummary` — no T065 route publishes anything. The workflow
+ * stamps **are** here since T070: an Admin (and the expense list) needs to see
+ * whether an awaiting-approval expense has been approved, and by whom, without a
+ * second request.
  */
 export const expenseSchema = z.object({
   id: z.string(),
@@ -622,6 +625,16 @@ export const expenseSchema = z.object({
   voidedAt: z.string().nullable(),
   voidedBy: z.string().nullable(),
   voidReason: z.string().nullable(),
+  /**
+   * The approval stamps (T070, ADR-0011): the Admin membership and instant an
+   * approval was recorded for *this* version, or `null`. Both are set together.
+   */
+  approvedBy: z.string().nullable(),
+  approvedAt: z.string().nullable(),
+  /** The rejection stamps, or `null`; all three are set together or not at all. */
+  rejectedBy: z.string().nullable(),
+  rejectedAt: z.string().nullable(),
+  rejectionReason: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -937,3 +950,99 @@ export const voidExpenseResponseSchema = z.object({
   summary: expenseVoidSummarySchema,
 });
 export type VoidExpenseResponseDto = z.infer<typeof voidExpenseResponseSchema>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Approving and rejecting — Roadmap T070, ADR-0011
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `POST /expenses/:expenseId/approve` — the lock, and nothing else.
+ *
+ * ## Why the request carries no financial input
+ *
+ * Approving is a *decision*, not a computation and not a publication: no split is
+ * priced, no due is created and no balance moves. The whole payload is therefore the
+ * version the Admin believed it was approving — T065's optimistic lock, and required
+ * rather than defaulted for the reason `updateExpenseSchema` records: a lock a caller
+ * may omit is not a lock.
+ *
+ * Deliberately absent, `strictObject` so they are refused rather than ignored:
+ * `approvedBy` (the caller's own membership is the approver — accepting one would be
+ * accepting an authorisation decision from the request), `approvedAt` (the database's
+ * clock), `status` (approval does not move the lifecycle), and any allocation or
+ * amount (approval does not publish — `POST /publish` does that, and it re-reads the
+ * row).
+ *
+ * An Admin may approve their own expense (ADR-0011 D5): no field exists that would
+ * let a client express "not me", and the server adds no such rule, because a
+ * single-Admin society must not deadlock its own high-value expenses.
+ */
+export const approveExpenseSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+});
+export type ApproveExpensePayload = z.infer<typeof approveExpenseSchema>;
+
+/**
+ * `POST /expenses/:expenseId/reject` — the lock and the reason.
+ *
+ * ## Rejection is `pending_approval → draft`
+ *
+ * There is no `rejected` status (ADR-0011 D1): the expense goes back to being a
+ * draft its creator may correct and submit again, and the Admin's decision is
+ * recorded in the stamps. The reason is what the creator reads, so it is required.
+ *
+ * ## `reason`
+ *
+ * Trimmed, at least `EXPENSE_REJECTION_REASON_MIN_LENGTH` characters, no control
+ * characters — the same shape `voidExpenseSchema.reason` has, and the same constant
+ * `createExpenseRejectionReason` applies in the domain, so the wire and the entity
+ * cannot disagree about what a usable reason is. The length is checked on the
+ * *trimmed* value: ten spaces is not a reason.
+ *
+ * `expectedVersion` is required for the same reason as on the approve route, and
+ * there is deliberately no `Idempotency-Key`: a rejection is not a money-moving POST,
+ * and a second attempt meets a row that is no longer `pending_approval` with
+ * `409 INVALID_TRANSITION` rather than being replayed as a success.
+ */
+export const rejectExpenseSchema = z.strictObject({
+  expectedVersion: z.number().int().min(1),
+  reason: z
+    .string()
+    .trim()
+    .min(EXPENSE_REJECTION_REASON_MIN_LENGTH)
+    // eslint-disable-next-line no-control-regex
+    .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
+      message: "The rejection reason contains characters that are not allowed.",
+    }),
+});
+export type RejectExpensePayload = z.infer<typeof rejectExpenseSchema>;
+
+/**
+ * `POST /expenses/:expenseId/approve` — the authoritative expense, after commit.
+ *
+ * The same `expenseSchema` every other route returns, read back from the row the
+ * definer transaction stamped: `status` is still `pending_approval`, `approvedBy` /
+ * `approvedAt` are set, any stale rejection metadata is cleared, and `version` is
+ * the one the trigger bumped. A client never reconstructs the approved state from
+ * what it hoped to write.
+ */
+export const approveExpenseResponseSchema = z.object({
+  expense: expenseSchema,
+});
+export type ApproveExpenseResponseDto = z.infer<
+  typeof approveExpenseResponseSchema
+>;
+
+/**
+ * `POST /expenses/:expenseId/reject` — the authoritative expense, after commit.
+ *
+ * `status` is `draft`, `approvedBy` / `approvedAt` are cleared, `rejectedBy` /
+ * `rejectedAt` / `rejectionReason` are set, and the version is the trigger's. The
+ * creator's next move is an ordinary draft edit followed by a resubmission.
+ */
+export const rejectExpenseResponseSchema = z.object({
+  expense: expenseSchema,
+});
+export type RejectExpenseResponseDto = z.infer<
+  typeof rejectExpenseResponseSchema
+>;

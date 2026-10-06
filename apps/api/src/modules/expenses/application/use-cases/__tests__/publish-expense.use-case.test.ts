@@ -229,6 +229,11 @@ function recordFixture(overrides: Partial<ExpenseRecord> = {}): ExpenseRecord {
     voidedAt: null,
     voidedBy: null,
     voidReason: null,
+    approvedBy: null,
+    approvedAt: null,
+    rejectedBy: null,
+    rejectedAt: null,
+    rejectionReason: null,
     createdAt: "2026-10-01T00:00:00.000Z",
     updatedAt: "2026-10-01T00:00:00.000Z",
     version: 3,
@@ -272,6 +277,14 @@ class FakeExpenses implements ExpenseRepository {
   }
 
   async deleteDraft(): Promise<void> {
+    throw new Error("not used by the publish path");
+  }
+
+  async approve(): Promise<ExpenseRecord> {
+    throw new Error("not used by the publish path");
+  }
+
+  async reject(): Promise<ExpenseRecord> {
     throw new Error("not used by the publish path");
   }
 }

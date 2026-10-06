@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { sql } from "drizzle-orm";
-import { ExpenseError, expenseError, isExpenseError } from "@ses/domain";
+import { expenseError, isExpenseError } from "@ses/domain";
 import type {
   ExpenseId,
   ExpensePublication,
@@ -24,10 +24,12 @@ import {
 } from "../../../infrastructure/database/unit-of-work";
 import {
   EXPENSE_COLUMN_EXPRESSIONS,
+  readExpenseWorkflowStamps,
   runQuery,
   type Row,
 } from "./expense.repository";
 import {
+  enrichVersionMismatch,
   expenseErrorFromPostgres,
   expenseFromRow,
   unexpectedShapeError,
@@ -152,7 +154,10 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
         const row = parsed.data;
 
         return {
-          expense: expenseFromRow(row),
+          expense: expenseFromRow(
+            row,
+            await readExpenseWorkflowStamps(tx, id, societyId),
+          ),
           summary: recalculationSummaryFromRow(row.recalculation),
         };
       });
@@ -204,7 +209,10 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
         const row = parsed.data;
 
         return {
-          expense: expenseFromRow(row),
+          expense: expenseFromRow(
+            row,
+            await readExpenseWorkflowStamps(tx, id, societyId),
+          ),
           summary: voidSummaryFromRow(row.void_summary),
         };
       });
@@ -292,11 +300,17 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
     }
     const row = parsed.data;
 
+    // T070: the stamps are read back in the same transaction, where the definer
+    // function's write is already visible, so both the live response and the stored
+    // replay body describe the approval state instead of dropping it (
+    // `expense_publish()`'s signature predates T070 and is deliberately unchanged).
+    const workflow = await readExpenseWorkflowStamps(tx, id, societyId);
+
     // Written inside the same transaction as the publication it describes, so a
     // record exists only if the bill does. The unique key means a duplicate that
     // somehow reached this point conflicts — rolled back, re-read as a replay by
     // the caller's catch.
-    const stored = storedPublicationOf(row);
+    const stored = storedPublicationOf(row, workflow);
     await runQuery(
       tx,
       sql`
@@ -313,7 +327,7 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
       `,
     );
 
-    return publicationFromRow(row, false);
+    return publicationFromRow(row, false, workflow);
   }
 
   /** The stored record for one key, or `undefined` when the key is unseen. */
@@ -497,30 +511,4 @@ function allocationsForPublish(input: {
       apartmentNumber: allocation.snapshot.apartmentNumber,
     },
   }));
-}
-
-/**
- * Adds the version the caller stated to a lock refusal, so the SAD §7.11 details
- * carry both numbers (`received` and `current`).
- *
- * The definer function knows the *current* version (it read the row under the lock)
- * and not what the caller expected; the repository knows the input. Enriching here
- * is where the two facts meet, and it is deliberately not folded into the classifier
- * — that function reads a database error, which has no `expectedVersion` in it.
- */
-function enrichVersionMismatch(
-  error: unknown,
-  expectedVersion: number,
-): unknown {
-  if (!isExpenseError(error) || error.code !== "version_mismatch") {
-    return error;
-  }
-  if (typeof error.details?.["expectedVersion"] === "number") {
-    return error;
-  }
-  return new ExpenseError(error.code, error.message, {
-    ...error.details,
-    field: "expectedVersion",
-    expectedVersion,
-  });
 }

@@ -24,6 +24,7 @@ describe("ERROR_CODE_BY_EXPENSE_CODE", () => {
   it("maps every domain code to a catalogue code", () => {
     const codes = Object.keys(ERROR_CODE_BY_EXPENSE_CODE) as ExpenseErrorCode[];
     expect(codes.sort()).toEqual([
+      "approval_required",
       "category_has_expenses",
       "conflict",
       "forbidden",
@@ -90,6 +91,12 @@ describe("ERROR_CODE_BY_EXPENSE_CODE", () => {
       HTTP_STATUS_BY_ERROR_CODE[
         ERROR_CODE_BY_EXPENSE_CODE.void_due_state_unsupported
       ],
+    ).toBe(409);
+    // T070's approval gate (ADR-0011 D4): a well-formed publish of a high-value
+    // expense that is not approved yet is a 409 conflict, never a 422 — the same
+    // request succeeds once an Admin decides.
+    expect(
+      HTTP_STATUS_BY_ERROR_CODE[ERROR_CODE_BY_EXPENSE_CODE.approval_required],
     ).toBe(409);
   });
 

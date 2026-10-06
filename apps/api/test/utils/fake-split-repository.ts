@@ -97,10 +97,26 @@ export interface FakeSplitRepository extends ExpenseSplitRepository {
   failNextVoid(error: Error): void;
 }
 
+/**
+ * The approval gate, as the publication path reads it — T070, ADR-0011 D4.
+ *
+ * `thresholdPaiseOf` answers the society's **current** threshold, or `null` when the
+ * suite does not model one (the gate is then off, and only the integration suite can
+ * prove it — PostgreSQL's `expense_publish()` is the authority in production). When
+ * a threshold is present the fake reproduces the function's own rule: a publication
+ * at or above it requires `status = pending_approval` **and** both approval stamps,
+ * and anything else is refused as `approval_required` **before any financial write**,
+ * so a suite can assert that nothing was written.
+ */
+export interface FakeApprovalGate {
+  thresholdPaiseOf(societyId: SocietyId): bigint | null;
+}
+
 export function createFakeSplitRepository(
   expenses: FakeExpenseRepository,
   now: Clock = systemClock,
   revisions?: FakeRevisionRepository,
+  gate?: FakeApprovalGate,
 ): FakeSplitRepository {
   const records = new Map<string, StoredPublication>();
   const splits = new Map<ExpenseId, readonly PublishExpenseAllocation[]>();
@@ -187,6 +203,26 @@ export function createFakeSplitRepository(
             expectedVersion: input.expectedVersion,
             currentVersion: record.version,
           },
+        );
+      }
+
+      // The T070 approval precondition, in `expense_publish()`'s own position: after
+      // the lifecycle and the version, and **before** any financial write. The
+      // threshold is read from the current society settings, exactly as the definer
+      // function does under the row lock — a below-threshold draft therefore still
+      // publishes normally, and a high-value row without a live approval is refused.
+      const threshold = gate?.thresholdPaiseOf(societyId) ?? null;
+      if (
+        threshold !== null &&
+        record.amount.paise >= threshold &&
+        (record.status !== "pending_approval" ||
+          record.approvedBy === null ||
+          record.approvedAt === null)
+      ) {
+        throw expenseError(
+          "approval_required",
+          "This expense needs an Admin's approval before it can be published.",
+          { from: record.status },
         );
       }
 

@@ -1,8 +1,11 @@
 import {
   asExpenseCategoryId,
   asExpenseError,
+  asExpenseId,
+  asMemberId,
   expenseError,
-  grantKind,
+  isExpenseEditableStatus,
+  paise,
 } from "@ses/domain";
 import type {
   Clock,
@@ -11,17 +14,21 @@ import type {
   ExpenseApprovalPolicyReader,
   ExpenseCategory,
   ExpenseCategoryRepository,
+  ExpenseCursor,
   ExpenseError,
   ExpenseId,
+  ExpenseListQuery,
   ExpenseMembershipReader,
   ExpenseRecord,
   ExpenseRepository,
   ExpenseResourceSnapshot,
+  ExpenseStatus,
   Result,
   SocietyId,
   SocietyMembership,
   UserId,
 } from "@ses/domain";
+import { z } from "zod";
 
 import { toAppError } from "../expense-category-error.mapper";
 
@@ -151,36 +158,17 @@ export function snapshotOf(record: ExpenseRecord): ExpenseResourceSnapshot {
 }
 
 /**
- * PRD §2.2's threshold: an expense **above** `approval_threshold_paise` enters
- * `pending_approval` and requires an Admin (Roadmap T065's acceptance).
+ * The society's current approval threshold in paise, or `not_found`.
  *
- * Two facts decide it, and both are checked before anything is read:
- *
- *  - a **full** `expense.create` holder (Admin, Treasurer) may submit; a 🟡
- *    Committee Member's expense stays a draft. That is the Roadmap's "Committee
- *    members may create drafts only", and it is also the database's rule — the
- *    `expenses_insert_author` policy requires `status = 'draft'` from a
- *    `can_draft_expenses` caller, so submitting on their behalf would be refused
- *    mid-transaction;
- *  - `>` and not `>=`: the PRD says "above the threshold", and T070's later "at or
- *    above" wording is that row's decision to make (recorded in T065's report).
- *
- * A promotion that is not needed returns before the settings read, so the common
- * draft write costs no extra query, and an already-submitted expense is never
- * re-submitted (`submitForApproval` would refuse the move anyway; skipping it keeps
- * the intent legible).
+ * `null` is "no such society, or no live membership for this caller" — the two
+ * are one answer for the reason `ExpenseApprovalPolicyReader` records, and the
+ * refusal is the same `not_found` the other loaders throw.
  */
-export async function submitAboveThreshold(
-  expense: Expense,
-  membership: SocietyMembership,
+export async function readApprovalThreshold(
+  policies: ExpenseApprovalPolicyReader,
   actor: UserId,
   societyId: SocietyId,
-  policies: ExpenseApprovalPolicyReader,
-  clock: Clock,
-): Promise<void> {
-  if (expense.status !== "draft") return;
-  if (grantKind(membership.role, "expense.create") !== "full") return;
-
+): Promise<bigint> {
   let policy: ExpenseApprovalPolicy | null;
   try {
     policy = await policies.findById(societyId, actor);
@@ -194,9 +182,84 @@ export async function submitAboveThreshold(
     );
   }
 
-  if (expense.amount.paise > policy.settings.approvalThresholdPaise) {
-    const submitted = expense.submitForApproval(clock);
-    if (!submitted.ok) throw toAppError(submitted.error);
+  return policy.settings.approvalThresholdPaise;
+}
+
+/**
+ * Route an unpublished expense by the society's threshold — T070's submission rule
+ * (ADR-0011 D3/D4 and the Committee fix).
+ *
+ * ## The two answers, and why both directions exist
+ *
+ * ```text
+ *   amount >= current threshold  →  pending_approval  (an Admin must decide)
+ *   amount <  current threshold  →  draft             (no approval is required)
+ * ```
+ *
+ * Entering `pending_approval` is **not** permission to publish: approval is a full
+ * Admin cell, and publication re-evaluates the amount against the *current*
+ * threshold inside `expense_publish()` under the row lock (D4). Routing an expense
+ * into the queue therefore grants the caller nothing they did not already have.
+ *
+ * ## `>=` and not `>` (D3)
+ *
+ * An amount **at** the threshold requires approval. The strict `>` this function
+ * used before T070 was the temporary T065 reading and is superseded: 1,000,000
+ * paise triggers with a 1,000,000-paise threshold.
+ *
+ * ## The Committee deadlock is fixed here (ADR-0011)
+ *
+ * The old rule required a **full** `expense.create` grant, so a Committee Member's
+ * above-threshold draft was never promoted — and an `insert`/`update` policy that
+ * only accepted `status = 'draft'` from their branch made promoting it impossible
+ * anyway. Both are gone: the threshold alone decides, and migration #31 lets a
+ * `can_draft_expenses` caller's row carry `status IN ('draft',
+ * 'pending_approval')`. The narrowing that remains is the *stored* row's: a
+ * submitted expense is outside their reach (their `expense.create` grant is
+ * own-drafts-only, the update policy's `USING` clause still requires `draft`, and
+ * `snapshotOf` reads any non-draft row as published), which is exactly the workflow
+ * D1 describes — submit, then wait for an Admin to approve or reject.
+ *
+ * ## D8's other direction
+ *
+ * A `pending_approval` expense whose amount drops below the *current* threshold is
+ * returned to `draft`: the approval it was waiting for is not required any more.
+ * This is reached only from the two edit doors (a create is always a draft), which
+ * is why it lives here rather than in the entity: the entity cannot read the
+ * society's threshold.
+ *
+ * A promotion that is not needed returns before the settings read, so the common
+ * below-threshold draft write costs no extra query.
+ */
+export async function routeForApproval(
+  expense: Expense,
+  actor: UserId,
+  societyId: SocietyId,
+  policies: ExpenseApprovalPolicyReader,
+  clock: Clock,
+): Promise<void> {
+  // Published and void expenses are out of scope: their routes own them (T066's
+  // publish, T068's recalculation, T069's void).
+  if (!isExpenseEditableStatus(expense.status)) return;
+
+  // The threshold is read on every routed write, because both directions matter: a
+  // draft may need promotion, and a `pending_approval` row may need demotion.
+  const threshold = await readApprovalThreshold(policies, actor, societyId);
+
+  if (expense.amount.paise >= threshold) {
+    if (expense.status === "draft") {
+      const submitted = expense.submitForApproval(clock);
+      if (!submitted.ok) throw toAppError(submitted.error);
+    }
+    // Already `pending_approval`: the edit already cleared the approval
+    // (`Expense.edit()`, and the database's guard), so a fresh decision is
+    // required and nothing else needs to move.
+    return;
+  }
+
+  if (expense.status === "pending_approval") {
+    const reverted = expense.revertToDraft(clock);
+    if (!reverted.ok) throw toAppError(reverted.error);
   }
 }
 
@@ -215,4 +278,154 @@ export async function unwrap<T>(
     throw toAppError(result.error);
   }
   return result.value;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The list path — T065's filters, shared with T070's approval queue
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** SAD §7.4: default 20, maximum 100 (the contract clamps; this is the floor). */
+export const DEFAULT_EXPENSE_PAGE_SIZE = 20;
+export const MAX_EXPENSE_PAGE_SIZE = 100;
+
+/**
+ * The list request, in the shape both list use cases accept.
+ *
+ * Structural, so the contract's parsed query (`ListExpensesQueryPayload`) satisfies
+ * it without a mapping: every `undefined`-able field means "no filter", which is
+ * exactly what the strict query schema produces for an absent parameter.
+ */
+export interface ExpenseListRequest {
+  readonly categoryId?: string | undefined;
+  readonly status?: ExpenseStatus | undefined;
+  readonly dateFrom?: string | undefined;
+  readonly dateTo?: string | undefined;
+  readonly amountPaiseMin?: number | undefined;
+  readonly amountPaiseMax?: number | undefined;
+  readonly createdBy?: string | undefined;
+  /** Full-text search over title, description and vendor. */
+  readonly q?: string | undefined;
+  readonly cursor?: string | undefined;
+  readonly limit?: number | undefined;
+}
+
+/**
+ * The request → the repository's query, with the status optionally forced.
+ *
+ * `forcedStatus` is how the approval queue states its one non-negotiable filter
+ * (T070, ADR-0011 D7): the queue is *the* `status = pending_approval` view, so a
+ * caller cannot ask it for something else — and it is the same builder the general
+ * list uses, so a filter cannot mean one thing on one route and another on the other.
+ *
+ * The cursor is base64 of SAD §7.4's own sort tuple, decoded strictly: a malformed
+ * cursor is a `validation` error naming `cursor`, not a silent "start over", which
+ * would turn a client bug into duplicated rows on a screen.
+ */
+export function buildExpenseListQuery(
+  request: ExpenseListRequest,
+  forcedStatus?: ExpenseStatus,
+): ExpenseListQuery {
+  const status = forcedStatus ?? request.status;
+
+  return {
+    ...(request.categoryId === undefined
+      ? {}
+      : { categoryId: asExpenseCategoryId(request.categoryId) }),
+    ...(status === undefined ? {} : { status }),
+    ...(request.dateFrom === undefined ? {} : { dateFrom: request.dateFrom }),
+    ...(request.dateTo === undefined ? {} : { dateTo: request.dateTo }),
+    ...(request.amountPaiseMin === undefined
+      ? {}
+      : { amountPaiseMin: paise(request.amountPaiseMin) }),
+    ...(request.amountPaiseMax === undefined
+      ? {}
+      : { amountPaiseMax: paise(request.amountPaiseMax) }),
+    ...(request.createdBy === undefined
+      ? {}
+      : { createdBy: asMemberId(request.createdBy) }),
+    ...(request.q === undefined ? {} : { search: request.q }),
+    ...(request.cursor === undefined
+      ? {}
+      : { cursor: decodeExpenseCursor(request.cursor) }),
+    limit: Math.min(
+      request.limit ?? DEFAULT_EXPENSE_PAGE_SIZE,
+      MAX_EXPENSE_PAGE_SIZE,
+    ),
+  };
+}
+
+/** The decoded tuple, validated as strictly as the wire that carried it. */
+const cursorPayloadSchema = z.object({
+  expenseDate: z.iso.date(),
+  id: z.uuid(),
+});
+
+/**
+ * The opaque cursor → the sort tuple, or a `validation` error naming `cursor`.
+ *
+ * `Buffer.from(..., "base64")` is forgiving of non-base64 input (it decodes what it
+ * can and ignores the rest), which is exactly why the JSON parse and the schema
+ * check follow: the pair is what makes a garbage cursor a refusal rather than a page
+ * starting somewhere unintended.
+ */
+export function decodeExpenseCursor(cursor: string): ExpenseCursor {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(Buffer.from(cursor, "base64").toString("utf8"));
+  } catch {
+    throw toAppError(
+      expenseError("validation", "The cursor is not valid.", {
+        field: "cursor",
+      }),
+    );
+  }
+
+  const parsed = cursorPayloadSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw toAppError(
+      expenseError("validation", "The cursor is not valid.", {
+        field: "cursor",
+      }),
+    );
+  }
+
+  return {
+    expenseDate: parsed.data.expenseDate,
+    id: asExpenseId(parsed.data.id),
+  };
+}
+
+/** The sort tuple → the opaque cursor. The client never constructs one. */
+export function encodeExpenseCursor(cursor: ExpenseCursor): string {
+  return Buffer.from(
+    JSON.stringify({ expenseDate: cursor.expenseDate, id: cursor.id }),
+    "utf8",
+  ).toString("base64");
+}
+
+/**
+ * One repository page → the wire result, with the cursor re-encoded.
+ *
+ * Shared by the general list and the approval queue so a page boundary cannot be
+ * translated two different ways — the failure would be a queue that silently
+ * re-shows its first page.
+ */
+export function toExpenseListResult(page: {
+  readonly expenses: ExpenseListResultPage["expenses"];
+  readonly nextCursor: ExpenseCursor | null;
+}): ExpenseListResultPage {
+  return {
+    expenses: page.expenses,
+    nextCursor:
+      page.nextCursor === null ? null : encodeExpenseCursor(page.nextCursor),
+    hasMore: page.nextCursor !== null,
+  };
+}
+
+/** The page plus its wire cursor, as every expense-list route answers. */
+export interface ExpenseListResultPage {
+  readonly expenses: readonly ExpenseRecord[];
+  /** Base64 of `{ expenseDate, id }`, or `null` on the last page. */
+  readonly nextCursor: string | null;
+  readonly hasMore: boolean;
 }

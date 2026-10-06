@@ -7,7 +7,9 @@ import {
   isExpenseStatus,
 } from "@ses/domain";
 import type {
+  ApproveExpenseRecordInput,
   CreateExpenseRecordInput,
+  RejectExpenseRecordInput,
   ExpenseId,
   ExpensePage,
   ExpenseRecord,
@@ -25,12 +27,17 @@ import {
   type TransactionContext,
 } from "../../../infrastructure/database/unit-of-work";
 import {
+  NO_WORKFLOW_STAMPS,
+  enrichVersionMismatch,
+  expenseDetailRowListSchema,
+  expenseDetailRowSchema,
   expenseErrorFromPostgres,
-  expenseFromRow,
-  expenseRowListSchema,
-  expenseRowSchema,
+  expenseFromDetailRow,
+  expenseWorkflowRowSchema,
+  expenseWorkflowStampsOf,
   unexpectedShapeError,
 } from "./expense.rows";
+import type { ExpenseWorkflowStamps } from "./expense.rows";
 
 /**
  * `ExpenseRepository` over Postgres, under RLS — Roadmap T065.
@@ -119,10 +126,10 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
             ${expense.status}::public.expense_status,
             ${expense.createdBy}::uuid
           )
-          returning ${EXPENSE_COLUMNS}
+          returning ${EXPENSE_DETAIL_COLUMNS}
         `,
       );
-      return expenseFromRow(parseSingleRow(rows, "created expense"));
+      return expenseFromDetailRow(parseSingleRow(rows, "created expense"));
     });
   }
 
@@ -136,7 +143,7 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
       const rows = await runQuery(
         tx,
         sql`
-          select ${EXPENSE_COLUMNS}
+          select ${EXPENSE_DETAIL_COLUMNS}
             from public.expenses
            where id = ${id}::uuid
              and society_id = ${societyId}::uuid
@@ -144,7 +151,7 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
         `,
       );
       const [row] = parseRows(rows);
-      return row === undefined ? null : expenseFromRow(row);
+      return row === undefined ? null : expenseFromDetailRow(row);
     });
   }
 
@@ -185,12 +192,12 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
              and society_id = ${societyId}::uuid
              and version = ${expectedVersion}::int
              and status in ('draft', 'pending_approval')
-          returning ${EXPENSE_COLUMNS}
+          returning ${EXPENSE_DETAIL_COLUMNS}
         `,
       );
 
       const [row] = parseRows(rows);
-      if (row !== undefined) return expenseFromRow(row);
+      if (row !== undefined) return expenseFromDetailRow(row);
       throw await this.classifyFailedUpdate(tx, id, societyId, expectedVersion);
     });
   }
@@ -244,7 +251,7 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
       const rows = await runQuery(
         tx,
         sql`
-          select ${EXPENSE_COLUMNS}
+          select ${EXPENSE_DETAIL_COLUMNS}
             from public.expenses
            where ${sql.join(conditions, sql` and `)}
              ${cursor}
@@ -256,7 +263,7 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
       const parsed = parseRows(rows);
       const page = parsed
         .slice(0, query.limit)
-        .map((row) => expenseFromRow(row));
+        .map((row) => expenseFromDetailRow(row));
       const hasMore = parsed.length > query.limit;
       const last = page.at(-1);
       const nextCursor: ExpenseCursor | null =
@@ -280,6 +287,83 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
         sql`select public.expense_draft_delete(${id}::uuid, ${societyId}::uuid)`,
       );
     });
+  }
+
+  /**
+   * Approve one `pending_approval` expense — T070's decision, ADR-0011.
+   *
+   * One call to the `expense_approve()` definer transaction, which owns every rule:
+   * Admin-only, the row locked, the lifecycle and the caller's version checked, then
+   * `approved_by`/`approved_at` stamped and stale rejection metadata cleared, with
+   * the version bumped by the shared trigger. This adapter re-implements none of
+   * that — it hands over the two facts the function needs (the id pair and the
+   * caller's version) and classifies the row back out.
+   *
+   * Returned through `expenseDetailRowSchema` because the function returns the
+   * *whole* row including the workflow stamps: an approval response must describe the
+   * approval, not a row that keeps its `null`s.
+   */
+  async approve(
+    id: ExpenseId,
+    societyId: SocietyId,
+    input: ApproveExpenseRecordInput,
+    actor: UserId,
+  ): Promise<ExpenseRecord> {
+    try {
+      return await this.run(actor, "write", async (tx) => {
+        const rows = await runQuery(
+          tx,
+          sql`
+            select ${EXPENSE_DECISION_COLUMNS}
+              from public.expense_approve(
+                ${id}::uuid,
+                ${societyId}::uuid,
+                ${input.expectedVersion}::int
+              )
+          `,
+        );
+        return approvedOrRejectedRow(rows, "approved expense");
+      });
+    } catch (error: unknown) {
+      throw enrichVersionMismatch(error, input.expectedVersion);
+    }
+  }
+
+  /**
+   * Reject one `pending_approval` expense — T070's other decision, ADR-0011.
+   *
+   * The whole decision is the `expense_reject()` definer transaction:
+   * `pending_approval → draft`, the approval cleared, and
+   * `rejected_by`/`rejected_at`/`rejection_reason` recorded with a reason validated
+   * inside the database as well as here. No financial row is touched, and the
+   * function returns the authoritative row — read through the detail schema because
+   * it carries the stamps the response must show.
+   */
+  async reject(
+    id: ExpenseId,
+    societyId: SocietyId,
+    input: RejectExpenseRecordInput,
+    actor: UserId,
+  ): Promise<ExpenseRecord> {
+    try {
+      return await this.run(actor, "write", async (tx) => {
+        const rows = await runQuery(
+          tx,
+          sql`
+            select ${EXPENSE_DECISION_COLUMNS}
+              from public.expense_reject(
+                ${id}::uuid,
+                ${societyId}::uuid,
+                ${input.expectedVersion}::int,
+                ${input.reason}::text
+              )
+          `,
+        );
+        return approvedOrRejectedRow(rows, "rejected expense");
+      });
+    } catch (error: unknown) {
+      throw enrichVersionMismatch(error, input.expectedVersion);
+    }
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
@@ -406,7 +490,40 @@ export const EXPENSE_COLUMN_EXPRESSIONS: readonly string[] = [
   "updated_at",
 ];
 
-const EXPENSE_COLUMNS = sql.raw(EXPENSE_COLUMN_EXPRESSIONS.join(", "));
+/**
+ * The workflow columns T070 added (migration #31), appended to the base list for
+ * every plain `expenses` select.
+ *
+ * They are a second list rather than five more entries above because the three
+ * definer functions (`expense_publish`/`expense_recalculate`/`expense_void`) return
+ * the *base* row: T070 deliberately does not change their signatures (ADR-0011 D4
+ * adds only the precondition), so the split repository composes its selects from
+ * the base list and these columns are read beside those rows instead.
+ */
+export const EXPENSE_WORKFLOW_COLUMN_EXPRESSIONS: readonly string[] = [
+  "approved_by",
+  "approved_at",
+  "rejected_by",
+  "rejected_at",
+  "rejection_reason",
+];
+
+/** Every column a whole-expense read returns: the base list plus the stamps. */
+export const EXPENSE_DETAIL_COLUMN_EXPRESSIONS: readonly string[] = [
+  ...EXPENSE_COLUMN_EXPRESSIONS,
+  ...EXPENSE_WORKFLOW_COLUMN_EXPRESSIONS,
+];
+
+const EXPENSE_DETAIL_COLUMNS = sql.raw(
+  EXPENSE_DETAIL_COLUMN_EXPRESSIONS.join(", "),
+);
+
+/**
+ * The two decision RPCs (`expense_approve`/`expense_reject`) return exactly the
+ * detail shape — the base columns followed by the workflow columns, in that order —
+ * so they share one column list with the reads rather than a third spelling.
+ */
+export const EXPENSE_DECISION_COLUMNS = EXPENSE_DETAIL_COLUMNS;
 
 export type Row = Record<string, unknown>;
 
@@ -420,7 +537,7 @@ export async function runQuery(
 }
 
 function parseRows(rows: readonly Row[]) {
-  const parsed = expenseRowListSchema.safeParse(rows);
+  const parsed = expenseDetailRowListSchema.safeParse(rows);
   if (!parsed.success) {
     throw unexpectedShapeError("expense");
   }
@@ -432,9 +549,68 @@ function parseSingleRow(rows: readonly Row[], what: string) {
   if (first === undefined) {
     throw unexpectedShapeError(what);
   }
-  const parsed = expenseRowSchema.safeParse(first);
+  const parsed = expenseDetailRowSchema.safeParse(first);
   if (!parsed.success) {
     throw unexpectedShapeError(what);
   }
   return parsed.data;
+}
+
+/** One decision RPC's single row → the flat record, or a bad-shape failure. */
+function approvedOrRejectedRow(
+  rows: readonly Row[],
+  what: string,
+): ExpenseRecord {
+  const [first] = rows;
+  if (first === undefined) {
+    throw unexpectedShapeError(what);
+  }
+  const parsed = expenseDetailRowSchema.safeParse(first);
+  if (!parsed.success) {
+    throw unexpectedShapeError(what);
+  }
+  return expenseFromDetailRow(parsed.data);
+}
+
+/**
+ * The workflow stamps of one row, read in the caller's own transaction — T070.
+ *
+ * The three definer functions that predate T070 (`expense_publish`,
+ * `expense_recalculate`, `expense_void`) return the base row, and T070 deliberately
+ * does not change their signatures (ADR-0011 D4 adds only the publication
+ * precondition). Their responses must still describe the approval state — a
+ * published high-value expense **is** approved, and reporting `null` would be a lie
+ * a client renders as "not approved" — so the five columns are read back in the same
+ * transaction, where the function's own write is already visible. One extra cheap
+ * read on a rare operation, and no second row shape.
+ *
+ * A missing row answers `NO_WORKFLOW_STAMPS` rather than throwing: the caller has
+ * just written that row inside this transaction, so its absence is impossible in
+ * practice, and a refusal here would turn a successful publish into a 500 over a
+ * cosmetic field.
+ */
+export async function readExpenseWorkflowStamps(
+  tx: TransactionContext,
+  id: ExpenseId,
+  societyId: SocietyId,
+): Promise<ExpenseWorkflowStamps> {
+  const rows = await runQuery(
+    tx,
+    sql`
+      select approved_by, approved_at, rejected_by, rejected_at, rejection_reason
+        from public.expenses
+       where id = ${id}::uuid
+         and society_id = ${societyId}::uuid
+       limit 1
+    `,
+  );
+
+  const [first] = rows;
+  if (first === undefined) return NO_WORKFLOW_STAMPS;
+
+  const parsed = expenseWorkflowRowSchema.safeParse(first);
+  if (!parsed.success) {
+    throw unexpectedShapeError("expense workflow stamps");
+  }
+  return expenseWorkflowStampsOf(parsed.data);
 }

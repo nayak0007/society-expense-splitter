@@ -16,6 +16,7 @@ import type postgres from "postgres";
 
 import { EXPENSE_CATEGORY_REPOSITORY } from "../../src/modules/expenses/application/expense-category.tokens";
 import { EXPENSE_SPLIT_REPOSITORY } from "../../src/modules/expenses/application/expense.tokens";
+import { ApproveExpenseUseCase } from "../../src/modules/expenses/application/use-cases/approve-expense.use-case";
 import { CreateExpenseUseCase } from "../../src/modules/expenses/application/use-cases/create-expense.use-case";
 import {
   PublishExpenseUseCase,
@@ -67,6 +68,7 @@ let harness: IntegrationHarness;
 let owner: postgres.Sql;
 let publish: PublishExpenseUseCase;
 let createExpense: CreateExpenseUseCase;
+let approve: ApproveExpenseUseCase;
 let splits: ExpenseSplitRepository;
 
 beforeAll(async () => {
@@ -74,6 +76,7 @@ beforeAll(async () => {
   owner = harness.owner;
   publish = harness.app.get(PublishExpenseUseCase);
   createExpense = harness.app.get(CreateExpenseUseCase);
+  approve = harness.app.get(ApproveExpenseUseCase);
   splits = harness.app.get<ExpenseSplitRepository>(EXPENSE_SPLIT_REPOSITORY);
 }, 60_000);
 
@@ -275,6 +278,24 @@ function publishOf(
   });
 }
 
+/**
+ * Clear T070's approval gate for an expense whose amount is at or above the
+ * society's threshold — `amount_paise >= approval_threshold_paise` (ADR-0011 D3).
+ * The ₹60,000 / 64-flat publication below is far above the 1,000,000-paise
+ * default, so `expense_publish()` refuses it with `APPROVAL_REQUIRED` until an
+ * Admin has decided (D4); D5 lets the creating Admin approve their own expense.
+ * The decision bumps the row to version 2, which the publish must then match.
+ */
+function approveOf(
+  fixture: Fixture,
+  expenseId: ExpenseId,
+  expectedVersion = 1,
+) {
+  return approve.approve(fixture.adminUserId, fixture.societyId, expenseId, {
+    expectedVersion,
+  });
+}
+
 /** The thrown error, whatever shape it arrived in — an AppError or an ExpenseError. */
 async function failureOf(promise: Promise<unknown>): Promise<{
   code: unknown;
@@ -468,7 +489,10 @@ describe("PublishExpenseUseCase against real storage", () => {
       apartmentBasis: "per_sqft_carpet",
     });
 
-    const publication = await publishOf(big, expenseId);
+    // ₹60,000 is above the default threshold, so T070's gate applies: approve
+    // first (D5 self-approval) and publish against the incremented version.
+    await approveOf(big, expenseId);
+    const publication = await publishOf(big, expenseId, { expectedVersion: 2 });
 
     const rows = await splitRows(expenseId);
     expect(rows).toHaveLength(64);

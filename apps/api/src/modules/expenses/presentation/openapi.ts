@@ -89,13 +89,15 @@ export function ApiExpensePreviewErrors(): ClassDecorator & MethodDecorator {
  * Member who may compose a draft cannot mint a bill, which is the one cell this
  * endpoint exists to enforce.
  *
- * The 409 carries three different refusals and names all three, because a client
+ * The 409 carries four different refusals and names all four, because a client
  * acts differently on each: `VERSION_MISMATCH` (reload — `details[0].current` has the
  * version), `INVALID_TRANSITION` (the expense is already published or void; there is
- * nothing to retry) and `IDEMPOTENCY_KEY_REUSE` (the key names a different request;
- * use a new one). A 422 is the conservation/roster class: `SPLIT_MISMATCH` (the
- * allocations do not sum) and the flagged-flat refusal, whose `details` list one
- * entry per flat with nobody to charge.
+ * nothing to retry), `IDEMPOTENCY_KEY_REUSE` (the key names a different request; use
+ * a new one) and — since T070 — `APPROVAL_REQUIRED` (the amount is at or above the
+ * society's current approval threshold and the row carries no live approval; have an
+ * Admin approve it, then publish). A 422 is the conservation/roster class:
+ * `SPLIT_MISMATCH` (the allocations do not sum) and the flagged-flat refusal, whose
+ * `details` list one entry per flat with nobody to charge.
  */
 export function ApiExpensePublishErrors(): ClassDecorator & MethodDecorator {
   return ApiErrorResponses({
@@ -104,7 +106,7 @@ export function ApiExpensePublishErrors(): ClassDecorator & MethodDecorator {
     forbidden:
       "An active member whose role does not hold `expense.publish`: Admin or Treasurer. A Committee Member's draft-only grant does not reach this route.",
     conflict:
-      "The expense moved since the caller read it (`VERSION_MISMATCH`, with `details[0].current` carrying the current version); the expense is already published or void (`INVALID_TRANSITION`); or the `Idempotency-Key` was already used for a different request (`IDEMPOTENCY_KEY_REUSE`).",
+      "The expense moved since the caller read it (`VERSION_MISMATCH`, with `details[0].current` carrying the current version); the expense is already published or void (`INVALID_TRANSITION`); the `Idempotency-Key` was already used for a different request (`IDEMPOTENCY_KEY_REUSE`); or the amount meets the society's current approval threshold and the row is not approved (`APPROVAL_REQUIRED` — an Admin must approve it before publication, ADR-0011 D4).",
   });
 }
 
@@ -179,6 +181,72 @@ export function ApiExpenseVoidErrors(): ClassDecorator & MethodDecorator {
       "An active member whose role does not hold `expense.void` for a published expense: Admin or Treasurer. A Committee Member's grant on that cell covers their own drafts only, and a draft is not voidable.",
     conflict:
       "The expense moved since the caller read it (`VERSION_MISMATCH`, with `details[0].current` carrying the current version); the expense is not published, or has already been voided (`INVALID_TRANSITION` — void is terminal and a second attempt is never treated as a replay); or an obligation of the expense is in a state this app cannot reverse (`DUE_STATE_UNSUPPORTED`, and nothing was written).",
+  });
+}
+
+/**
+ * The error responses T068's revision-history read can return.
+ *
+ * A read, so no state can conflict: the 409 copy says so rather than documenting a
+ * status a client might retry on. The 403 is the catalogue's narrowest read cell —
+ * `expense.view` is every role but Guest — and the history is deliberately readable
+ * by the same members the expense itself is visible to: the "edited" chip and its
+ * tap-through are the transparency feature (PRD §3.5.3), not an officer-only audit
+ * log. An expense with no revisions answers an empty list, never a 404.
+ */
+/**
+ * The error responses T070's approve route can return — ADR-0011.
+ *
+ * The 403 is `expense.approve` itself — a **full** Admin cell, no qualification —
+ * and that is deliberately narrower than the draft routes' description: a Treasurer
+ * or a Committee Member cannot decide an expense, and the matrix's cell says so
+ * rather than a self-approval rule (an Admin **may** approve their own expense, so a
+ * client that rendered "you cannot approve what you created" would be wrong).
+ *
+ * The 404 is the module's usual indistinguishable-cases sentence with an expense
+ * added: an id outside the resolved society answers exactly as one that never
+ * existed (PRD T041).
+ *
+ * The 409 carries two refusals and names both, because a client acts differently on
+ * each: `VERSION_MISMATCH` (reload — `details[0].current` has the version) and
+ * `INVALID_TRANSITION` — the row is not `pending_approval`, or it has already been
+ * approved, so a second attempt is a refusal and never a quiet replay. Approval
+ * writes no financial row, so no 422 class is produced here.
+ */
+export function ApiExpenseApproveErrors(): ClassDecorator & MethodDecorator {
+  return ApiErrorResponses({
+    notFound:
+      "No such society or expense — or one the caller is not an active member of. This API deliberately does not distinguish these (PRD T041).",
+    forbidden:
+      "An active member whose role does not hold `expense.approve`: Admin only. A Treasurer or Committee Member cannot decide an expense — and an Admin may approve their own, so this is never a self-approval rule.",
+    conflict:
+      "The expense moved since the caller read it (`VERSION_MISMATCH`, with `details[0].current` carrying the current version); the expense is not awaiting approval, or has already been approved (`INVALID_TRANSITION` — a second approval is never treated as a replay).",
+  });
+}
+
+/**
+ * The error responses T070's reject route can return — ADR-0011.
+ *
+ * The 403 is the same **full** Admin cell the approve route enforces
+ * (`expense.approve`): rejecting a high-value expense is the other half of the same
+ * decision, so a role that cannot approve cannot reject either.
+ *
+ * The 404 is the module's usual indistinguishable-cases sentence with an expense
+ * added, and the 409 carries the same pair as approve — `VERSION_MISMATCH` (reload)
+ * and `INVALID_TRANSITION` (the row is not `pending_approval`, so there is nothing to
+ * reject). The 422 is the reason class: `void_reason_too_short` for a reason under
+ * ten characters after trimming, and `VALIDATION_ERROR` for control characters, both
+ * on `field: "reason"` — the same shape the void route documents, because a
+ * rejection and a void are the same kind of operator prose (ADR-0011 D2).
+ */
+export function ApiExpenseRejectErrors(): ClassDecorator & MethodDecorator {
+  return ApiErrorResponses({
+    notFound:
+      "No such society or expense — or one the caller is not an active member of. This API deliberately does not distinguish these (PRD T041).",
+    forbidden:
+      "An active member whose role does not hold `expense.approve`: Admin only. Rejecting is the other half of the approval decision, so a Treasurer or Committee Member cannot do it either.",
+    conflict:
+      "The expense moved since the caller read it (`VERSION_MISMATCH`, with `details[0].current` carrying the current version); or the expense is not awaiting approval, so there is nothing to reject (`INVALID_TRANSITION`).",
   });
 }
 

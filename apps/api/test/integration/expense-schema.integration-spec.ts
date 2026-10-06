@@ -1789,9 +1789,26 @@ describe("the documented Down block", () => {
          where society_id = ${society.societyId}::uuid
       `;
       expect(again!.count).toBe("19");
+
+      // …and re-apply every later file **again**, because the re-application just above
+      // restored migration #19's own policies. `source` unconditionally drops and
+      // recreates `expenses_insert_author`/`expenses_update_author`, so applying it a
+      // second time undoes what #31 widened them to; and because postgres.js *commits*
+      // a `begin()` whose callback resolves (it rolls back only on a throw), this
+      // rehearsal is not rolled back — the container keeps whatever this block left.
+      // Without this final re-apply the shared schema would end one migration behind
+      // HEAD, and a spec that ran afterwards would see the narrowed insert policy and
+      // refuse a Committee Member's `pending_approval` insert (measured:
+      // `expense-draft.integration-spec.ts` did, in every full-suite run).
+      for (const later of laterFiles) {
+        await tx.unsafe(
+          readFileSync(join(resolveMigrationsDir(), later), "utf8"),
+        );
+      }
     });
 
-    // Rolled back, so this suite's shared schema is exactly as the other specs left it.
+    // The rehearsal commits (see the note above), so this asserts it left the shared
+    // schema at HEAD: the three tables exist for the specs that follow.
     const [catalogue] = await owner<{ count: string }[]>`
       select count(*)::text as count from pg_class
        where relname in ('expenses', 'expense_splits', 'expense_categories')

@@ -6,13 +6,14 @@ import {
   asExpenseId,
   asMemberId,
   asSocietyId,
+  ExpenseError,
   expenseError,
   isExpenseError,
   isExpenseStatus,
   paise,
 } from "@ses/domain";
 import { Money } from "@ses/domain";
-import type { ExpenseError, ExpenseRecord } from "@ses/domain";
+import type { ExpenseRecord, MemberId } from "@ses/domain";
 import { z } from "zod";
 
 import {
@@ -75,6 +76,73 @@ export type ExpenseRow = z.infer<typeof expenseRowSchema>;
 export const expenseRowListSchema = z.array(expenseRowSchema);
 
 /**
+ * The workflow columns T070 added — selected only where they exist.
+ *
+ * They are a schema of their own rather than five more keys on
+ * `expenseRowSchema` because the three definer functions
+ * (`expense_publish`/`expense_recalculate`/`expense_void`) return the *base* row:
+ * their signatures predate T070 and T070 deliberately does not change them (the
+ * publication precondition is the only edit, ADR-0011 D4). A plain `expenses`
+ * select carries the stamps, an RPC row does not, and the two are told apart by
+ * which schema the caller parsed with — never by a silent default.
+ */
+export const expenseWorkflowRowSchema = z.object({
+  approved_by: z.string().nullable(),
+  approved_at: nullableTimestampSchema,
+  rejected_by: z.string().nullable(),
+  rejected_at: nullableTimestampSchema,
+  rejection_reason: z.string().nullable(),
+});
+export type ExpenseWorkflowRow = z.infer<typeof expenseWorkflowRowSchema>;
+
+/** The base row plus its workflow stamps — what a plain `expenses` select returns. */
+export const expenseDetailRowSchema = expenseRowSchema.extend(
+  expenseWorkflowRowSchema.shape,
+);
+export type ExpenseDetailRow = z.infer<typeof expenseDetailRowSchema>;
+
+export const expenseDetailRowListSchema = z.array(expenseDetailRowSchema);
+
+/** The five stamps in the module's own vocabulary. */
+export interface ExpenseWorkflowStamps {
+  readonly approvedBy: MemberId | null;
+  readonly approvedAt: string | null;
+  readonly rejectedBy: MemberId | null;
+  readonly rejectedAt: string | null;
+  readonly rejectionReason: string | null;
+}
+
+/**
+ * "This row carries no workflow stamps" — the honest reading of an RPC row that
+ * does not return them, never a claim that the row is unapproved.
+ *
+ * The three RPC paths do not use it for their response: they read the five columns
+ * back in the same transaction (`readExpenseWorkflowStamps`) so a publish/void/
+ * recalculation response describes the approval state instead of dropping it. It
+ * exists for the parse of a row that genuinely has no such columns.
+ */
+export const NO_WORKFLOW_STAMPS: ExpenseWorkflowStamps = Object.freeze({
+  approvedBy: null,
+  approvedAt: null,
+  rejectedBy: null,
+  rejectedAt: null,
+  rejectionReason: null,
+});
+
+/** A row that carries the stamps → the module's own shape. */
+export function expenseWorkflowStampsOf(
+  row: ExpenseWorkflowRow,
+): ExpenseWorkflowStamps {
+  return {
+    approvedBy: row.approved_by === null ? null : asMemberId(row.approved_by),
+    approvedAt: row.approved_at,
+    rejectedBy: row.rejected_by === null ? null : asMemberId(row.rejected_by),
+    rejectedAt: row.rejected_at,
+    rejectionReason: row.rejection_reason,
+  };
+}
+
+/**
  * A row that did not match its schema. Always a bug on one side of the boundary (a
  * renamed column, a new nullable field), never something the user did — so the
  * copy stays generic and the actionable part is a hint for the operator.
@@ -85,8 +153,48 @@ export function unexpectedShapeError(what: string): ExpenseError {
   });
 }
 
-/** One row → the flat record the T065 use cases read and return. */
-export function expenseFromRow(row: ExpenseRow): ExpenseRecord {
+/**
+ * Adds the version the caller stated to a lock refusal, so the SAD §7.11 details
+ * carry both numbers (`received` and `current`).
+ *
+ * The definer functions know the *current* version (they read the row under the
+ * lock) and not what the caller expected; the repository knows the input. Enriching
+ * here is where the two facts meet, and it is deliberately not folded into the
+ * classifier — that function reads a database error, which has no `expectedVersion`
+ * in it. Shared by all five RPC-backed write paths (`publish`, `recalculate`,
+ * `voidExpense`, `approve`, `reject`) so the shape cannot differ between them.
+ */
+export function enrichVersionMismatch(
+  error: unknown,
+  expectedVersion: number,
+): unknown {
+  if (!isExpenseError(error) || error.code !== "version_mismatch") {
+    return error;
+  }
+  if (typeof error.details?.["expectedVersion"] === "number") {
+    return error;
+  }
+  return new ExpenseError(error.code, error.message, {
+    ...error.details,
+    field: "expectedVersion",
+    expectedVersion,
+  });
+}
+
+/**
+ * One row → the flat record the T065 use cases read and return.
+ *
+ * `workflow` is the second argument rather than a fifth `readonly` on the row
+ * because the row shape is the database's and the stamps are T070's concern: an
+ * RPC row is parsed by `expenseRowSchema` and its stamps are read beside it, and a
+ * plain select is parsed by `expenseDetailRowSchema` and passes them in. With the
+ * default the function answers "no stamps", which is exactly what a row without
+ * the columns carries.
+ */
+export function expenseFromRow(
+  row: ExpenseRow,
+  workflow: ExpenseWorkflowStamps = NO_WORKFLOW_STAMPS,
+): ExpenseRecord {
   return {
     id: asExpenseId(row.id),
     societyId: asSocietyId(row.society_id),
@@ -109,10 +217,20 @@ export function expenseFromRow(row: ExpenseRow): ExpenseRecord {
     voidedAt: row.voided_at,
     voidedBy: row.voided_by === null ? null : asMemberId(row.voided_by),
     voidReason: row.void_reason,
+    approvedBy: workflow.approvedBy,
+    approvedAt: workflow.approvedAt,
+    rejectedBy: workflow.rejectedBy,
+    rejectedAt: workflow.rejectedAt,
+    rejectionReason: workflow.rejectionReason,
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/** A row that carries the stamps → the flat record, in one call. */
+export function expenseFromDetailRow(row: ExpenseDetailRow): ExpenseRecord {
+  return expenseFromRow(row, expenseWorkflowStampsOf(row));
 }
 
 /**
@@ -124,6 +242,16 @@ export function expenseFromRow(row: ExpenseRow): ExpenseRecord {
  */
 export const RAISED_EXCEPTION = {
   expenseNotFound: "EXPENSE_NOT_FOUND",
+  // T070's approval workflow (ADR-0011) — the guard, the publication precondition
+  // and the two decision RPCs.
+  approvalRequired: "APPROVAL_REQUIRED",
+  expenseApproveForbidden: "EXPENSE_APPROVE_FORBIDDEN",
+  expenseNotApprovable: "EXPENSE_NOT_APPROVABLE",
+  expenseAlreadyApproved: "EXPENSE_ALREADY_APPROVED",
+  expenseRejectForbidden: "EXPENSE_REJECT_FORBIDDEN",
+  expenseNotRejectable: "EXPENSE_NOT_REJECTABLE",
+  expenseRejectionReasonTooShort: "EXPENSE_REJECTION_REASON_TOO_SHORT",
+  expenseRejectionReasonInvalid: "EXPENSE_REJECTION_REASON_INVALID",
   expenseNotOwnDraft: "EXPENSE_NOT_OWN_DRAFT",
   expenseNotDraft: "EXPENSE_NOT_DRAFT",
   expenseHasSplits: "EXPENSE_HAS_SPLITS",
@@ -199,6 +327,83 @@ export function expenseErrorFromPostgres(
       );
 
     case SQLSTATE.raised:
+      // T070 / ADR-0011. Placed first among the `P0001` branches because it is the
+      // one every at-or-above-threshold publication can raise, from two different
+      // writers (the definer function's precondition and the BEFORE UPDATE guard),
+      // and both must answer identically: 409 with the stable `APPROVAL_REQUIRED`
+      // detail, never a 500 and never "something went wrong".
+      if (message.includes(RAISED_EXCEPTION.approvalRequired)) {
+        return expenseError(
+          "approval_required",
+          "This expense needs an Admin's approval before it can be published.",
+          withHint(),
+        );
+      }
+      if (message.includes(RAISED_EXCEPTION.expenseApproveForbidden)) {
+        return expenseError(
+          "forbidden",
+          "Only a society Admin can approve an expense.",
+          withHint(),
+        );
+      }
+      if (message.includes(RAISED_EXCEPTION.expenseRejectForbidden)) {
+        return expenseError(
+          "forbidden",
+          "Only a society Admin can reject an expense.",
+          withHint(),
+        );
+      }
+      if (message.includes(RAISED_EXCEPTION.expenseAlreadyApproved)) {
+        return expenseError(
+          "invalid_transition",
+          "This expense has already been approved.",
+          { ...withHint(), to: "approved" },
+        );
+      }
+      if (message.includes(RAISED_EXCEPTION.expenseNotApprovable)) {
+        // The refused *state* travels in `DETAIL` (the function read it under the
+        // row lock), the same shape `EXPENSE_NOT_PUBLISHABLE` uses.
+        const from = candidate.detail;
+        return expenseError(
+          "invalid_transition",
+          "Only an expense awaiting approval can be approved.",
+          {
+            ...withHint(),
+            to: "approved",
+            ...(typeof from === "string" && from !== "" ? { from } : {}),
+          },
+        );
+      }
+      if (message.includes(RAISED_EXCEPTION.expenseNotRejectable)) {
+        const from = candidate.detail;
+        return expenseError(
+          "invalid_transition",
+          "Only an expense awaiting approval can be rejected.",
+          {
+            ...withHint(),
+            to: "draft",
+            ...(typeof from === "string" && from !== "" ? { from } : {}),
+          },
+        );
+      }
+      if (
+        message.includes(RAISED_EXCEPTION.expenseRejectionReasonTooShort) ||
+        message.includes(RAISED_EXCEPTION.expenseRejectionReasonInvalid)
+      ) {
+        // The definer function's own re-check of the domain's rule. The message is
+        // the domain's wording so the two paths cannot be told apart, and
+        // `field: "reason"` is the wire name the form highlights.
+        const tooShort = message.includes(
+          RAISED_EXCEPTION.expenseRejectionReasonTooShort,
+        );
+        return expenseError(
+          tooShort ? "void_reason_too_short" : "validation",
+          tooShort
+            ? "Give a reason of at least 10 characters — the creator sees it."
+            : "The rejection reason contains characters that are not allowed.",
+          { ...withHint(), field: "reason" },
+        );
+      }
       if (message.includes(RAISED_EXCEPTION.expenseNotOwnDraft)) {
         return expenseError(
           "forbidden",

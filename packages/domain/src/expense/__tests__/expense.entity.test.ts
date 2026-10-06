@@ -11,8 +11,10 @@ import { Money, weight } from "../../shared/money.vo";
 import type { Result } from "../../shared/result";
 import {
   createExpenseDate,
+  createExpenseRejectionReason,
   createExpenseTitle,
   createVoidReason,
+  EXPENSE_REJECTION_REASON_MIN_LENGTH,
   EXPENSE_STATUSES,
   EXPENSE_TRANSITIONS,
   Expense,
@@ -138,6 +140,11 @@ function reconstitutionProps(
     voidedAt: null,
     voidedBy: null,
     voidReason: null,
+    approvedBy: null,
+    approvedAt: null,
+    rejectedBy: null,
+    rejectedAt: null,
+    rejectionReason: null,
     createdAt: "2026-09-30T10:00:00.000Z",
     updatedAt: "2026-09-30T10:00:00.000Z",
     version: 1,
@@ -162,7 +169,10 @@ function stateOf(expense: Expense) {
 function expectInvalidTransition(
   result: Result<unknown, ExpenseError>,
   from: ExpenseStatus,
-  to: ExpenseStatus,
+  // The target is a `string` rather than an `ExpenseStatus`: a decision that does
+  // not move the row (`approve()`) deliberately reports a symbolic label such as
+  // `"approved"` that is **not** one of the four stored statuses (ADR-0011 D1).
+  to: string,
 ): void {
   expect(result.ok).toBe(false);
   if (result.ok) return;
@@ -196,10 +206,12 @@ describe("the expense vocabulary", () => {
   it("declares the transition matrix the documents describe", () => {
     // Draft publishes directly (PRD §3.4) or submits for approval (PRD §2.2);
     // published is reachable from either state (SAD §3.2's sketch); void is only
-    // reachable from published (PRD §3.5) and is terminal.
+    // reachable from published (PRD §3.5) and is terminal. `pending_approval →
+    // draft` is T070's edge (ADR-0011 D1/D8): a rejected expense, or an edit that
+    // takes the amount below the threshold, returns to being a draft.
     expect(EXPENSE_TRANSITIONS).toEqual({
       draft: ["pending_approval", "published"],
-      pending_approval: ["published"],
+      pending_approval: ["draft", "published"],
       published: ["void"],
       void: [],
     });
@@ -376,6 +388,21 @@ describe("submitForApproval", () => {
     expect(expense.createdAt).toBe("2026-10-01T10:00:00.000Z");
   });
 
+  it("clears the rejection it answers when a rejected draft is resubmitted", () => {
+    const expense = makeDraft();
+    expect(expense.submitForApproval(CLOCK).ok).toBe(true);
+    expect(expense.reject("The quote does not match.", MEMBER, CLOCK).ok).toBe(
+      true,
+    );
+
+    expect(expense.submitForApproval(LATER).ok).toBe(true);
+
+    expect(expense.status).toBe("pending_approval");
+    expect(expense.rejectedBy).toBeNull();
+    expect(expense.rejectedAt).toBeNull();
+    expect(expense.rejectionReason).toBeNull();
+  });
+
   it("refuses a draft that is already pending approval", () => {
     const expense = makeDraft();
     expect(expense.submitForApproval(CLOCK).ok).toBe(true);
@@ -402,6 +429,164 @@ describe("submitForApproval", () => {
       expense.submitForApproval(CLOCK),
       "void",
       "pending_approval",
+    );
+  });
+});
+
+describe("approve — Roadmap T070", () => {
+  /** A draft moved into the queue, the state approval starts from. */
+  function makePending(): Expense {
+    const expense = makeDraft();
+    const submitted = expense.submitForApproval(CLOCK);
+    if (!submitted.ok)
+      throw new Error(`makePending: ${submitted.error.message}`);
+    return expense;
+  }
+
+  it("stamps the approver and the instant, and keeps the status awaiting publication", () => {
+    const expense = makePending();
+
+    const approved = expense.approve(OTHER_MEMBER, CLOCK);
+
+    expect(approved.ok).toBe(true);
+    // Approval is a decision, not a publication: the lifecycle does not move and
+    // the transaction is not run (ADR-0011).
+    expect(expense.status).toBe("pending_approval");
+    expect(expense.approvedBy).toBe(OTHER_MEMBER);
+    expect(expense.approvedAt).toBe(CLOCK.nowIso());
+    expect(expense.publishedAt).toBeNull();
+    expect(expense.splits).toEqual([]);
+    expect(expense.version).toBe(3);
+  });
+
+  it("clears rejection metadata so the two decisions cannot coexist", () => {
+    const expense = makePending();
+    const rejected = expense.reject("The quote does not match.", MEMBER, CLOCK);
+    if (!rejected.ok) throw new Error(`reject: ${rejected.error.message}`);
+    const resubmitted = expense.submitForApproval(LATER);
+    if (!resubmitted.ok)
+      throw new Error(`resubmit: ${resubmitted.error.message}`);
+
+    const approved = expense.approve(OTHER_MEMBER, LATER);
+
+    expect(approved.ok).toBe(true);
+    expect(expense.rejectedBy).toBeNull();
+    expect(expense.rejectedAt).toBeNull();
+    expect(expense.rejectionReason).toBeNull();
+    expect(expense.approvedBy).toBe(OTHER_MEMBER);
+  });
+
+  it.each([
+    ["a draft", () => makeDraft(), "draft"],
+    ["a published expense", () => makePublished(), "published"],
+    ["a voided expense", () => makeVoided(), "void"],
+  ] as const)("refuses %s", (_label, make, from) => {
+    const expense = make();
+
+    const result = expense.approve(OTHER_MEMBER, CLOCK);
+
+    expectInvalidTransition(result, from, "approved");
+    expect(expense.approvedBy).toBeNull();
+    expect(expense.approvedAt).toBeNull();
+  });
+});
+
+describe("reject — Roadmap T070", () => {
+  function makePending(): Expense {
+    const expense = makeDraft();
+    const submitted = expense.submitForApproval(CLOCK);
+    if (!submitted.ok)
+      throw new Error(`makePending: ${submitted.error.message}`);
+    return expense;
+  }
+
+  const REASON = "The vendor invoice does not match the quote.";
+
+  it("returns the expense to draft with the three stamps and the approval cleared", () => {
+    const expense = makePending();
+    const approved = expense.approve(OTHER_MEMBER, CLOCK);
+    if (!approved.ok) throw new Error(`approve: ${approved.error.message}`);
+
+    const rejected = expense.reject(REASON, MEMBER, LATER);
+
+    expect(rejected.ok).toBe(true);
+    // There is no `rejected` status: a rejection is a resubmittable draft (D1).
+    expect(expense.status).toBe("draft");
+    expect(expense.rejectedBy).toBe(MEMBER);
+    expect(expense.rejectedAt).toBe(LATER.nowIso());
+    expect(expense.rejectionReason).toBe(REASON);
+    expect(expense.approvedBy).toBeNull();
+    expect(expense.approvedAt).toBeNull();
+    expect(expense.version).toBe(4);
+  });
+
+  it("stores the trimmed reason and accepts exactly the minimum length", () => {
+    const expense = makePending();
+    const ten = "1234567890";
+
+    const rejected = expense.reject(`   ${ten}   `, MEMBER, CLOCK);
+
+    expect(rejected.ok).toBe(true);
+    expect(expense.rejectionReason).toBe(ten);
+    expect(EXPENSE_REJECTION_REASON_MIN_LENGTH).toBe(10);
+  });
+
+  it("validates the reason before the transition — the field error wins", () => {
+    // A published expense cannot be rejected, but a nine-character reason is still
+    // answered as a field error: "what should I type" is true in every state, and
+    // it matches `void_()`'s order.
+    const expense = makePublished();
+
+    const result = expense.reject("Too short", MEMBER, CLOCK);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("void_reason_too_short");
+    expect(result.error.details?.field).toBe("reason");
+  });
+
+  it.each([
+    ["a draft", () => makeDraft(), "draft"],
+    ["a published expense", () => makePublished(), "published"],
+    ["a voided expense", () => makeVoided(), "void"],
+  ] as const)("refuses %s", (_label, make, from) => {
+    const expense = make();
+
+    const result = expense.reject(REASON, MEMBER, CLOCK);
+
+    expectInvalidTransition(result, from, "draft");
+  });
+});
+
+describe("revertToDraft — Roadmap T070", () => {
+  it("returns an unneeded submission to draft and clears the approval, recording no rejection", () => {
+    const expense = makeDraft();
+    const submitted = expense.submitForApproval(CLOCK);
+    if (!submitted.ok) throw new Error(`submit: ${submitted.error.message}`);
+    const approved = expense.approve(OTHER_MEMBER, CLOCK);
+    if (!approved.ok) throw new Error(`approve: ${approved.error.message}`);
+
+    const reverted = expense.revertToDraft(LATER);
+
+    expect(reverted.ok).toBe(true);
+    expect(expense.status).toBe("draft");
+    expect(expense.approvedBy).toBeNull();
+    expect(expense.approvedAt).toBeNull();
+    // Nobody rejected anything: this flip is the creator's edit dropping the amount
+    // below the threshold (D8).
+    expect(expense.rejectedBy).toBeNull();
+    expect(expense.rejectionReason).toBeNull();
+  });
+
+  it("refuses anything that is not awaiting approval", () => {
+    const draft = makeDraft();
+    const published = makePublished();
+
+    expectInvalidTransition(draft.revertToDraft(CLOCK), "draft", "draft");
+    expectInvalidTransition(
+      published.revertToDraft(CLOCK),
+      "published",
+      "draft",
     );
   });
 });
@@ -454,6 +639,40 @@ describe("edit — Roadmap T065", () => {
     expect(expense.status).toBe("pending_approval");
     expect(expense.amount.paise).toBe(999n);
     expect(expense.version).toBe(3);
+  });
+
+  it("invalidates an approval — D8: a decision is bound to the content it decided", () => {
+    const expense = makeDraft();
+    expect(expense.submitForApproval(CLOCK).ok).toBe(true);
+    expect(expense.approve(OTHER_MEMBER, CLOCK).ok).toBe(true);
+    expect(expense.approvedBy).toBe(OTHER_MEMBER);
+
+    expect(
+      expense.edit({ title: "A different expense entirely" }, LATER).ok,
+    ).toBe(true);
+
+    // Any successful edit invalidates the approval — conservatively, for *any*
+    // change, not only a money change; the call site then re-routes the row from
+    // the new amount against the current threshold.
+    expect(expense.approvedBy).toBeNull();
+    expect(expense.approvedAt).toBeNull();
+    expect(expense.status).toBe("pending_approval");
+  });
+
+  it("leaves no approval on a rejected draft, and an edit keeps the rejection until it is resubmitted", () => {
+    const expense = makeDraft();
+    expect(expense.submitForApproval(CLOCK).ok).toBe(true);
+    expect(expense.reject("The quote does not match.", MEMBER, CLOCK).ok).toBe(
+      true,
+    );
+
+    expect(expense.edit({ title: "Corrected" }, LATER).ok).toBe(true);
+
+    // The rejection stamps survive an ordinary draft edit: they are the record of
+    // the Admin's decision, and only a resubmission clears them (D1/D2).
+    expect(expense.rejectionReason).toBe("The quote does not match.");
+    expect(expense.rejectedBy).toBe(MEMBER);
+    expect(expense.approvedBy).toBeNull();
   });
 
   it("refuses a published expense and changes nothing", () => {
@@ -972,6 +1191,83 @@ describe("Expense.reconstitute", () => {
     if (!rebuilt.ok) expect(rebuilt.error.details?.field).toBe("status");
   });
 
+  it("rebuilds an approved expense awaiting publication", () => {
+    const rebuilt = Expense.reconstitute(
+      reconstitutionProps({
+        status: "pending_approval",
+        approvedBy: OTHER_MEMBER,
+        approvedAt: "2026-09-30T12:00:00.000Z",
+        version: 2,
+      }),
+    );
+
+    expect(rebuilt.ok).toBe(true);
+    if (!rebuilt.ok) return;
+    expect(rebuilt.value.approvedBy).toBe(OTHER_MEMBER);
+    expect(rebuilt.value.approvedAt).toBe("2026-09-30T12:00:00.000Z");
+    expect(rebuilt.value.rejectedAt).toBeNull();
+  });
+
+  it("rebuilds a rejected draft", () => {
+    const rebuilt = Expense.reconstitute(
+      reconstitutionProps({
+        status: "draft",
+        rejectedBy: OTHER_MEMBER,
+        rejectedAt: "2026-09-30T12:00:00.000Z",
+        rejectionReason: "The quote does not match.",
+        version: 2,
+      }),
+    );
+
+    expect(rebuilt.ok).toBe(true);
+    if (!rebuilt.ok) return;
+    expect(rebuilt.value.status).toBe("draft");
+    expect(rebuilt.value.rejectionReason).toBe("The quote does not match.");
+  });
+
+  it("refuses a half-written approval", () => {
+    const rebuilt = Expense.reconstitute(
+      reconstitutionProps({
+        status: "pending_approval",
+        approvedBy: OTHER_MEMBER,
+        approvedAt: null,
+      }),
+    );
+
+    expect(rebuilt.ok).toBe(false);
+    if (!rebuilt.ok) expect(rebuilt.error.code).toBe("invariant");
+  });
+
+  it("refuses a rejection that lost its reason", () => {
+    const rebuilt = Expense.reconstitute(
+      reconstitutionProps({
+        status: "draft",
+        rejectedBy: OTHER_MEMBER,
+        rejectedAt: "2026-09-30T12:00:00.000Z",
+        rejectionReason: null,
+      }),
+    );
+
+    expect(rebuilt.ok).toBe(false);
+    if (!rebuilt.ok) expect(rebuilt.error.code).toBe("invariant");
+  });
+
+  it("refuses a row that is approved and rejected at once", () => {
+    const rebuilt = Expense.reconstitute(
+      reconstitutionProps({
+        status: "pending_approval",
+        approvedBy: MEMBER,
+        approvedAt: "2026-09-30T12:00:00.000Z",
+        rejectedBy: OTHER_MEMBER,
+        rejectedAt: "2026-10-01T12:00:00.000Z",
+        rejectionReason: "The quote does not match.",
+      }),
+    );
+
+    expect(rebuilt.ok).toBe(false);
+    if (!rebuilt.ok) expect(rebuilt.error.code).toBe("invariant");
+  });
+
   it("refuses a status the enum does not have", () => {
     const rebuilt = Expense.reconstitute(
       reconstitutionProps({
@@ -1014,6 +1310,23 @@ describe("the exported field rules", () => {
   it("createVoidReason refuses nine characters and accepts ten", () => {
     expect(createVoidReason("123456789").ok).toBe(false);
     expect(createVoidReason("1234567890").ok).toBe(true);
+  });
+
+  it("createExpenseRejectionReason reuses the void reason's rule, with the reject route's field", () => {
+    const short = createExpenseRejectionReason("123456789");
+    expect(short.ok).toBe(false);
+    if (!short.ok) {
+      expect(short.error.code).toBe("void_reason_too_short");
+      expect(short.error.details?.field).toBe("reason");
+    }
+
+    const exact = createExpenseRejectionReason("  1234567890  ");
+    expect(exact.ok).toBe(true);
+    if (exact.ok) expect(exact.value).toBe("1234567890");
+
+    const control = createExpenseRejectionReason("a\u0000b rejection reason");
+    expect(control.ok).toBe(false);
+    if (!control.ok) expect(control.error.code).toBe("validation");
   });
 
   it("expenseErrorCode reports unknown for anything else", () => {

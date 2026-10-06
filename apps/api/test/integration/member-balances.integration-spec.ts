@@ -29,6 +29,7 @@ import { resolveMigrationsDir } from "../../src/infrastructure/database/migratio
 import type { TransactionContext } from "../../src/infrastructure/database/unit-of-work";
 import { EXPENSE_CATEGORY_REPOSITORY } from "../../src/modules/expenses/application/expense-category.tokens";
 import { EXPENSE_SPLIT_REPOSITORY } from "../../src/modules/expenses/application/expense.tokens";
+import { ApproveExpenseUseCase } from "../../src/modules/expenses/application/use-cases/approve-expense.use-case";
 import { CreateExpenseUseCase } from "../../src/modules/expenses/application/use-cases/create-expense.use-case";
 import {
   PublishExpenseUseCase,
@@ -80,6 +81,7 @@ let harness: IntegrationHarness;
 let owner: postgres.Sql;
 let publish: PublishExpenseUseCase;
 let createExpense: CreateExpenseUseCase;
+let approve: ApproveExpenseUseCase;
 let splits: ExpenseSplitRepository;
 
 beforeAll(async () => {
@@ -87,6 +89,7 @@ beforeAll(async () => {
   owner = harness.owner;
   publish = harness.app.get(PublishExpenseUseCase);
   createExpense = harness.app.get(CreateExpenseUseCase);
+  approve = harness.app.get(ApproveExpenseUseCase);
   splits = harness.app.get<ExpenseSplitRepository>(EXPENSE_SPLIT_REPOSITORY);
 }, 60_000);
 
@@ -426,6 +429,25 @@ function publishOf(
   });
 }
 
+/**
+ * Clear T070's approval gate for a fixture whose amount is at or above the
+ * society's threshold — `amount_paise >= approval_threshold_paise` (ADR-0011 D3),
+ * which the default 1,000,000-paise threshold makes true for the ₹60,000 / 64-flat
+ * case below. Without an Admin's decision `expense_publish()` writes nothing and
+ * raises `APPROVAL_REQUIRED` (D4), so this suite's publication test must approve
+ * first. The creating Admin approves their own expense, which D5 explicitly
+ * permits, and the approval increments the version the publish must then match.
+ */
+function approveOf(
+  fixture: Fixture,
+  expenseId: ExpenseId,
+  expectedVersion = 1,
+) {
+  return approve.approve(fixture.adminUserId, fixture.societyId, expenseId, {
+    expectedVersion,
+  });
+}
+
 async function failureOf(
   promise: Promise<unknown>,
 ): Promise<{ code: unknown; message: string }> {
@@ -664,7 +686,11 @@ describe("publishing writes the receivable", () => {
       apartmentBasis: "per_sqft_carpet",
     });
 
-    await publishOf(big, expenseId);
+    // ₹60,000 is far above the default threshold, so T070's gate applies: the
+    // Admin approves the expense they created (D5) and the approval bumps the
+    // row to version 2, which the publish now has to match.
+    await approveOf(big, expenseId);
+    await publishOf(big, expenseId, { expectedVersion: 2 });
 
     // The Roadmap's own test, now including the receivable half. Every number is
     // the database's own; the application's arithmetic is never trusted here.

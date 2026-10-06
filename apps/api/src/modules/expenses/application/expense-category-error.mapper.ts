@@ -74,6 +74,14 @@ export const ERROR_CODE_BY_EXPENSE_CODE: Readonly<
   // is the stable SQL identity, so a client branches on `DUE_STATE_UNSUPPORTED`
   // rather than on the sentence.
   void_due_state_unsupported: "CONFLICT",
+  // T070's approval gate (ADR-0011). 409, not 422: the payload is well formed and
+  // the *state* refuses it — the publication succeeds once an Admin approves — which
+  // is the same reasoning `paid_obligation` and `void_due_state_unsupported` follow.
+  // The detail code keeps the stable SQL identity (`APPROVAL_REQUIRED`), so a client
+  // branches on the code rather than on the sentence, and the refusal is identical
+  // whichever writer produced it (the publish precondition or the BEFORE UPDATE
+  // guard).
+  approval_required: "CONFLICT",
   unknown: "INTERNAL",
 };
 
@@ -90,6 +98,7 @@ const DETAIL_CODES: Readonly<Partial<Record<ExpenseErrorCode, string>>> = {
   category_has_expenses: "CATEGORY_HAS_EXPENSES",
   paid_obligation: "DUE_PAID_EXCEEDS_NEW_AMOUNT",
   void_due_state_unsupported: "DUE_STATE_UNSUPPORTED",
+  approval_required: "APPROVAL_REQUIRED",
 };
 
 /**

@@ -9,6 +9,7 @@ import {
   fixedClock,
 } from "@ses/domain";
 import type {
+  ApproveExpenseRecordInput,
   CreateExpenseRecordInput,
   ExpenseApprovalPolicy,
   ExpenseApprovalPolicyReader,
@@ -23,6 +24,7 @@ import type {
   ExpenseRecalculation,
   ExpenseRecord,
   ExpenseRepository,
+  RejectExpenseRecordInput,
   SocietyId,
   SocietyMembership,
   UpdateExpenseRecordInput,
@@ -38,6 +40,7 @@ import {
   ListExpensesUseCase,
 } from "../list-expenses.use-case";
 import { GetExpenseUseCase } from "../get-expense.use-case";
+import { ListApprovalQueueUseCase } from "../list-approval-queue.use-case";
 import { RecalculateExpenseUseCase } from "../recalculate-expense.use-case";
 import type { RecalculateExpenseCommand } from "../recalculate-expense.use-case";
 import { UpdateExpenseUseCase } from "../update-expense.use-case";
@@ -222,6 +225,14 @@ class FakeExpenses implements ExpenseRepository {
       voidedAt: null,
       voidedBy: null,
       voidReason: null,
+      // T070's workflow stamps: a freshly created row carries the aggregate's own
+      // (always-clean) values rather than a hard-coded null, so the fake does not
+      // invent a state the aggregate could not have written.
+      approvedBy: expense.approvedBy,
+      approvedAt: expense.approvedAt,
+      rejectedBy: expense.rejectedBy,
+      rejectedAt: expense.rejectedAt,
+      rejectionReason: expense.rejectionReason,
       createdAt: expense.createdAt,
       updatedAt: expense.updatedAt,
     };
@@ -283,6 +294,13 @@ class FakeExpenses implements ExpenseRepository {
       voidedAt: stored.voidedAt,
       voidedBy: stored.voidedBy,
       voidReason: stored.voidReason,
+      // The aggregate is the post-edit state, so its stamps are the ones to write —
+      // `edit()` has already cleared any approval (D8's invalidation).
+      approvedBy: expense.approvedBy,
+      approvedAt: expense.approvedAt,
+      rejectedBy: expense.rejectedBy,
+      rejectedAt: expense.rejectedAt,
+      rejectionReason: expense.rejectionReason,
       createdAt: stored.createdAt,
       updatedAt: expense.updatedAt,
     };
@@ -379,6 +397,103 @@ class FakeExpenses implements ExpenseRepository {
     this.records.delete(id);
     return Promise.resolve();
   }
+
+  /** T070's approval, in memory — the port's four refusals in the definer's order. */
+  approve(
+    id: ExpenseId,
+    societyId: SocietyId,
+    input: ApproveExpenseRecordInput,
+  ): Promise<ExpenseRecord> {
+    this.calls.push("approve");
+    const stored = this.records.get(id);
+    if (stored === undefined || stored.societyId !== societyId) {
+      return Promise.reject(
+        expenseError("not_found", "That expense is not available to you."),
+      );
+    }
+    if (stored.status !== "pending_approval") {
+      return Promise.reject(
+        expenseError("invalid_transition", "Not awaiting approval.", {
+          from: stored.status,
+          to: "approved",
+        }),
+      );
+    }
+    if (stored.version !== input.expectedVersion) {
+      return Promise.reject(
+        expenseError("version_mismatch", "Stale.", {
+          field: "expectedVersion",
+          expectedVersion: input.expectedVersion,
+          currentVersion: stored.version,
+        }),
+      );
+    }
+    if (stored.approvedBy !== null && stored.approvedAt !== null) {
+      return Promise.reject(
+        expenseError("invalid_transition", "Already approved.", {
+          from: "approved",
+          to: "approved",
+        }),
+      );
+    }
+    const approved: ExpenseRecord = {
+      ...stored,
+      approvedBy: stored.createdBy,
+      approvedAt: "2026-10-01T10:00:00.000Z",
+      rejectedBy: null,
+      rejectedAt: null,
+      rejectionReason: null,
+      updatedAt: "2026-10-01T10:00:00.000Z",
+      version: stored.version + 1,
+    };
+    this.records.set(id, approved);
+    return Promise.resolve(approved);
+  }
+
+  /** T070's rejection, in memory — `pending_approval → draft` with its stamps. */
+  reject(
+    id: ExpenseId,
+    societyId: SocietyId,
+    input: RejectExpenseRecordInput,
+  ): Promise<ExpenseRecord> {
+    this.calls.push("reject");
+    const stored = this.records.get(id);
+    if (stored === undefined || stored.societyId !== societyId) {
+      return Promise.reject(
+        expenseError("not_found", "That expense is not available to you."),
+      );
+    }
+    if (stored.status !== "pending_approval") {
+      return Promise.reject(
+        expenseError("invalid_transition", "Not awaiting approval.", {
+          from: stored.status,
+          to: "draft",
+        }),
+      );
+    }
+    if (stored.version !== input.expectedVersion) {
+      return Promise.reject(
+        expenseError("version_mismatch", "Stale.", {
+          field: "expectedVersion",
+          expectedVersion: input.expectedVersion,
+          currentVersion: stored.version,
+        }),
+      );
+    }
+    const rejected: ExpenseRecord = {
+      ...stored,
+      status: "draft",
+      approvedBy: null,
+      approvedAt: null,
+      rejectedBy: stored.createdBy,
+      rejectedAt: "2026-10-01T10:00:00.000Z",
+      rejectionReason: input.reason,
+      updatedAt: "2026-10-01T10:00:00.000Z",
+      version: stored.version + 1,
+    };
+    this.records.set(id, rejected);
+    return Promise.resolve(rejected);
+  }
 }
 
 function categoryFixture(
@@ -428,6 +543,11 @@ function recordFixture(overrides: Partial<ExpenseRecord> = {}): ExpenseRecord {
     voidedAt: null,
     voidedBy: null,
     voidReason: null,
+    approvedBy: null,
+    approvedAt: null,
+    rejectedBy: null,
+    rejectedAt: null,
+    rejectionReason: null,
     createdAt: "2026-10-01T00:00:00.000Z",
     updatedAt: "2026-10-01T00:00:00.000Z",
     version: 1,
@@ -533,7 +653,10 @@ function makeRig(): Rig {
       recalculation as unknown as RecalculateExpenseUseCase,
     ),
     get: new GetExpenseUseCase(expenses),
-    list: new ListExpensesUseCase(expenses),
+    list: new ListExpensesUseCase(
+      expenses,
+      new ListApprovalQueueUseCase(expenses),
+    ),
     deleteDraft: new DeleteDraftUseCase(expenses, memberships),
   };
 }
@@ -660,7 +783,7 @@ describe("CreateExpenseUseCase", () => {
     expect(record.publishedAt).toBeNull();
   });
 
-  it("treats exactly the threshold as below it — the PRD says *above*", async () => {
+  it("treats exactly the threshold as requiring approval — `>=`, not the old `>`", async () => {
     const rig = makeRig();
 
     const record = await rig.create.create(ADMIN, SOCIETY, {
@@ -668,10 +791,22 @@ describe("CreateExpenseUseCase", () => {
       amountPaise: 1_000_000,
     });
 
+    expect(record.status).toBe("pending_approval");
+    expect(rig.policies.calls).toBe(1);
+  });
+
+  it("treats one paisa below the threshold as requiring no approval", async () => {
+    const rig = makeRig();
+
+    const record = await rig.create.create(ADMIN, SOCIETY, {
+      ...BASE_CREATE,
+      amountPaise: 999_999,
+    });
+
     expect(record.status).toBe("draft");
   });
 
-  it("keeps a Committee Member's above-threshold expense a draft, and reads no settings", async () => {
+  it("keeps a Resident-with-no-grant test honest: a Committee Member's above-threshold expense is routed, not stranded", async () => {
     const rig = makeRig();
 
     const record = await rig.create.create(COMMITTEE, SOCIETY, {
@@ -679,8 +814,12 @@ describe("CreateExpenseUseCase", () => {
       amountPaise: 5_000_000,
     });
 
-    expect(record.status).toBe("draft");
-    expect(rig.policies.calls).toBe(0);
+    // T070's Committee deadlock fix (ADR-0011): the threshold alone decides, so an
+    // otherwise-authorized draft creator can submit their own expense for approval
+    // rather than being left holding a draft they cannot promote.
+    expect(record.status).toBe("pending_approval");
+    expect(record.version).toBe(1);
+    expect(rig.policies.calls).toBe(1);
   });
 
   it("answers not_found for a category of another society", async () => {
@@ -1031,7 +1170,7 @@ describe("UpdateExpenseUseCase", () => {
     expect(record.publishedAt).toBeNull();
   });
 
-  it("keeps a Committee Member's above-threshold edit a draft, and reads no settings", async () => {
+  it("routes a Committee Member's above-threshold edit into pending_approval", async () => {
     const rig = makeRig();
     rig.expenses.seed(recordFixture({ createdBy: COMMITTEE_MEMBER }));
 
@@ -1045,8 +1184,9 @@ describe("UpdateExpenseUseCase", () => {
       },
     );
 
-    expect(record.status).toBe("draft");
-    expect(rig.policies.calls).toBe(0);
+    expect(record.status).toBe("pending_approval");
+    expect(record.version).toBe(2);
+    expect(rig.policies.calls).toBe(1);
   });
 
   it("leaves a pending_approval expense pending when it stays above the threshold", async () => {
@@ -1068,9 +1208,56 @@ describe("UpdateExpenseUseCase", () => {
       },
     );
 
+    // The threshold is read on every routed write itself now, because *both*
+    // directions matter: this row must stay submitted, and one that fell below the
+    // current threshold must return to draft (D8).
     expect(record.status).toBe("pending_approval");
-    // Already submitted: the promotion rule is skipped rather than re-entered.
-    expect(rig.policies.calls).toBe(0);
+    expect(rig.policies.calls).toBe(1);
+  });
+
+  it("clears a pending_approval expense's approval when it is edited — D8 invalidation", async () => {
+    const rig = makeRig();
+    rig.expenses.seed(
+      recordFixture({
+        status: "pending_approval",
+        amount: Money.fromPaise(2_000_000),
+        approvedBy: ADMIN_MEMBER,
+        approvedAt: "2026-09-30T10:00:00.000Z",
+      }),
+    );
+
+    const { expense } = await rig.update.update(ADMIN, SOCIETY, RECORD_ID, {
+      expectedVersion: 1,
+      title: "Different work entirely",
+    });
+
+    // The approval applied to the exact content it approved; a different expense
+    // must be decided again — and the amount is unchanged, so it stays submitted.
+    expect(expense.status).toBe("pending_approval");
+    expect(expense.approvedBy).toBeNull();
+    expect(expense.approvedAt).toBeNull();
+  });
+
+  it("returns a pending_approval expense to draft when the edit drops it below the threshold", async () => {
+    const rig = makeRig();
+    rig.expenses.seed(
+      recordFixture({
+        status: "pending_approval",
+        amount: Money.fromPaise(2_000_000),
+      }),
+    );
+
+    const { expense: record } = await rig.update.update(
+      ADMIN,
+      SOCIETY,
+      RECORD_ID,
+      {
+        expectedVersion: 1,
+        amountPaise: 500_000,
+      },
+    );
+
+    expect(record.status).toBe("draft");
   });
 
   it("files the expense under another category of the same society", async () => {

@@ -23,14 +23,17 @@ import {
   EXPENSE_REVISION_REPOSITORY,
   EXPENSE_SPLIT_REPOSITORY,
 } from "./application/expense.tokens";
+import { ApproveExpenseUseCase } from "./application/use-cases/approve-expense.use-case";
 import { CreateExpenseUseCase } from "./application/use-cases/create-expense.use-case";
 import { DeleteDraftUseCase } from "./application/use-cases/delete-draft.use-case";
 import { GetExpenseUseCase } from "./application/use-cases/get-expense.use-case";
+import { ListApprovalQueueUseCase } from "./application/use-cases/list-approval-queue.use-case";
 import { ListExpensesUseCase } from "./application/use-cases/list-expenses.use-case";
 import { ListRevisionsUseCase } from "./application/use-cases/list-revisions.use-case";
 import { PreviewSplitUseCase } from "./application/use-cases/preview-split.use-case";
 import { PublishExpenseUseCase } from "./application/use-cases/publish-expense.use-case";
 import { RecalculateExpenseUseCase } from "./application/use-cases/recalculate-expense.use-case";
+import { RejectExpenseUseCase } from "./application/use-cases/reject-expense.use-case";
 import { UpdateExpenseUseCase } from "./application/use-cases/update-expense.use-case";
 import { VoidExpenseUseCase } from "./application/use-cases/void-expense.use-case";
 import { ExpenseCategoryRepositoryPostgres } from "./infrastructure/category.repository";
@@ -176,6 +179,10 @@ import { ExpensesController } from "./presentation/expenses.controller";
     CreateExpenseUseCase,
     UpdateExpenseUseCase,
     GetExpenseUseCase,
+    // T070's approval queue. `ListExpensesUseCase` delegates its
+    // `status=pending_approval` branch here, so the queue's one non-negotiable
+    // filter lives in a single place rather than in the controller.
+    ListApprovalQueueUseCase,
     ListExpensesUseCase,
     DeleteDraftUseCase,
     // T066's publication. The split repository is a second adapter (one transaction
@@ -218,6 +225,13 @@ import { ExpensesController } from "./presentation/expenses.controller";
     // balance deltas and the void stamps — and dispatches `expense.voided`
     // through the same post-commit publisher, strictly after the transaction.
     VoidExpenseUseCase,
+    // T070's two decisions. Both read through the expense repository, whose
+    // `expense_approve()`/`expense_reject()` definer transactions own every rule
+    // (Admin-only, the row lock, the lifecycle, the version, the stamps), and
+    // neither touches a financial row: approval and rejection are workflow
+    // decisions, and publication stays a separate act through `expense_publish()`.
+    ApproveExpenseUseCase,
+    RejectExpenseUseCase,
   ],
 })
 export class ExpensesModule {}

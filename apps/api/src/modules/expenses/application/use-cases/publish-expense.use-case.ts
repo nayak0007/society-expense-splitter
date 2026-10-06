@@ -137,12 +137,16 @@ import type { PreviewSplitConfig } from "./preview-split.use-case";
  *
  *  - **No revisions.** Editing a published expense writes `expense_revisions` —
  *    T068's recalculation flow.
- *  - **No approval policy.** T070 ("expenses at or above the threshold cannot be
- *    published directly", `APPROVAL_REQUIRED`, Admin-only approve) is the task that
- *    owns the approval gate, and it depends on this one; T066 publishes a
- *    `pending_approval` expense for an Admin or Treasurer exactly as T061's matrix
- *    and T060's `can_publish_expenses` define, which is the behaviour T070's test
- *    ("above-threshold publish attempt is rejected") will then narrow.
+ *  - **No approval policy of its own.** T070 owns the approval gate (ADR-0011 D4),
+ *    and it lives *inside the database*, not here: `expense_publish()` reads the
+ *    society's **current** `approval_threshold_paise` after locking the expense and
+ *    refuses an at-or-above-threshold publication that is not `pending_approval`
+ *    with both approval stamps, raising `APPROVAL_REQUIRED` before any financial
+ *    write. The `BEFORE UPDATE` guard re-asserts the same rule for every other
+ *    writer. This use case therefore adds no second threshold read and no duplicated
+ *    rule — the authoritative answer is the transaction's, and an application-side
+ *    copy could only disagree with it. A refused publication arrives here as
+ *    `ExpenseError('approval_required')` and is mapped to `409 APPROVAL_REQUIRED`.
  */
 @Injectable()
 export class PublishExpenseUseCase {
@@ -335,6 +339,16 @@ export class PublishExpenseUseCase {
         voidedAt: record.voidedAt,
         voidedBy: record.voidedBy,
         voidReason: record.voidReason,
+        // T070's workflow stamps travel with the row so the rebuilt aggregate is a
+        // faithful read. `publish()` does not consult them: the approval gate is the
+        // database's, evaluated against the *current* threshold inside
+        // `expense_publish()` under the row lock (ADR-0011 D4), which is the only
+        // place it cannot be raced or forged.
+        approvedBy: record.approvedBy,
+        approvedAt: record.approvedAt,
+        rejectedBy: record.rejectedBy,
+        rejectedAt: record.rejectedAt,
+        rejectionReason: record.rejectionReason,
         createdAt: record.createdAt,
         updatedAt: record.updatedAt,
         version: record.version,
