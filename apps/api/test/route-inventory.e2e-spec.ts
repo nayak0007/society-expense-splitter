@@ -145,6 +145,25 @@ const NARROWED_ROUTES: readonly string[] = [
   // persisted row, whose `published` flag is what refuses the Committee Member — a
   // draft is not voidable at all, so their grant cannot reach a published bill.
   "ExpensesController POST /expenses/:expenseId/void",
+
+  // T071's presign. Attachments introduce **no** permission of their own (ADR-0012
+  // D5): the upload reuses `expense.create` — Admin/Treasurer full, Committee Member
+  // *draft only* — and `PresignUploadUseCase.presign` narrows it with `canOnResource`
+  // against the **stored** expense (`snapshotOf`, where a `pending_approval` or
+  // `published` expense is not a draft), after the D6.1 lifecycle gate refuses a
+  // `void` one for everybody.
+  "AttachmentsController POST /expenses/:expenseId/attachments",
+  // T071's completion. The same cell and the same narrowing, re-read from the row
+  // rather than trusted from the URL: the parent expense is loaded again (it may have
+  // been voided while the upload was in flight) and the same `canOnResource` site
+  // decides, so a Committee Member cannot complete an upload against somebody else's
+  // expense by holding the attachment id.
+  "AttachmentsController POST /attachments/:attachmentId/complete",
+  // T071's delete. `expense.void`'s cell — Admin/Treasurer full, Committee Member on
+  // *their own drafts* — narrowed against the persisted expense, **plus** ADR-0012
+  // D6.4's uploader branch, which is a narrower grant than the cell rather than a
+  // wider one: the uploader may remove their own row whatever the role cell says.
+  "AttachmentsController DELETE /attachments/:attachmentId",
 ];
 
 async function collectRoutes(

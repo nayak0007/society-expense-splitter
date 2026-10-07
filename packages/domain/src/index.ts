@@ -25,6 +25,12 @@
  *                 outstanding formula and the balance projection the publishing
  *                 transaction expresses in SQL). Payments, allocation and
  *                 statements arrive with T079+.
+ *  - `attachment/` — the Attachments module (T071): the value rules that decide
+ *                 what a bill may be (per-type caps, the MIME→extension map, the
+ *                 SAD §10.3 key layout, the SHA-256 shape), the magic-number
+ *                 sniffer that judges stored bytes rather than filenames, and the
+ *                 two ports — the S3-compatible `StorageProvider` and the
+ *                 `AttachmentRepository`.
  *  - `expense/`  — the Expenses module (T061–T063): the Expense aggregate, its
  *                 lifecycle state machine and the split-total invariant, the
  *                 `ExpenseSplit` value object and the two domain events; the
@@ -64,6 +70,10 @@ export * from "./structure/errors";
 export * from "./structure/rules";
 export * from "./structure/ports";
 export * from "./structure/value-objects";
+export * from "./attachment/attachment";
+export * from "./attachment/errors";
+export * from "./attachment/magic-bytes";
+export * from "./attachment/ports";
 export * from "./invitation/errors";
 export * from "./invitation/invitation";
 export * from "./invitation/ports";

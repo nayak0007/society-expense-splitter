@@ -10,6 +10,7 @@ import {
 } from "@ses/domain";
 import type {
   ApproveExpenseRecordInput,
+  AttachmentRepository,
   CreateExpenseRecordInput,
   ExpenseApprovalPolicy,
   ExpenseApprovalPolicyReader,
@@ -27,6 +28,7 @@ import type {
   RejectExpenseRecordInput,
   SocietyId,
   SocietyMembership,
+  StorageProvider,
   UpdateExpenseRecordInput,
   UserId,
 } from "@ses/domain";
@@ -657,9 +659,31 @@ function makeRig(): Rig {
       expenses,
       new ListApprovalQueueUseCase(expenses),
     ),
-    deleteDraft: new DeleteDraftUseCase(expenses, memberships),
+    // T071 (ADR-0012 D6.5): the draft-deletion path also removes the draft's
+    // attachment **objects**, after `expense_draft_delete()` has removed their rows.
+    // This suite is about the draft lifecycle and has no attachments asset, so the
+    // two collaborators are the smallest honest stand-ins: a read that answers
+    // "this draft has none" and a store that is never called. The cleanup itself is
+    // proven where it belongs — against real PostgreSQL and a real object store, in
+    // the T071 integration suites.
+    deleteDraft: new DeleteDraftUseCase(
+      expenses,
+      memberships,
+      NO_ATTACHMENT_REPOSITORY,
+      NO_STORAGE_PROVIDER,
+    ),
   };
 }
+
+/** "This draft has no attachments" — the fixture's answer, not a claim about the data. */
+const NO_ATTACHMENT_REPOSITORY = {
+  listStorageKeysForExpense: async (): Promise<readonly string[]> => [],
+} as unknown as AttachmentRepository;
+
+/** Never reached: with no keys to clean, the storage adapter is not called. */
+const NO_STORAGE_PROVIDER = {
+  delete: async (): Promise<void> => undefined,
+} as unknown as StorageProvider;
 
 const BASE_CREATE = {
   title: "Lift AMC — Q3",

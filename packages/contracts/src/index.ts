@@ -10,6 +10,7 @@ export * from "./common/errors";
 export * from "./common/pagination";
 export * from "./auth";
 export * from "./apartment";
+export * from "./attachments";
 export * from "./expenses";
 export * from "./invitation";
 export * from "./member";

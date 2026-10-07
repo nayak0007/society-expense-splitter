@@ -375,7 +375,7 @@ Clerk's advantages (superb prebuilt UI, organisation primitives, better DX) are 
 | **AWS S3** 🟡 enterprise option | Keep for Enterprise customers demanding AWS residency guarantees. Egress cost makes it the wrong default. |
 | **Cloudinary** ❌ | Excellent transformation pipeline, but priced for media-heavy consumer apps and far more expensive per GB. We need on-device compression and simple storage, not server-side transformation — the client already compresses to < 400 KB before upload (PRD §3.4). |
 
-All three are addressed through one `StorageProvider` interface (§10.2), so the choice is reversible.
+All three are addressed through one `StorageProvider` interface (§10.2), so the choice is reversible. **Deployment intent (2026-10-07) supersedes the MVP row above:** Supabase provides PostgreSQL and Auth, while the API, Redis and an S3-compatible object store run on a VPS. Storage remains exactly the reversible configuration §10.2 designs for — this row's Supabase Storage stays a supported, verified-compatible value (ADR-0012), and which S3-compatible product the VPS runs is a deployment decision rather than an architecture change.
 
 ## 2.6 Notifications
 
@@ -2115,6 +2115,24 @@ sequenceDiagram
 
 **Why presigned and not proxied:** a 10 MB upload through the API occupies a Node event loop for its duration, consumes bandwidth twice, and makes the API the bottleneck at cycle time when 60 treasurers upload bills at once. Presigned uploads scale with the storage provider, not with our compute.
 
+> **Deviation, recorded by T071 (2026-10-07) — the size gate, not the flow.** The
+> `A->>S` line above reads "create presigned PUT (15 min, content-length-range
+> enforced)". `content-length-range` is a **presigned-POST policy** field: it has
+> no meaning on a presigned PUT, and the alternative that does — a POST policy —
+> was measured against Supabase Storage — the provider SAD §14.2 then named for staging/production — and **refuted** (it
+> accepted 10 MB + 1 byte under a 10 MB policy and served it). What ships is
+> stronger and provider-portable: a **presigned PUT whose signature pins the exact
+> `Content-Length` the client declared** (a different payload is refused by the
+> store itself with `403 SignatureDoesNotMatch`, and no object is created), plus the
+> API's per-type 10 MB cap at presign time, plus **mandatory completion
+> verification** (length, SHA-256 over the stored bytes, and the magic number
+> against the declared type — never the extension), plus a provider-side bucket cap
+> where the provider has one (Supabase's `file_size_limit`; MinIO has no equivalent,
+> so the signature *is* its storage-layer gate). The route shape and the flow above
+> are unchanged. Full reasoning, both measurement sets and the rejected design are
+> in **ADR-0012** (D1); §10.2's `IStorageProvider` and §10.3's key layout are as
+> written.
+
 **Offline behaviour:** the local file URI is recorded in the outbox alongside the op. On reconnect, the attachment uploads **before** the op that references it, and the op is held until the upload confirms. A failed upload keeps the whole op pending rather than creating a dangling reference.
 
 ## 10.2 Storage Abstraction
@@ -2129,7 +2147,7 @@ export interface IStorageProvider {
 }
 ```
 
-Implementations: `SupabaseStorageProvider` (MVP), `R2StorageProvider` (scale), `S3StorageProvider` (enterprise residency). Bound by DI token; switching is an env var plus a bucket migration.
+Implementations: **one** S3-compatible adapter (`S3StorageProvider`, landed by T071), selected by `STORAGE_PROVIDER` plus endpoint, region, bucket and credentials — not one class per vendor. The same adapter serves an operator-hosted S3-compatible endpoint (`s3`, e.g. the VPS object store), Supabase Storage (verified compatible), Cloudflare R2 and AWS S3; it is bound by DI token, so switching is still an env var plus a bucket migration. Supabase Storage is a **supported** provider, not a required one: deployment intent is Supabase for PostgreSQL and Auth, with the API, Redis and the object store on a VPS (see §10.1's T071 note and ADR-0012).
 
 ## 10.3 Key Layout
 

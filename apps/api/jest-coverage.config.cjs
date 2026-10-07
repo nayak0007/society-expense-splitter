@@ -66,6 +66,47 @@ module.exports = {
   // can afford.
   maxWorkers: 1,
 
+  // ── The per-file budget Jest ACTUALLY applies — the root's, never a project's ──
+  //
+  // The same rule as `maxWorkers` and `coverageThreshold` above, and the one that
+  // made this gate red nondeterministically: a project's `testTimeout` is NOT what
+  // its own files run under here. jest-circus seeds its per-file timeout state from
+  // the **root global config** (`initialize({ globalConfig, … })` does
+  // `if (globalConfig.testTimeout) state.testTimeout = globalConfig.testTimeout`)
+  // and every hook and test timer then reads that one value; nothing consults the
+  // project's declaration. This file declared none, so Jest's 5 000 ms default
+  // applied to *every* project in the merged run, while the projects declare 30 s
+  // (integration, e2e) and the preset declares 60 s (unit).
+  //
+  // Measured, not inferred — a 6 s test body and a 6 s `beforeEach` in one
+  // integration file, run twice in the same minute against the same containers:
+  //
+  //   jest --config jest-integration.config.cjs --testPathPatterns zz-…  → 2 passed
+  //   jest --config jest-coverage.config.cjs    --testPathPatterns zz-…  → 2 failed
+  //     "Exceeded timeout of 5000 ms for a test." / "… for a hook."
+  //
+  // That is the whole reason the affected suites pass alone and failed here, and
+  // why the failing set moved between runs: a hook that stalls for five seconds
+  // (a busy machine, a slow first query, a container round trip) was aborted with
+  // its query still in flight, and the abandoned work then piled up behind it.
+  //
+  // One value has to be chosen for a merged run, so it is DERIVED — the strictest
+  // budget any participating project declares. For this package that is exactly the
+  // 30 s integration and e2e declare, and strictly *tighter* than the unit preset's
+  // 60 s: the gate can never be more permissive than a project's own contract, only
+  // as permissive. Derived rather than written as a literal so a project that
+  // changes its declared budget cannot silently drift from the gate again — and no
+  // global increase is introduced: every number used here is already declared in
+  // the config of the project it applies to.
+  testTimeout: Math.min(
+    ...[unit, integration, e2e].map(
+      // A project that declares nothing legitimately runs on Jest's 5 s default, so
+      // that is the value it contributes rather than an invented one.
+      (project) =>
+        typeof project.testTimeout === "number" ? project.testTimeout : 5_000,
+    ),
+  ),
+
   // Thresholds and reporters are read from the ROOT config in a multi-project
   // run, not from a project — so the numbers live here, once, and are the same
   // object the single-project unit config declares (SAD §15.2's global 80/70 row;

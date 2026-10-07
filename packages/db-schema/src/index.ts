@@ -17,6 +17,7 @@
 
 export * from "./shared/columns";
 
+export * from "./postgres/attachments";
 export * from "./postgres/expense-categories";
 export * from "./postgres/expense-gst-details";
 export * from "./postgres/expense-revisions";

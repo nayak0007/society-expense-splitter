@@ -145,6 +145,27 @@ pnpm dev:infra:down  # stop; add -v by hand to also wipe the named volumes
 | Redis 7              | 6379                      |                                                                                  |
 | MinIO                | 9000 (S3), 9001 (console) | console login `ses_minio` / `ses_minio_local`                                    |
 
+> **MinIO image carries recorded replacement debt.** The local object store is
+> pinned to `bitnamilegacy/minio:2025.7.23-debian-12-r5` — an archived build.
+> Upstream no longer publishes anonymous server images (verified 2026-10-07:
+> `docker.io/minio/minio` and `docker.io/minio/mc` both answer `object not found`,
+> `quay.io/minio/minio` refuses anonymous pull, `dl.min.io` returns 410). The tag
+> is immutable on purpose — never `:latest` — and the integration suite starts the
+> same image so a broken pin fails a test rather than a developer's afternoon. See
+> `infra/docker/docker-compose.dev.yml` and ADR-0012 §D1 for the measurements taken
+> against it.
+>
+> **Local and test only — not a production recommendation.** Which S3-compatible
+> server leaves a VPS deployment is a separate deployment decision (still open);
+> the storage port and the single S3 adapter are provider-neutral, so it is a
+> configuration choice rather than a code change. See ADR-0012's deployment note.
+>
+> The bucket is no longer created by a `createbuckets` companion service (its `mc`
+> image is one of the two that no longer exists). Set
+> `STORAGE_AUTO_CREATE_BUCKET=true` in `apps/api/.env` — see the storage section of
+> `apps/api/.env.example` — and the API's own storage bootstrap creates the bucket
+> at boot using the SDK the adapter already ships.
+
 `init.sql` creates the database and roles bootstrap. The schema itself —
 extensions, the Supabase-compatible roles, the `auth` shim and every table and
 policy — now comes from the migration history's own bootstrap file

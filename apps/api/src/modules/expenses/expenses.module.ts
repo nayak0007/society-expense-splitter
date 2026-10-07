@@ -2,6 +2,8 @@ import { Module } from "@nestjs/common";
 import { systemClock } from "@ses/domain";
 
 import { DatabaseModule } from "../../infrastructure/database/database.module";
+import { StorageModule } from "../../infrastructure/storage/storage.module";
+import { AttachmentsModule } from "../attachments/attachments.module";
 import { SOCIETY_REPOSITORY } from "../societies/application/society.tokens";
 import { SocietiesModule } from "../societies/societies.module";
 import { ExpenseCategoryOperations } from "./application/expense-category.operations";
@@ -120,6 +122,17 @@ import { ExpensesController } from "./presentation/expenses.controller";
  * repository, and exporting it "in case" would invite a second module to reach for a
  * category read instead of declaring the port it actually needs.
  *
+ * ## T071's two edges, and why neither is an inversion
+ *
+ * `AttachmentsModule` is imported for `ATTACHMENT_REPOSITORY` — the draft-deletion
+ * cleanup reads a draft's storage keys before the definer function removes the rows —
+ * and `StorageModule` for `STORAGE_PROVIDER`, which deletes the objects afterwards.
+ * Both are *capabilities* rather than features: storage is infrastructure, and the
+ * attachment repository is a port this module consumes without owning. Nothing here
+ * reaches into the attachments module's internals, and the attachments module does
+ * not depend on this one at all — which is what keeps the graph acyclic while both
+ * modules legitimately need each other's data.
+ *
  * ## Why `DatabaseModule` is imported explicitly
  *
  * Rather than reached for globally, following the reasoning that module records for
@@ -127,7 +140,13 @@ import { ExpensesController } from "./presentation/expenses.controller";
  * Postgres.
  */
 @Module({
-  imports: [DatabaseModule, SocietiesModule],
+  // `StorageModule` and `AttachmentsModule` are T071's contribution to this file,
+  // and they are here for exactly one method: `DeleteDraftUseCase` removes a draft's
+  // attachment **objects** after `expense_draft_delete()` has removed their rows
+  // (ADR-0012 D6.5). The dependency runs one way — attachments never imports the
+  // expenses module, which is why the settlement's repository reads `expenses`
+  // through its own documented projection rather than through `EXPENSE_REPOSITORY`.
+  imports: [DatabaseModule, SocietiesModule, StorageModule, AttachmentsModule],
   controllers: [ExpenseCategoriesController, ExpensesController],
   providers: [
     ExpenseCategoryOperations,

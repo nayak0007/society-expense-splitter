@@ -194,6 +194,49 @@ merged report at **0 covered lines** — `main.ts` (0/12), `worker.ts` (0/19),
 `tools/reset.ts` (0/20). A merge that dropped unloaded files would have inflated
 every percentage above; this one counts them in the denominator.
 
+### The merged run's per-file budget is the ROOT config's, not a project's (measured 2026-10-07)
+
+A merged run has one budget for every project in it, and Jest takes it from the
+**root** configuration: `jest-circus`'s adapter seeds its timeout state with
+`globalConfig.testTimeout` and every hook and test timer then reads that value, so
+the 30 s `testTimeout` declared in `jest-integration.config.cjs` and
+`jest-e2e.config.cjs` (and the 60 s the preset declares for unit) never reached
+their own files here. `jest-coverage.config.cjs` declared none, so the whole gate
+ran on Jest's 5 000 ms default — which is why suites that pass under their own
+config failed only inside this command, and why the failing set moved between runs:
+a hook that stalls for five seconds is aborted with its query still in flight, and
+the abandoned work then overlaps the next hook.
+
+Measured directly, with one temporary integration file containing a 6 s test and a
+6 s `beforeEach` and nothing else, on the same containers in the same minute:
+
+| Config                                      | Budget | Result                                                       |
+| ------------------------------------------- | -----: | ------------------------------------------------------------ |
+| `jest-integration.config.cjs`               |   30 s | **2 passed**                                                 |
+| `jest-coverage.config.cjs` (before the fix) |    5 s | **2 failed** — `Exceeded timeout of 5000 ms for a test/hook` |
+
+The gate now declares `testTimeout: Math.min(...)` over the three project configs —
+the strictest budget any participating project declares, 30 s for this package, so
+integration and e2e run exactly on their declared budget and the unit project runs
+tighter than its preset. It is derived, not a literal: a project that changes its
+declaration cannot drift from the gate again. No threshold was lowered, no file was
+excluded, and no timeout was raised above what a project already declares.
+
+### Why the gate's tasks run one at a time (same change)
+
+`pnpm test:coverage` is `turbo run test:coverage --concurrency=1`. The tasks are
+unchanged and still cache normally; what changed is that they no longer run
+_concurrently_. Turbo's default is to run a package's tasks in parallel, so the split
+engine's property suite — ~110 s of solid CPU on an idle machine, measured at 766 s
+when it competes — used to share the machine with the API's container-backed suites,
+and the API's per-test database resets were the first thing to suffer: measured, the
+API suites go from 15–30 s to 50–70 s whenever that happens, which is the same
+symptom (a hook that outlives its budget, abandoned mid-flight) this section
+records. Serialising removes the gate's own contribution to that contention; it does
+not remove a busy developer machine's, so `pnpm test:coverage` remains a heavyweight
+gate rather than a fast one. The `--concurrency=1` flag is deliberate and local to
+this script: `build`, `typecheck`, `lint` and `test` keep Turbo's parallel default.
+
 ### What closed it (T014's remediation)
 
 The ruling from the first merged measurement held: the deficit was real unreached

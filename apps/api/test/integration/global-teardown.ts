@@ -34,7 +34,12 @@ export default async function globalTeardown(): Promise<void> {
   const startedAt = Date.now();
   const client = await getContainerRuntimeClient();
 
-  for (const id of [state.postgresId, state.redisId]) {
+  // All three, including T071's object store. `undefined` is tolerated because a
+  // state file written by an older revision of this harness would not carry the
+  // object store's id, and failing a teardown over a stale scratch file would be a
+  // worse outcome than leaving one container to Ryuk.
+  for (const id of [state.postgresId, state.redisId, state.objectStoreId]) {
+    if (typeof id !== "string" || id === "") continue;
     const container = client.container.getById(id);
     try {
       // `t: 0` — both images tolerate an immediate stop, and a test container

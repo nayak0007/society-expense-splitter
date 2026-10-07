@@ -50,3 +50,27 @@ process.env["REDIS_URL"] = state.redisUrl;
 // documented seam; `memory` remains available for a suite that must isolate a
 // single-process cache.
 process.env["MEMBERSHIP_CACHE_STORE"] = "redis";
+
+// ── Object storage — T071 ────────────────────────────────────────────────────
+//
+// The **real** S3-compatible container, configured through the **real** variables
+// the adapter reads in every environment. There is deliberately no test-only
+// storage seam here: the Roadmap's own acceptance sentence is "Presign, upload,
+// complete flow works against MinIO", and an in-memory provider would prove
+// nothing about the exact signed `Content-Length`, the private-by-default object or
+// the 900-second expiry — which are the properties the ADR was measured to
+// establish.
+//
+// `minio` rather than a "test" provider value, because the adapter is selected by
+// configuration and not by a code path: pointing it at this container is the same
+// operation as pointing it at the local compose service.
+process.env["STORAGE_PROVIDER"] = "minio";
+process.env["STORAGE_ENDPOINT"] = state.storageEndpoint;
+process.env["STORAGE_ACCESS_KEY_ID"] = state.storageAccessKeyId;
+process.env["STORAGE_SECRET_ACCESS_KEY"] = state.storageSecretAccessKey;
+process.env["STORAGE_BUCKET"] = state.storageBucket;
+process.env["STORAGE_FORCE_PATH_STYLE"] = "true";
+// The bucket is created by the API's own boot-time bootstrap. It replaces the
+// `createbuckets` compose service whose `minio/mc` image no longer exists, and
+// running it here means the shipped bootstrap is exercised rather than bypassed.
+process.env["STORAGE_AUTO_CREATE_BUCKET"] = "true";

@@ -21,9 +21,23 @@ export interface IntegrationState {
   /** `authenticator` connection: what the API runs as, subject to every policy. */
   readonly runtimeUrl: string;
   readonly redisUrl: string;
+  /**
+   * The object store the API must be pointed at — T071.
+   *
+   * Five values rather than a URL, because that is what the storage adapter takes
+   * (endpoint, access key, secret, bucket, and the bucket's own name) and because a
+   * suite that needs to speak S3 directly — to prove the *storage layer* refuses an
+   * oversized payload, which no API call can demonstrate — must build its own client
+   * from the same facts.
+   */
+  readonly storageEndpoint: string;
+  readonly storageAccessKeyId: string;
+  readonly storageSecretAccessKey: string;
+  readonly storageBucket: string;
   /** Container ids, so `global-teardown.ts` stops exactly what this run started. */
   readonly postgresId: string;
   readonly redisId: string;
+  readonly objectStoreId: string;
 }
 
 export const STATE_FILE = resolve(__dirname, "../.integration-env.json");

@@ -1673,6 +1673,33 @@ describe("the documented Down block", () => {
     ).toBe(true);
 
     await owner.begin(async (tx) => {
+      // Later migrations' objects that hold a reference to an anchor this block drops
+      // have to come off first, because Postgres refuses `DROP FUNCTION
+      // can_view_expenses(uuid)` with `2BP01` while any policy or function still calls
+      // it. They are not dropped by `DROP TABLE` the way #19's own policies are —
+      // `attachments` is a table #19 has never heard of — so they are named here, and
+      // the later-file loop below puts every one of them back. This is the same
+      // mechanism, for the same reason, as the note further down about T067's index and
+      // trigger on `dues`: a Down block for migration N is executable from HEAD only
+      // once the objects of migrations > N are removed, and only their own files can
+      // restore them. Measured: without these four statements the block dies on
+      // `can_view_expenses` before it drops a single table.
+      //
+      // The list is T071's and is deliberately exhaustive rather than clever. If a later
+      // task adds another object referencing these predicates, this rehearsal fails
+      // loudly on the `DROP FUNCTION` below — which is how T071 itself found this — and
+      // the fix is one more line here, not a weakened assertion.
+      await tx.unsafe(`drop table if exists public.attachments`);
+      await tx.unsafe(
+        `drop function if exists public.can_delete_attachment(uuid, uuid, uuid)`,
+      );
+      await tx.unsafe(
+        `drop function if exists public.attachment_expense_is_attachable(uuid, uuid)`,
+      );
+      await tx.unsafe(
+        `drop function if exists public.attachment_presign_lock(uuid)`,
+      );
+
       for (const statement of statements) {
         await tx.unsafe(statement);
       }
@@ -1805,6 +1832,27 @@ describe("the documented Down block", () => {
           readFileSync(join(resolveMigrationsDir(), later), "utf8"),
         );
       }
+
+      // …and the objects taken off above are back, *with their policies* — which is the
+      // property that matters and is not obvious: `DROP TABLE` removed them, and only
+      // re-applying their own file can put them back, because a policy is created by a
+      // statement and not by the table it hangs on. A rehearsal that restored the table
+      // but not its policies would leave this shared container enforcing nothing on it
+      // for every spec that ran afterwards.
+      const [attachments] = await tx<
+        { table_exists: boolean; policies: string; helpers: string }[]
+      >`
+        select to_regclass('public.attachments') is not null as table_exists,
+               (select count(*)::text from pg_policy
+                 where polrelid = 'public.attachments'::regclass) as policies,
+               (select count(*)::text from pg_proc
+                 where proname in ('can_delete_attachment',
+                                   'attachment_expense_is_attachable',
+                                   'attachment_presign_lock')) as helpers
+      `;
+      expect(attachments!.table_exists).toBe(true);
+      expect(attachments!.policies).toBe("4");
+      expect(attachments!.helpers).toBe("3");
     });
 
     // The rehearsal commits (see the note above), so this asserts it left the shared

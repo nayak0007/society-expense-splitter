@@ -6,6 +6,7 @@ import type { HealthIndicatorResult } from "@nestjs/terminus";
 import type { JWTVerifyGetKey } from "jose";
 import type {
   ApartmentRepository,
+  AttachmentRepository,
   BuildingRepository,
   ExpenseCategoryRepository,
   ExpenseEventPublisher,
@@ -20,6 +21,7 @@ import type {
   ExpenseRevisionRepository,
   MemberRepository,
   SocietyRepository,
+  StorageProvider,
   StructureMembershipReader,
 } from "@ses/domain";
 
@@ -48,6 +50,8 @@ import {
   EXPENSE_REVISION_REPOSITORY,
   EXPENSE_SPLIT_REPOSITORY,
 } from "../../src/modules/expenses/application/expense.tokens";
+import { ATTACHMENT_REPOSITORY } from "../../src/modules/attachments/application/attachment.tokens";
+import { STORAGE_PROVIDER } from "../../src/infrastructure/storage/storage.tokens";
 import {
   EXPENSE_PARTICIPANT_READER,
   EXPENSE_SOCIETY_READER,
@@ -280,6 +284,27 @@ export type TestAppOptions = {
    * property worth proving, since a route registered here never opts into anything.
    */
   controllers?: readonly Type<unknown>[];
+  /**
+   * Substitutes the attachment store (T071) — the reservation row's write path.
+   *
+   * The attachment routes' storage is two ports and this is the database one: the
+   * plan read, the locked sum, the reservation insert, the completion stamp and the
+   * delete. A suite that swaps it exercises the three use cases' orchestration, the
+   * authorization cells and the response contracts while the quota lock, the RLS
+   * posture and the definer helpers stay the integration suite's to prove.
+   */
+  attachmentRepository?: AttachmentRepository;
+  /**
+   * Substitutes the object store (T071) — the S3-compatible adapter's port.
+   *
+   * Bound separately from `attachmentRepository` for the reason every seam here is
+   * separate: the two halves of the lifecycle fail independently, and a suite has to
+   * be able to make the *store* refuse (a URL that cannot be signed, an object that
+   * is not there, a length that disagrees) without also changing what the database
+   * says. Left real, the adapter constructs an `S3Client` and would reach for an
+   * endpoint no e2e suite has.
+   */
+  storage?: StorageProvider;
 };
 
 /** A stand-in indicator whose only job is to report the status the test asked for. */
@@ -394,6 +419,14 @@ export async function createTestApp(
     builder
       .overrideProvider(EXPENSE_REVISION_REPOSITORY)
       .useValue(options.revisions);
+  }
+  if (options.attachmentRepository !== undefined) {
+    builder
+      .overrideProvider(ATTACHMENT_REPOSITORY)
+      .useValue(options.attachmentRepository);
+  }
+  if (options.storage !== undefined) {
+    builder.overrideProvider(STORAGE_PROVIDER).useValue(options.storage);
   }
 
   const moduleRef = await builder.compile();

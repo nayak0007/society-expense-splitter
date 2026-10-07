@@ -100,6 +100,16 @@ BEGIN
   --     DELETE RESTRICT, so a building cannot go while any flat — live or
   --     removed — points at it.
 
+  -- Attachments before members (T071): `fk_attachments_uploaded_by (uploaded_by)`
+  -- references `members(id)`, so a member delete fails outright while one
+  -- attachment row still names them. It is a single-column key rather than the
+  -- composite `expenses.created_by` shape — `20261013120000_attachments_uploader_fk.sql`
+  -- records why (the composite form depends on `uq_members_id_society` and blocks the
+  -- #19 Down-block rehearsal). The rows are also deleted before `expenses` purely for
+  -- readability — the polymorphic `(entity_type, entity_id)` pair carries no foreign
+  -- key, which is exactly why the row is removed here by hand rather than by a
+  -- cascade.
+  DELETE FROM attachments        WHERE society_id IN (SELECT id FROM societies WHERE created_by IN (SELECT id FROM auth.users WHERE email LIKE '%@canary.ses.test'));
   DELETE FROM invitations WHERE society_id IN (SELECT id FROM societies WHERE created_by IN (SELECT id FROM auth.users WHERE email LIKE '%@canary.ses.test'));
   -- Expenses and their categories, before the members they name (T062). Both carry a
   -- `created_by` that references `members(id)` — and unlike a building or a flat, every
@@ -2027,6 +2037,162 @@ SELECT _canary_assert(
 COMMIT;
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- 11. Attachments (T071): the table cannot be forged, and the size gate lives
+--     in the storage layer, not here
+-- ─────────────────────────────────────────────────────────────────────────────
+--
+-- The attachment table is the one place T071's security posture is *structural*
+-- rather than procedural. Three of its properties are unreachable from an API test,
+-- because an API test goes through the API:
+--
+--   a. `authenticated` has no UPDATE grant on any column except `completed_at` and
+--      `updated_at`, so "a client cannot rewrite a verified checksum" is a privilege
+--      rather than a rule somebody has to remember to apply;
+--   b. `scan_status`, `completed_at`, `checksum`, `size_bytes` and `storage_key` are
+--      not INSERT-able at all, so a client cannot declare its own upload clean,
+--      already verified, or bound to an object of its own choosing;
+--   c. the insert policy ties the storage key to the row's own society and entity, so
+--      a row cannot point at another tenant's prefix — the forgery that would make
+--      the SAD §10.3 layout cosmetic;
+--   d. `id` **is** INSERT-able, and that is the counterweight to (c) rather than an
+--      exception to it: the layout puts the id inside the key, so the row has to
+--      carry the uuid the API already minted for the URL. An id is not a capability
+--      anywhere in this design — and the canary asserts the invariant that makes the
+--      grant worth having, that a row's id *is* the uuid in its own storage key.
+
+-- (a) and (b) are grants, so they are asserted from the catalogue, as the owner.
+SELECT _canary_assert(
+  (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class
+    WHERE oid = 'public.attachments'::regclass),
+  'attachments is not RLS-enabled AND forced — the table owner would bypass its own policies'
+);
+SELECT _canary_assert(
+  (SELECT array_agg(DISTINCT column_name) FROM information_schema.column_privileges
+    WHERE table_schema = 'public' AND table_name = 'attachments'
+      AND grantee = 'authenticated' AND privilege_type = 'UPDATE')
+    = ARRAY['completed_at', 'updated_at'],
+  'attachments grants UPDATE on a column other than completed_at/updated_at — a verified checksum or size would be client-writable'
+);
+SELECT _canary_assert(
+  NOT EXISTS (
+    SELECT 1 FROM information_schema.column_privileges
+     WHERE table_schema = 'public' AND table_name = 'attachments'
+       AND grantee = 'authenticated' AND privilege_type = 'INSERT'
+       AND column_name IN ('scan_status', 'completed_at', 'checksum', 'size_bytes', 'storage_key')
+  ),
+  'attachments lets a client INSERT scan_status, completed_at, checksum, size_bytes or storage_key — a row could claim to be verified before any bytes exist, or name an object of its own choosing'
+);
+
+-- `id` *is* insertable, and the two halves of why are asserted together, because on
+-- their own each is misleading. It must be: SAD §10.3 puts the attachment id inside
+-- the storage key, the key is `NOT NULL` and `UNIQUE` in the same statement, and the
+-- API has already minted the id for the presigned URL before the row exists — so a
+-- column default here mints a second uuid and every key names a row that does not
+-- exist (#34 records the correction). And it is not an authority: the id decides
+-- nothing in this design, reads are gated by RLS and the society predicate, and the
+-- HTTP contract refuses a client-supplied `attachmentId` outright.
+SELECT _canary_assert(
+  (SELECT count(*) FROM information_schema.column_privileges
+    WHERE table_schema = 'public' AND table_name = 'attachments'
+      AND grantee = 'authenticated' AND privilege_type = 'INSERT'
+      AND column_name = 'id') = 1,
+  'attachments does not grant INSERT on `id` — the row cannot carry the id its own storage key is built from, so the key and the row's primary key silently diverge'
+);
+
+-- The parent expense the refusals below point at: the draft this file already
+-- created for the category-reference section.
+SELECT (SELECT id FROM public.expenses
+         WHERE society_id = :'society_id'::uuid AND title = 'Canary plumbing') AS canary_expense_id
+\gset
+
+-- (c) and the cross-society refusal need an identity, so they run under the exact
+-- preamble `UnitOfWork` issues.
+BEGIN;
+SET LOCAL ROLE authenticated;
+SELECT set_config('app.user_id',           :'member_uid', true);
+SELECT set_config('request.jwt.claims',    jsonb_build_object('sub', :'member_uid', 'role', 'authenticated')::text, true);
+SELECT set_config('request.jwt.claim.sub', :'member_uid', true);
+
+-- A key that names the *other* society is refused by the insert policy even though
+-- the caller is an Admin of their own: the prefix is checked against the row's own
+-- `society_id` and `entity_id`, not against anything the caller can choose.
+SELECT _canary_refuses(format(
+  $sql$INSERT INTO public.attachments
+          (society_id, entity_type, entity_id, storage_key, original_filename,
+           mime_type, size_bytes, checksum, uploaded_by)
+        VALUES (%L::uuid, 'expense', %L::uuid, %L, 'bill.jpg', 'image/jpeg', 10, %L, %L::uuid)$sql$,
+  :'society_id', :'canary_expense_id',
+  'societies/' || :'stranger_uid' || '/expenses/' || :'canary_expense_id' || '/x.jpg',
+  repeat('a', 64), :'canary_admin_member_id'
+));
+
+-- The declared scan status is not in the INSERT grant at all, so a caller cannot
+-- choose it — which is what keeps the future serving gate's one trusted value out of
+-- a client's hands.
+SELECT _canary_refuses(format(
+  $sql$INSERT INTO public.attachments
+          (society_id, entity_type, entity_id, storage_key, original_filename,
+           mime_type, size_bytes, checksum, uploaded_by, scan_status)
+        VALUES (%L::uuid, 'expense', %L::uuid, %L, 'bill.jpg', 'image/jpeg', 10, %L, %L::uuid, 'clean')$sql$,
+  :'society_id', :'canary_expense_id',
+  'societies/' || :'society_id' || '/expenses/' || :'canary_expense_id' || '/clean.jpg',
+  repeat('a', 64), :'canary_admin_member_id'
+));
+
+-- The honest insert, by the Admin themselves, still works — so the refusals above are
+-- a boundary and not a table nobody can write. It writes the id explicitly, the way
+-- the API's own adapter does, because the key it is about to store was built from it.
+SELECT gen_random_uuid() AS canary_attachment_id
+\gset
+INSERT INTO public.attachments (
+  id, society_id, entity_type, entity_id, storage_key, original_filename,
+  mime_type, size_bytes, checksum, uploaded_by
+) VALUES (
+  :'canary_attachment_id'::uuid,
+  :'society_id'::uuid, 'expense', :'canary_expense_id'::uuid,
+  'societies/' || :'society_id' || '/expenses/' || :'canary_expense_id' || '/' || :'canary_attachment_id' || '.jpg',
+  'bill.jpg', 'image/jpeg', 10, repeat('a', 64), :'canary_admin_member_id'::uuid
+);
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.attachments
+    WHERE society_id = :'society_id'::uuid AND entity_id = :'canary_expense_id'::uuid) = 1,
+  'an Admin of the society could not write their own attachment row'
+);
+
+-- The row's id and the uuid in its own storage key are one value. This is the
+-- assertion the wider grant exists for: without it the SAD §10.3 layout is cosmetic
+-- and a bucket is un-auditable, because no stored key resolves to a stored row.
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.attachments
+    WHERE id = :'canary_attachment_id'::uuid
+      AND storage_key = 'societies/' || society_id::text || '/expenses/' || entity_id::text
+                        || '/' || id::text || '.jpg') = 1,
+  'an attachment row''s id is not the uuid in its own storage key — the SAD §10.3 layout would name a row that does not exist'
+);
+
+-- The scan status is still server-written: the honest insert left it at the column
+-- default, and the extra assertion is that nothing in the request path could say
+-- otherwise.
+SELECT _canary_assert(
+  (SELECT scan_status = 'pending' FROM public.attachments
+    WHERE id = :'canary_attachment_id'::uuid),
+  'a newly written attachment row did not start `pending` — the serving gate''s one trusted value would be client-influenced'
+);
+
+-- A stranger sees none of it: the read policy is the `expense.view` population, so a
+-- non-member reads zero rows rather than being refused.
+RESET ROLE;
+SELECT set_config('app.user_id',           :'stranger_uid', true);
+SELECT set_config('request.jwt.claims',    jsonb_build_object('sub', :'stranger_uid', 'role', 'authenticated')::text, true);
+SELECT set_config('request.jwt.claim.sub', :'stranger_uid', true);
+SET LOCAL ROLE authenticated;
+SELECT _canary_assert(
+  (SELECT count(*) FROM public.attachments) = 0,
+  'a stranger can read another society''s attachments'
+);
+ROLLBACK;
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Cleanup: leave no fixture rows behind
 -- ─────────────────────────────────────────────────────────────────────────────
 SELECT _canary_reset();
@@ -2034,4 +2200,4 @@ DROP FUNCTION IF EXISTS _canary_reset();
 DROP FUNCTION IF EXISTS _canary_assert(boolean, text);
 DROP FUNCTION IF EXISTS _canary_refuses(text);
 
-\echo 'RLS canary passed: auth.uid() resolves, member sees own society, stranger sees none, join preview resolves, buildings and apartments read/write/delete are member-, Admin- and function-scoped, a building with live flats refuses removal, the role writes are Admin-only with the 2-treasurer/3-admin caps, no self-change and no last-admin demotion, an invitation''s token hash is unreadable while its acceptance is recipient-matched, state-ordered and single-use (with a shadow member linked rather than duplicated), and a join request is a pending row — narrowed self-insert, no duplicate for one account, code-keyed options, one locked reviewer-resolved decision consumed once, a reason on every rejection, and one flat''s two claims both visible; and the expense categories are seeded nineteen per society with their two flags, readable by every active member and by nobody else, writable only by an Admin or Treasurer through policies whose `deleted_at` and DELETE are unreachable, with the soft delete a definer function that refuses a non-member, a Resident and any category an expense still names.'
+\echo 'RLS canary passed: auth.uid() resolves, member sees own society, stranger sees none, join preview resolves, buildings and apartments read/write/delete are member-, Admin- and function-scoped, a building with live flats refuses removal, the role writes are Admin-only with the 2-treasurer/3-admin caps, no self-change and no last-admin demotion, an invitation''s token hash is unreadable while its acceptance is recipient-matched, state-ordered and single-use (with a shadow member linked rather than duplicated), and a join request is a pending row — narrowed self-insert, no duplicate for one account, code-keyed options, one locked reviewer-resolved decision consumed once, a reason on every rejection, and one flat''s two claims both visible; and the expense categories are seeded nineteen per society with their two flags, readable by every active member and by nobody else, writable only by an Admin or Treasurer through policies whose `deleted_at` and DELETE are unreachable, with the soft delete a definer function that refuses a non-member, a Resident and any category an expense still names; and the attachments table is RLS-enabled and forced, grants UPDATE on `completed_at`/`updated_at` and nothing else, cannot have its `scan_status`, `completed_at`, `checksum`, `size_bytes` or `storage_key` written by a client at all, admits `id` only so the API''s row can carry the very uuid its storage key is built from (asserted, not assumed), refuses a storage key that names another tenant while accepting the caller''s own, and is invisible to a stranger.'

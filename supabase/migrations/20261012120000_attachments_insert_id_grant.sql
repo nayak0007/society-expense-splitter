@@ -1,0 +1,59 @@
+-- 20261012120000_attachments_insert_id_grant.sql
+--
+-- Attachments — allow the API's own `insert` to write the primary key (Roadmap
+-- T071, ADR-0012 D1/D2). Forward-only: #33 is applied, so its grant list is
+-- corrected here rather than edited in place.
+--
+-- WHY THIS EXISTS AT ALL
+--
+-- SAD §10.3 fixes the object's address as
+-- `societies/{societyId}/{entityType}/{entityId}/{attachmentId}.{ext}`, so the
+-- attachment id is *inside* the storage key. The key has to be written in the same
+-- `INSERT` as the row — it is `NOT NULL` and `UNIQUE` — and it has to be minted
+-- before the presigned URL exists, because the URL is for that exact key.
+--
+-- #33 therefore assumed the caller mints the id and omitted `id` from the
+-- `GRANT INSERT` list, on the reading that a client-supplied primary key is the
+-- "client-generated attachment IDs used as authority" case. The real-PostgreSQL
+-- suite then proved the two halves could not both be true: with `id` uninsertable
+-- the column default `gen_random_uuid()` minted a *different* uuid from the one in
+-- the key, so every stored key named a row that does not exist. That is invisible
+-- to the application — nothing resolves a key to a row — and it is precisely the
+-- kind of divergence that makes a bucket un-auditable later, so the layout wins and
+-- the grant is widened.
+--
+-- WHY WIDENING IT IS NOT A WEAKENING
+--
+-- The authority question #33 was protecting is answered elsewhere, and unchanged:
+--
+--   * `public.attachments_insert_author` still decides *who* may insert at all
+--     (`can_draft_expenses`, an attachable parent expense, and a `storage_key`
+--     whose prefix is the new row's own society and entity);
+--   * `scan_status`, `completed_at`, `checksum`, `size_bytes`, `storage_key`,
+--     `mime_type`, `society_id` and `uploaded_by` remain outside every UPDATE
+--     grant, so no caller can rewrite a fact after the fact (`GRANT UPDATE
+--     (completed_at, updated_at)` is still the whole list);
+--   * the HTTP contract refuses a client-supplied `attachmentId` outright
+--     (`presignAttachmentUploadSchema` is a `strictObject` without the field), so
+--     the id is minted by `PresignUploadUseCase` and never by a client. The grant
+--     is the API's *write path*, not a client-facing surface: PostgREST is not the
+--     transport for these routes;
+--   * and an id is not a capability anywhere in this design — reads are gated by
+--     RLS and the society predicate (404, never 403), and completion re-reads the
+--     parent expense and the stored object rather than trusting the id.
+--
+-- The residual effect of the wider grant is that a caller can choose the primary
+-- key of a row it is already allowed to create. It cannot choose a society, an
+-- entity, a key prefix, a scan status or a checksum, and it cannot address another
+-- tenant.
+--
+-- Lossless: this migration writes no row and reads none.
+--
+-- Down (run by hand — `supabase db push` is forward-only; it would also require
+-- re-running #33, because the API cannot insert a row without this grant):
+--   REVOKE INSERT (id) ON public.attachments FROM authenticated;
+
+GRANT INSERT (id) ON public.attachments TO authenticated;
+
+-- `anon` stays excluded, as in #33: there is no anonymous attachment path.
+REVOKE ALL ON public.attachments FROM anon;

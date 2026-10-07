@@ -85,16 +85,42 @@ services:
       retries: 10
 
   # ───────────────────────────────────────────────────────────────────────────
-  # MinIO — local S3 for the storage adapter (SAD §14.2: R2 in production)
+  # MinIO — local S3 for the storage adapter (SAD §14.2, ADR-0012)
   # ───────────────────────────────────────────────────────────────────────────
   #
   # Why MinIO and not Supabase Storage locally: the storage adapter interface is
   # S3-compatible by design, so local development exercises the same code path that
-  # production uses against R2 — with zero egress cost and no network round trip.
+  # production uses against Supabase Storage — with zero egress cost and no network
+  # round trip. ADR-0012 D1 measured the local store directly: a presigned PUT whose
+  # signature pins the exact `ContentLength` is refused by this server in both
+  # directions (403 larger, 403 smaller, 411 omitted) and leaves no partial object
+  # behind, which is the local half of the size gate.
+  #
+  # ── REPLACEMENT DEBT (recorded deliberately, do not silently change) ────────
+  #
+  # The image below is a **legacy/archived build**, pinned by immutable tag.
+  # Upstream no longer publishes anonymous server images: on 2026-10-07
+  # `docker.io/minio/minio` and `docker.io/minio/mc` both answered
+  # `{"message":"object not found"}`, `quay.io/minio/minio` denied anonymous pull
+  # (401), and `dl.min.io` returned 410 Gone for the community server and client.
+  # This tag was pulled and used to verify every mechanism in ADR-0012 against a
+  # real local object store; the integration suite starts the same image, so it
+  # cannot rot unnoticed.
+  #
+  # Debt: this registry path is a read-only archive and its long-term availability
+  # is not guaranteed. Replacing it means either a maintained MinIO distribution
+  # reappearing, or a documented deviation from the Roadmap's "MinIO used locally"
+  # sentence in favour of another maintained S3-compatible server — a product
+  # decision, not a swap to make quietly. Never use `:latest` for storage.
+  #
+  # LOCAL AND TEST ONLY — not a production recommendation. It is the store whose
+  # behaviour ADR-0012 measured and the one the integration suite starts; which
+  # S3-compatible server a VPS deployment runs is a separate deployment decision
+  # and remains open. The adapter is provider-neutral (`s3` + endpoint/bucket/
+  # credentials), so that decision does not change application code.
   minio:
-    image: minio/minio:latest
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
     restart: unless-stopped
-    command: server /data --console-address ':9001'
     environment:
       MINIO_ROOT_USER: ses_minio
       MINIO_ROOT_PASSWORD: ses_minio_local
@@ -102,38 +128,16 @@ services:
       - "9000:9000" # S3 API
       - "9001:9001" # console — http://localhost:9001
     volumes:
-      - minio-data:/data
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1",
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
+      # The image's own data directory; mounting anything else would silently
+      # discard every upload on the next `docker compose up`.
+      - minio-data:/bitnami/minio/data
 
-  # One-shot: creates the bucket, then exits. A separate service rather than a
-  # script in the Makefile so `docker compose up` alone reaches a usable state.
-  createbuckets:
-    image: minio/mc:latest
-    depends_on:
-      minio:
-        condition: service_healthy
-    environment:
-      MINIO_ROOT_USER: ses_minio
-      MINIO_ROOT_PASSWORD: ses_minio_local
-      STORAGE_BUCKET: ${STORAGE_BUCKET:-ses-attachments}
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
-        mc mb --ignore-existing "local/$$STORAGE_BUCKET"
-        echo "bucket ready: $$STORAGE_BUCKET"
-    restart: "no"
+  # There is deliberately **no** `createbuckets` one-shot service any more. It used
+  # to run `mc` from a second image, and that image no longer exists (see above).
+  # The bucket is created by the API's own storage bootstrap instead — the AWS SDK
+  # the storage adapter already depends on, with `STORAGE_AUTO_CREATE_BUCKET=true`
+  # in local `.env` — so `docker compose up` still reaches a usable state without a
+  # second service, a second image, or a shell loop waiting for a health endpoint.
 
   # ───────────────────────────────────────────────────────────────────────────
   # API — optional, behind the `api` profile

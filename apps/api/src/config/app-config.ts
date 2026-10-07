@@ -109,6 +109,81 @@ export class AppConfig {
     return this.config.getOrThrow<string>("STORAGE_BUCKET");
   }
 
+  /**
+   * Which S3-compatible store is in use. Never selects a code path (ADR-0012's one
+   * adapter); it selects defaults and one production guard. See the schema.
+   */
+  get storageProvider(): "minio" | "supabase" | "r2" | "s3" {
+    return this.config.getOrThrow<"minio" | "supabase" | "r2" | "s3">(
+      "STORAGE_PROVIDER",
+    );
+  }
+
+  /** The configured endpoint, or `undefined` when the adapter should default it. */
+  get storageEndpoint(): string | undefined {
+    return this.config.get<string>("STORAGE_ENDPOINT");
+  }
+
+  get storageRegion(): string {
+    return this.config.getOrThrow<string>("STORAGE_REGION");
+  }
+
+  /**
+   * The S3 access key pair. Read through a single accessor each so the two are
+   * always read together, and so there is one place to audit: **no** other file
+   * may reach for these, and nothing may put them in a response, a log line or the
+   * OpenAPI document.
+   */
+  get storageCredentials(): {
+    readonly accessKeyId: string | undefined;
+    readonly secretAccessKey: string | undefined;
+  } {
+    const accessKeyId = this.config.get<string>("STORAGE_ACCESS_KEY_ID");
+    const secretAccessKey = this.config.get<string>(
+      "STORAGE_SECRET_ACCESS_KEY",
+    );
+    return {
+      accessKeyId: accessKeyId === "" ? undefined : accessKeyId,
+      secretAccessKey: secretAccessKey === "" ? undefined : secretAccessKey,
+    };
+  }
+
+  get storageForcePathStyle(): boolean {
+    return this.config.getOrThrow<boolean>("STORAGE_FORCE_PATH_STYLE");
+  }
+
+  get storageAutoCreateBucket(): boolean {
+    return this.config.getOrThrow<boolean>("STORAGE_AUTO_CREATE_BUCKET");
+  }
+
+  /** SAD §10.1's 15 minutes. Also the window an outstanding presign reserves quota for. */
+  get storagePresignTtlSeconds(): number {
+    return this.config.getOrThrow<number>("STORAGE_PRESIGN_TTL_SECONDS");
+  }
+
+  /**
+   * The Supabase project's own storage S3 endpoint, derived — `null` when
+   * `SUPABASE_URL` is not a Supabase hostname, which is the honest answer for a
+   * self-hosted Postgres in the test suite.
+   *
+   * Derived rather than configured for the reason `AppConfig` exists at all: the
+   * project ref appears twice otherwise, and the second copy is the one that goes
+   * stale. `https://<ref>.supabase.co` →
+   * `https://<ref>.storage.supabase.co/storage/v1/s3`, which is the endpoint
+   * ADR-0012's probes were measured against.
+   */
+  get supabaseStorageEndpoint(): string | null {
+    try {
+      const url = new URL(this.supabaseUrl);
+      const host = url.hostname;
+      if (!host.endsWith(".supabase.co")) return null;
+      const ref = host.slice(0, -".supabase.co".length);
+      return `https://${ref}.storage.supabase.co/storage/v1/s3`;
+    } catch {
+      return null;
+    }
+  }
+
   /** `debug` in development, `info` elsewhere, silent under test. */
   get logLevel(): string {
     const explicit = this.config.get<string>("LOG_LEVEL");

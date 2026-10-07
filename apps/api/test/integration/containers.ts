@@ -2,6 +2,8 @@ import { PostgreSqlContainer } from "@testcontainers/postgresql";
 import type { StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { RedisContainer } from "@testcontainers/redis";
 import type { StartedRedisContainer } from "@testcontainers/redis";
+import { GenericContainer, Wait } from "testcontainers";
+import type { StartedTestContainer } from "testcontainers";
 
 /**
  * The two real dependencies the integration suite runs against — Roadmap T034,
@@ -46,12 +48,64 @@ import type { StartedRedisContainer } from "@testcontainers/redis";
 /** The role the API connects as; created by the bootstrap migration. */
 const RUNTIME_ROLE = "authenticator";
 
+/**
+ * The local S3-compatible object store — T071.
+ *
+ * ## The same image the developers run, pinned to an immutable tag
+ *
+ * `infra/docker/docker-compose.dev.yml` uses this exact tag, so "works locally" and
+ * "passes in CI" cannot mean two different servers — which is the property the
+ * suite exists for. It is a **legacy/archived build**: upstream no longer publishes
+ * anonymous MinIO server images (on 2026-10-07 `docker.io/minio/minio` and
+ * `docker.io/minio/mc` answered `object not found`, `quay.io/minio/minio` denied
+ * anonymous pull, `dl.min.io` answered 410 Gone). The replacement debt is recorded
+ * in that compose file and in ADR-0012; pinning here is what makes a broken pin fail
+ * a test rather than a developer's afternoon.
+ *
+ * It is the **local/test** provider only — never a production recommendation. Which
+ * S3-compatible server a VPS deployment runs is a separate deployment decision (still
+ * open), and the suite is deliberately neutral about it: it configures the *shipped*
+ * `S3StorageProvider` through the real variables, so the same assertions measure any
+ * S3-compatible endpoint the variable set points at.
+ *
+ * `latest` would be worse than useless for the same reason the Postgres comment
+ * gives: this suite's job is to notice storage-layer behaviour (the exact signed
+ * `Content-Length`, a private object, a presign that expires), and a moving tag makes
+ * a red run unattributable.
+ *
+ * ## Why the wait strategy is the health endpoint
+ *
+ * `/minio/health/live` is the server's own liveness probe, so the container is
+ * declared ready when the *server* says so rather than when a port is open — which,
+ * for a store whose first request may be a presign, is the difference between a
+ * green suite and a flaky one.
+ */
+const OBJECT_STORE_IMAGE = "bitnamilegacy/minio:2025.7.23-debian-12-r5";
+/** Throwaway local credentials — the same ones the compose service uses. */
+const OBJECT_STORE_ACCESS_KEY_ID = "ses_minio";
+const OBJECT_STORE_SECRET_ACCESS_KEY = "ses_minio_local";
+/** The bucket the API writes to; the harness creates it, the compose stack does not. */
+const OBJECT_STORE_BUCKET = "ses-attachments";
+
 export interface IntegrationInfrastructure {
   /** The migration runner's connection. Owns the schema; bypasses RLS. */
   readonly ownerUrl: string;
   /** The API's connection. `authenticator`, restricted by RLS. */
   readonly runtimeUrl: string;
   readonly redisUrl: string;
+  /**
+   * The object store, as the API must be configured to reach it — T071.
+   *
+   * The **same** five values the adapter takes from configuration (endpoint,
+   * credentials, bucket, path style, provider) rather than a special test hook: the
+   * suite configures the real `S3StorageProvider` through the real environment, so
+   * what it proves is the shipped adapter and not a test double.
+   */
+  readonly storageEndpoint: string;
+  readonly storageAccessKeyId: string;
+  readonly storageSecretAccessKey: string;
+  readonly storageBucket: string;
+  readonly objectStore: StartedTestContainer;
   readonly postgres: StartedPostgreSqlContainer;
   readonly redis: StartedRedisContainer;
 }
@@ -148,8 +202,29 @@ export async function startInfrastructure(): Promise<IntegrationInfrastructure> 
     new RedisContainer("redis:7-alpine").start(),
   );
 
+  const objectStore = await stage("object-storage", async () =>
+    new GenericContainer(OBJECT_STORE_IMAGE)
+      .withEnvironment({
+        MINIO_ROOT_USER: OBJECT_STORE_ACCESS_KEY_ID,
+        MINIO_ROOT_PASSWORD: OBJECT_STORE_SECRET_ACCESS_KEY,
+      })
+      .withExposedPorts(9000)
+      .withWaitStrategy(
+        Wait.forHttp("/minio/health/live", 9000).withStartupTimeout(120_000),
+      )
+      .start(),
+  );
+
   const host = postgres.getHost();
   const port = postgres.getMappedPort(5432);
+
+  // Path-style and a bare host:port, which is what the adapter's
+  // `STORAGE_FORCE_PATH_STYLE` default expects and what MinIO is reached by on a
+  // container network. The port is the *mapped* one, so the suite works whether the
+  // engine is local or (as in this environment) reached over a TCP `DOCKER_HOST`.
+  const storageEndpoint = `http://${objectStore.getHost()}:${objectStore.getMappedPort(
+    9000,
+  )}`;
 
   return {
     // The owner connection the migration runner uses (SAD §8.7: DDL is
@@ -159,19 +234,32 @@ export async function startInfrastructure(): Promise<IntegrationInfrastructure> 
     // authenticated` but owns nothing and is subject to every policy.
     runtimeUrl: `postgresql://${RUNTIME_ROLE}:${RUNTIME_ROLE}@${host}:${port}/ses`,
     redisUrl: redis.getConnectionUrl(),
+    storageEndpoint,
+    storageAccessKeyId: OBJECT_STORE_ACCESS_KEY_ID,
+    storageSecretAccessKey: OBJECT_STORE_SECRET_ACCESS_KEY,
+    storageBucket: OBJECT_STORE_BUCKET,
+    objectStore,
     postgres,
     redis,
   };
 }
 
-/** Stops both containers. Called from the global setup's returned teardown. */
+/** Stops all three containers. Called when the migration chain fails to apply. */
 export async function stopInfrastructure(
   infrastructure: IntegrationInfrastructure,
 ): Promise<void> {
-  // Parallel, because the two are independent and a stopped container is a
+  // Parallel, because the three are independent and a stopped container is a
   // network round trip each.
   await Promise.allSettled([
     infrastructure.postgres.stop({ remove: true, removeVolumes: true }),
     infrastructure.redis.stop({ remove: true, removeVolumes: true }),
+    infrastructure.objectStore.stop({ remove: true, removeVolumes: true }),
   ]);
 }
+
+export {
+  OBJECT_STORE_ACCESS_KEY_ID,
+  OBJECT_STORE_BUCKET,
+  OBJECT_STORE_IMAGE,
+  OBJECT_STORE_SECRET_ACCESS_KEY,
+};

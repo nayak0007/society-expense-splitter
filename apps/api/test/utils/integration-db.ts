@@ -35,26 +35,46 @@ export function ownerClient(url: string): postgres.Sql {
  * Truncation rather than a `DELETE` chain, and *dynamic* rather than a table list:
  * a hand-maintained list is a fixture that silently stops clearing a table the
  * moment a migration adds one, and the failure mode is the worst kind — a test
- * that passes because the previous test's rows are still there. `auth.users` is
- * truncated separately because it lives in the `auth` schema; the ledger lives in
+ * that passes because the previous test's rows are still there. The ledger lives in
  * `ses_meta` and is deliberately untouched (clearing it would make every later
- * assertion about migration state meaningless).
+ * assertion about migration state meaningless), while `auth.users` is named
+ * explicitly because it lives in the `auth` schema and is reached from `public` by
+ * foreign key, so it must go in the same statement as the tables that reference it.
  *
- * Isolation is therefore *between tests*, by data: one container per run, one
- * schema, and each spec starts from empty. That is why the suite does not need a
- * container per file, and why it is order-independent.
+ * ## ONE statement, not one per table (2026-10-07)
+ *
+ * This used to truncate `auth.users` and then loop over `pg_tables`, issuing a
+ * separate `truncate table public.x cascade` per table — ~35 statements per test, so
+ * ~35 lock acquisitions on overlapping table sets and ~35 separate WAL/fsync round
+ * trips, for every one of the suite's ~900 tests. The table set is unchanged; what
+ * changed is that the names are now aggregated into a **single** `truncate table a,
+ * b, … cascade`, which acquires its locks once, is atomic, and costs one round trip.
+ *
+ * That mattered because this is the statement that stalls: an `ACCESS EXCLUSIVE`
+ * truncate that cannot have every table at once waits behind whatever else is open,
+ * and a hook that waits longer than its timeout is abandoned with its work still in
+ * flight — the abandoned work then lands *after* the next test's reset (producing the
+ * `users_email_key` collisions seen in the merged coverage runs) and holds the locks
+ * the next reset needs. Fewer, cheaper, atomic resets shrink both the window and the
+ * blast radius; the isolation contract itself is identical.
+ *
+ * Emptiness is still the guarantee, and it is still *between tests*: one container
+ * per run, one schema, each spec starting from empty — which is why the suite needs
+ * no container per file and is order-independent.
  */
 export async function resetData(sql: postgres.Sql): Promise<void> {
-  await sql`truncate table auth.users cascade`;
   await sql.unsafe(`
     DO $$
-    DECLARE target record;
+    DECLARE targets text;
     BEGIN
-      FOR target IN
-        SELECT tablename FROM pg_tables WHERE schemaname = 'public'
-      LOOP
-        EXECUTE format('truncate table public.%I cascade', target.tablename);
-      END LOOP;
+      SELECT string_agg(format('public.%I', tablename), ', ')
+        INTO targets
+        FROM pg_tables
+       WHERE schemaname = 'public';
+
+      EXECUTE 'truncate table auth.users'
+        || coalesce(', ' || targets, '')
+        || ' cascade';
     END
     $$;
   `);

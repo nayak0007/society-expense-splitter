@@ -16,6 +16,8 @@ import { AppConfigModule } from "./config/config.module";
 import { AppConfig } from "./config/app-config";
 import { CacheModule } from "./infrastructure/cache/cache.module";
 import { DatabaseModule } from "./infrastructure/database/database.module";
+import { StorageModule } from "./infrastructure/storage/storage.module";
+import { AttachmentsModule } from "./modules/attachments/attachments.module";
 import { ExpensesModule } from "./modules/expenses/expenses.module";
 import { HealthModule } from "./modules/health/health.module";
 import { InvitationsModule } from "./modules/invitations/invitations.module";
@@ -67,6 +69,18 @@ import { buildLoggerParams } from "./observability/logger";
     // SocietiesModule for the same narrow membership read the structure module uses, and
     // declares no provider of its own for it — see the module for why that is the whole point.
     ExpensesModule,
+    // T071's object storage (SAD §10.2, ADR-0012). Imported here rather than left to
+    // the two modules that need it, because a bucket created at boot must be created
+    // once for the process — `StorageModule`'s `onModuleInit` bootstrap runs when the
+    // module is instantiated, and relying on a feature module to pull it in would make
+    // "does the bucket get provisioned" depend on which routes happen to be mounted.
+    // It declares no controller and no route; it is a capability.
+    StorageModule,
+    // T071's attachments: three routes over an object store and one table. Its own
+    // module because it owns its own table, its own ports and its own storage usage —
+    // and because `ExpensesModule` consumes one of its ports (the draft-deletion
+    // cleanup), which is a contract this module exports rather than an internals reach.
+    AttachmentsModule,
   ],
   providers: [
     // T048 — the member module's bulk import reads the invitations module's repository

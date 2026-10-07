@@ -87,8 +87,18 @@ export default async function globalSetup(): Promise<void> {
     ownerUrl: infrastructure.ownerUrl,
     runtimeUrl: infrastructure.runtimeUrl,
     redisUrl: infrastructure.redisUrl,
+    // T071. The bucket itself is created by the API's own storage bootstrap
+    // (`STORAGE_AUTO_CREATE_BUCKET=true`, set by `setup-env.ts`), not here: the
+    // bootstrap is shipped behaviour, so the suite exercises it rather than
+    // bypassing it — which is the same reason the migrations are applied through the
+    // real runner and no fixture is seeded by hand.
+    storageEndpoint: infrastructure.storageEndpoint,
+    storageAccessKeyId: infrastructure.storageAccessKeyId,
+    storageSecretAccessKey: infrastructure.storageSecretAccessKey,
+    storageBucket: infrastructure.storageBucket,
     postgresId: infrastructure.postgres.getId(),
     redisId: infrastructure.redis.getId(),
+    objectStoreId: infrastructure.objectStore.getId(),
   };
 
   mkdirSync(dirname(STATE_FILE), { recursive: true });

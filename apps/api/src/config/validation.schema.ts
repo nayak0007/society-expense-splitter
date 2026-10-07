@@ -48,6 +48,19 @@ export const nodeEnvSchema = z.enum([
 ]);
 export type NodeEnv = z.infer<typeof nodeEnvSchema>;
 
+/**
+ * A boolean that a `.env` file can actually express.
+ *
+ * `z.coerce.boolean()` is wrong for this and would have shipped a footgun:
+ * JavaScript's `Boolean("false")` is `true`, so `STORAGE_AUTO_CREATE_BUCKET=false`
+ * — the value `.env.example` documents — would have switched the feature **on**.
+ * Accepting the two spellings people write, and refusing anything else, keeps a
+ * misconfiguration loud instead of inverted.
+ */
+const booleanishSchema = z
+  .union([z.boolean(), z.enum(["true", "false"])])
+  .transform((value) => value === true || value === "true");
+
 export const envSchema = z.object({
   NODE_ENV: nodeEnvSchema.default("development"),
   PORT: z.coerce.number().int().positive().max(65535).default(3000),
@@ -98,8 +111,99 @@ export const envSchema = z.object({
    */
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(32),
 
-  STORAGE_PROVIDER: z.enum(["supabase", "r2", "s3"]).default("supabase"),
+  /**
+   * Which S3-compatible store the object bytes live in — SAD §19.2's
+   * `STORAGE_PROVIDER`. **A label for a set of defaults, never a choice of code
+   * path**, and in a deployed environment it names the endpoint an operator
+   * actually runs rather than a vendor.
+   *
+   * ## `minio` is the default, and it is the *only* local-only value
+   *
+   * `minio` as the schema default is what makes a fresh checkout work with no
+   * storage configuration at all: the local endpoint and the local compose
+   * credentials below fill in, and `pnpm dev:infra` is enough to upload a bill. The
+   * production guard in `collectAssertions` then refuses `minio` outside
+   * development, so the default can never be shipped by accident.
+   *
+   * ## Where the bytes live in a deployed environment (2026-10-07)
+   *
+   * Deployment intent: Supabase provides **PostgreSQL and Auth only**; the API,
+   * Redis and the S3-compatible object store run on a VPS. SAD §14.2's
+   * "MinIO local, Supabase staging/production" matrix predates that decision. So no
+   * value here is *required* by production: `s3` is the provider-neutral value for an
+   * operator-hosted S3-compatible endpoint (the VPS store included) and needs only
+   * `STORAGE_ENDPOINT`, `STORAGE_REGION`, the access-key pair and `STORAGE_BUCKET`;
+   * `supabase` is exact about Supabase Storage's own endpoint (derived from
+   * `SUPABASE_URL`) and remains supported; `r2` stays for a Cloudflare bucket.
+   *
+   * ## All four values pick the *same* adapter
+   *
+   * ADR-0012's measurement is explicit that one S3-compatible adapter serves every
+   * provider — endpoint, region, credentials, bucket and path-style addressing are
+   * the only differences. `s3` therefore already subsumes the other three *as a
+   * label*; collapsing the enum to `s3` plus an explicit `local` is a worthwhile
+   * later cleanup and is deliberately not done here, because it would churn a
+   * contract (`apps/api/.env.example`, docs and tests) for naming purity only — see
+   * the recommendation recorded in ADR-0012.
+   */
+  STORAGE_PROVIDER: z.enum(["minio", "supabase", "r2", "s3"]).default("minio"),
   STORAGE_BUCKET: z.string().min(1).default("ses-attachments"),
+  /**
+   * The S3 API endpoint — the value that actually determines which store the bytes
+   * reach; `STORAGE_PROVIDER` above only supplies defaults. Optional because two of
+   * the four labels can be defaulted: `minio` to the compose service in development,
+   * and `supabase` to the project's own storage hostname, derived from `SUPABASE_URL`
+   * by the adapter. Required outside development — including for `s3`, where there is
+   * no default to fall back on — where a wrong or missing endpoint must fail at boot
+   * rather than at the first upload.
+   */
+  STORAGE_ENDPOINT: z.url().optional(),
+  /** SigV4 signing region. Defaulted because MinIO and Supabase Storage both ignore
+   * it in practice (ADR-0012 D1 probes 15 and 27 — `ap-northeast-2` and `us-east-1`
+   * were both accepted) while `r2`/`s3` genuinely need one. */
+  STORAGE_REGION: z.string().min(1).default("us-east-1"),
+  /**
+   * The S3 access key pair. **Server-side only.** These are never returned to a
+   * client, never logged, and never placed in the OpenAPI document: the client
+   * receives a presigned URL and the headers its signature expects, which is a
+   * *derived* credential bound to one object, one method, one byte count and one
+   * expiry. Required outside development.
+   */
+  STORAGE_ACCESS_KEY_ID: z.string().min(1).optional(),
+  STORAGE_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+  /**
+   * Path-style addressing (`…/bucket/key`) rather than virtual-hosted
+   * (`bucket.…/key`). Defaulted to `true` because both shipped configurations need
+   * it: MinIO on a bare hostname cannot resolve a bucket subdomain, and Supabase
+   * Storage's S3 endpoint served path-style in every probe ADR-0012 records. A
+   * Cloudflare or AWS bucket sets it `false`.
+   */
+  STORAGE_FORCE_PATH_STYLE: booleanishSchema.default(true),
+  /**
+   * Create the bucket at boot if it is absent. **Off everywhere but local
+   * development and the integration suite**, and there for one concrete reason: the
+   * previous local setup created the bucket with a `createbuckets` companion
+   * service running `minio/mc`, and that image no longer exists (see
+   * `infra/docker/docker-compose.dev.yml`). Doing it from the API's own SDK is the
+   * smallest maintainable replacement — no second image, no second service, no
+   * shell loop polling a health endpoint — and it stays opt-in so that a deployed
+   * process never rearranges a production bucket.
+   */
+  STORAGE_AUTO_CREATE_BUCKET: booleanishSchema.default(false),
+  /**
+   * The presign lifetime. 900 seconds, which is SAD §10.1's "15 min" and the
+   * Roadmap's acceptance sentence, and is verified against both providers
+   * (`X-Amz-Expires=900`; ADR-0012 D1 probes 6, 7 and 20). Configurable so the
+   * integration suite can mint a 1-second URL to prove expiry is enforced, and for
+   * no other reason — a longer window is a larger leak, so nothing reads it to
+   * extend a credential's life in production.
+   */
+  STORAGE_PRESIGN_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(604_800)
+    .default(900),
 
   // ── Observability ────────────────────────────────────────────────────────
   SENTRY_DSN: z.url().optional(),
@@ -147,6 +251,39 @@ function collectAssertions(env: Env): string[] {
     env.NODE_ENV === "production" || env.NODE_ENV === "staging";
 
   if (isProductionish) {
+    // ── Object storage ───────────────────────────────────────────────────────
+    //
+    // Deployment intent (2026-10-07): Supabase is the managed PostgreSQL and Auth
+    // tier, and bytes live in an operator-hosted S3-compatible store (the VPS one) or
+    // in any other compatible endpoint an environment is configured for — ADR-0012
+    // measured Supabase Storage as verified-compatible and the pinned local MinIO as
+    // the *local/test* provider. The rule below is therefore about shape, not vendor:
+    // name a real endpoint, and bring credentials. Both failures are silent, which is
+    // why both are asserted rather than documented — a deployed process pointed at a
+    // developer's compose MinIO would "work" until the first upload went nowhere, and
+    // a deployed process with no credentials would boot happily and fail its first
+    // presign.
+    if (env.STORAGE_PROVIDER === "minio") {
+      problems.push(
+        "STORAGE_PROVIDER: `minio` is the local compose store only; a deployed environment must name the S3-compatible store it targets (`s3` for an operator-hosted endpoint such as the VPS object store, or `supabase`/`r2`)",
+      );
+    }
+    if (!env.STORAGE_ENDPOINT) {
+      problems.push(
+        "STORAGE_ENDPOINT: required when NODE_ENV is production or staging",
+      );
+    }
+    if (!env.STORAGE_ACCESS_KEY_ID) {
+      problems.push(
+        "STORAGE_ACCESS_KEY_ID: required when NODE_ENV is production or staging",
+      );
+    }
+    if (!env.STORAGE_SECRET_ACCESS_KEY) {
+      problems.push(
+        "STORAGE_SECRET_ACCESS_KEY: required when NODE_ENV is production or staging",
+      );
+    }
+
     // SAD §19.2: "That last check has saved real companies real money. Keep it."
     if (!env.SENTRY_DSN) {
       problems.push(
