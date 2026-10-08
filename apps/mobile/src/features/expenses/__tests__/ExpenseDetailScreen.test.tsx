@@ -12,6 +12,9 @@ import {
 jest.mock('expo-router', () => ({
   Stack: { Screen: () => null },
   useLocalSearchParams: () => ({ id: 'e1' }),
+  // The screen offers an Edit action (T074) through `router.push`; the mock must supply the hook
+  // the screen calls, even though the mocked `Stack.Screen` never renders the button itself.
+  useRouter: () => ({ push: jest.fn() }),
 }));
 
 jest.mock('../hooks/use-expenses', () => ({

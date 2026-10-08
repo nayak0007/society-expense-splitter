@@ -60,4 +60,16 @@ export const expenseKeys = {
   /** The society's buildings, for the building filter's options. */
   buildingOptions: (societyId: string | null, userId: string | null) =>
     ['expense', 'building-options', societyId, userId] as const,
+  /**
+   * The society's **active** categories, for the form's picker (T074).
+   *
+   * A separate key from `categoryNames` rather than the same read twice: the map the list and
+   * detail resolve labels from is not the choice list a form offers, and a form must not show a
+   * deactivated category that a historical row still needs to name.
+   */
+  categoryOptions: (societyId: string | null, userId: string | null) =>
+    ['expense', 'category-options', societyId, userId] as const,
+  /** The society's billable members, for the form's payer picker (T074). */
+  payerOptions: (societyId: string | null, userId: string | null) =>
+    ['expense', 'payer-options', societyId, userId] as const,
 };

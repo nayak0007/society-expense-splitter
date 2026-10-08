@@ -1,4 +1,4 @@
-import { Stack, useLocalSearchParams } from 'expo-router';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { Linking, ScrollView, View } from 'react-native';
@@ -24,6 +24,8 @@ import { useExpenseCategoryNames } from '../hooks/use-expenses';
 import type { ExpenseAttachmentView } from '../repository/expense.repository';
 import { formatExpenseDate, formatPaise } from '../schemas/expense.schemas';
 import { expenseErrorMessage } from '../services/expense.service';
+import { selectActiveMembership, useSocietyStore } from '@/stores/society.store';
+import { asMemberId, canOnResource, memberSnapshotOf } from '@ses/domain';
 
 /**
  * One expense (PRD §3.5.3, Roadmap T073): amount, category, date, status, the full split
@@ -53,6 +55,8 @@ import { expenseErrorMessage } from '../services/expense.service';
  */
 export default function ExpenseDetailScreen() {
   const params = useLocalSearchParams<{ id?: string }>();
+  const router = useRouter();
+  const membership = useSocietyStore(selectActiveMembership);
   const expenseId = params.id ?? null;
 
   const { expense, isLoading, error, refetch } = useExpense(expenseId);
@@ -93,9 +97,53 @@ export default function ExpenseDetailScreen() {
     }
   };
 
+  /*
+    The Edit action (T074) — offered only where editing is actually possible.
+
+    Two conditions, and both are load-bearing. The **lifecycle** one keeps the form off a
+    published row: a published edit is T068's recalculation, with a diff and a different response
+    shape, and this screen has no room for it. The **authorisation** one is the matrix's own cell
+    for editing an expense (`expense.void`, scoped to the caller's own drafts for a Committee
+    Member) evaluated through `canOnResource` rather than a role comparison — the same rule the
+    API's guard applies, so a hidden button and a refused request always agree.
+  */
+  const snapshot = membership === null ? null : memberSnapshotOf(membership);
+  const editable = expense.status === 'draft' || expense.status === 'pending_approval';
+  const canEdit =
+    editable &&
+    snapshot !== null &&
+    canOnResource(snapshot, 'expense.void', {
+      kind: 'expense',
+      societyId: snapshot.societyId,
+      createdByMembershipId: asMemberId(expense.createdBy),
+      published: false,
+    });
+
   return (
     <View className="flex-1 bg-surface">
-      <Stack.Screen options={{ title: expense.title }} />
+      <Stack.Screen
+        options={{
+          title: expense.title,
+          // Spread rather than `undefined` (the project sets `exactOptionalPropertyTypes`).
+          ...(canEdit
+            ? {
+                headerRight: () => (
+                  <Button
+                    variant="text"
+                    onPress={() =>
+                      router.push({
+                        pathname: '/(app)/expenses/[id]/edit',
+                        params: { id: expense.id },
+                      })
+                    }
+                  >
+                    Edit
+                  </Button>
+                ),
+              }
+            : {}),
+        }}
+      />
       <ScrollView>
         <View className="gap-4 p-lg">
           <Card variant="filled">

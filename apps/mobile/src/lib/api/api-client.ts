@@ -46,6 +46,13 @@ export interface ApiErrorBody {
         readonly field: string;
         readonly code: string;
         readonly message: string;
+        /**
+         * The value the server holds, when the refusal is about a mismatch — e.g. the current
+         * version on a `409 VERSION_MISMATCH` (SAD §7.11). Typed as `unknown` because the
+         * catalogue carries it for several failures and only the caller that received it knows
+         * what it is; T074's conflict flow narrows it to an integer.
+         */
+        readonly current?: unknown;
       }[]
     | undefined;
   readonly requestId?: string;

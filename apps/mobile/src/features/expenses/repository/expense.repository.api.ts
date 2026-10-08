@@ -30,17 +30,20 @@ import {
   expenseRevisionsResponseSchema,
   expenseSplitsResponseSchema,
   buildingListResponseSchema,
+  memberListResponseSchema,
 } from '@ses/contracts';
-import type { ExpenseDto } from '@ses/contracts';
+import type { CreateExpensePayload, ExpenseDto, UpdateExpensePayload } from '@ses/contracts';
 
 import { apiRequest, isApiError } from '@/lib/api/api-client';
 
 import type {
   ExpenseAttachmentDownload,
   ExpenseAttachmentView,
+  ExpenseCategoryOption,
   ExpenseCommentView,
   ExpenseListQuery,
   ExpensePage,
+  ExpensePayerOption,
   ExpenseRepository,
   ExpenseRevisionView,
   ExpenseSplitView,
@@ -59,6 +62,9 @@ function toSummary(dto: ExpenseDto): ExpenseSummary {
     amountPaise: dto.amountPaise,
     expenseDate: dto.expenseDate,
     vendorName: dto.vendorName,
+    paymentSource: dto.paymentSource,
+    paidByMemberId: dto.paidByMemberId,
+    createdBy: dto.createdBy,
     status: dto.status,
     version: dto.version,
     publishedAt: dto.publishedAt,
@@ -233,5 +239,69 @@ export class ApiExpenseRepository implements ExpenseRepository {
       societyId,
     });
     return buildings.map((building) => ({ id: building.id, name: building.name }));
+  }
+
+  async listCategoryOptions(
+    societyId: string,
+    _actor: string,
+  ): Promise<readonly ExpenseCategoryOption[]> {
+    const { categories } = await apiRequest('GET', 'expense-categories', {
+      schema: expenseCategoryListResponseSchema,
+      societyId,
+    });
+    // `isActive` is the server's own flag and the picker's only filter: a deactivated category is
+    // still returned so historical rows can be labelled, and re-offering it on a new bill is
+    // exactly what T062's deactivation exists to prevent.
+    return categories
+      .filter((category) => category.isActive)
+      .map((category) => ({ id: category.id, name: category.name }));
+  }
+
+  async listPayerOptions(
+    societyId: string,
+    _actor: string,
+  ): Promise<readonly ExpensePayerOption[]> {
+    // A bounded page rather than the whole directory: the payer is one tap out of the members a
+    // treasurer actually bills, and pulling a 300-member society into a form field would be a
+    // request made on every mount. `limit` is clamped server-side, and the query orders by name.
+    const { members } = await apiRequest('GET', 'members?limit=100', {
+      schema: memberListResponseSchema,
+      societyId,
+    });
+    return members
+      .filter((member) => member.status === 'active')
+      .map((member) => ({ id: member.id, displayName: member.displayName }));
+  }
+
+  async create(
+    societyId: string,
+    _actor: string,
+    payload: CreateExpensePayload,
+  ): Promise<ExpenseSummary> {
+    const { expense } = await apiRequest('POST', 'expenses', {
+      schema: expenseResponseSchema,
+      societyId,
+      body: payload,
+    });
+    return toSummary(expense);
+  }
+
+  async update(
+    expenseId: string,
+    societyId: string,
+    _actor: string,
+    payload: UpdateExpensePayload,
+  ): Promise<ExpenseSummary> {
+    // The published-edit door answers `{ expense, recalculation }`; `expenseResponseSchema` is a
+    // non-strict object, so the same parse reads both shapes and the extra key is ignored. The
+    // form never takes that door (it only offers draft/pending-approval rows), but a PATCH that
+    // crossed the threshold between load and save must still return a usable row rather than
+    // throwing at the boundary.
+    const { expense } = await apiRequest('PATCH', `expenses/${expenseId}`, {
+      schema: expenseResponseSchema,
+      societyId,
+      body: payload,
+    });
+    return toSummary(expense);
   }
 }

@@ -4,14 +4,18 @@ import { selectAuthUser, useAuthStore } from '@/stores/auth.store';
 import { selectActiveSocietyId, useSocietyStore } from '@/stores/society.store';
 
 import type {
+  ExpenseCategoryOption,
   ExpenseListQuery,
   ExpensePage,
+  ExpensePayerOption,
   ExpenseSummary,
 } from '../repository/expense.repository';
 import {
   loadBuildingOptions,
+  loadCategoryOptions,
   loadExpenseCategoryNames,
   loadExpenses,
+  loadPayerOptions,
 } from '../services/expense.service';
 
 import { expenseKeys } from './expense-keys';
@@ -159,6 +163,55 @@ export function useExpenseCategoryNames(): {
   });
 
   return { names: query.data ?? new Map<string, string>() };
+}
+
+/**
+ * The society's active categories, for the form's picker (T074).
+ *
+ * Same shape of read as `useExpenseCategoryNames` and a different question: that one labels the
+ * rows the user is looking at, this one offers the choices the user may write. A deactivated
+ * category appears in neither the list nor the choices — `listCategoryOptions` filters it out at
+ * the adapter, where the server's `isActive` is known.
+ */
+export function useExpenseCategoryOptions(): {
+  readonly categories: readonly ExpenseCategoryOption[];
+  readonly isLoading: boolean;
+} {
+  const user = useAuthStore(selectAuthUser);
+  const societyId = useSocietyStore(selectActiveSocietyId);
+  const userId = user?.id ?? null;
+
+  const query = useQuery({
+    queryKey: expenseKeys.categoryOptions(societyId, userId),
+    queryFn: () => loadCategoryOptions(userId ?? '', societyId ?? ''),
+    enabled: userId !== null && societyId !== null,
+  });
+
+  return {
+    categories: query.data ?? [],
+    isLoading: query.isPending && userId !== null && societyId !== null,
+  };
+}
+
+/** The society's billable members, for the form's payer picker (T074). */
+export function useExpensePayerOptions(): {
+  readonly payers: readonly ExpensePayerOption[];
+  readonly isLoading: boolean;
+} {
+  const user = useAuthStore(selectAuthUser);
+  const societyId = useSocietyStore(selectActiveSocietyId);
+  const userId = user?.id ?? null;
+
+  const query = useQuery({
+    queryKey: expenseKeys.payerOptions(societyId, userId),
+    queryFn: () => loadPayerOptions(userId ?? '', societyId ?? ''),
+    enabled: userId !== null && societyId !== null,
+  });
+
+  return {
+    payers: query.data ?? [],
+    isLoading: query.isPending && userId !== null && societyId !== null,
+  };
 }
 
 /**

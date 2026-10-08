@@ -14,12 +14,16 @@
  * the adapter, which is where scope (the society header) is established.
  */
 
+import type { CreateExpensePayload, UpdateExpensePayload } from '@ses/contracts';
+
 import type {
   ExpenseAttachmentDownload,
   ExpenseAttachmentView,
+  ExpenseCategoryOption,
   ExpenseCommentView,
   ExpenseListQuery,
   ExpensePage,
+  ExpensePayerOption,
   ExpenseRevisionView,
   ExpenseSplitView,
   ExpenseSummary,
@@ -103,6 +107,49 @@ export async function loadBuildingOptions(
   societyId: string,
 ): Promise<readonly { readonly id: string; readonly name: string }[]> {
   return getExpenseRepository().listBuildingOptions(societyId, actorId);
+}
+
+/** The society's active categories, for the form's picker. */
+export async function loadCategoryOptions(
+  actorId: string,
+  societyId: string,
+): Promise<readonly ExpenseCategoryOption[]> {
+  return getExpenseRepository().listCategoryOptions(societyId, actorId);
+}
+
+/** The society's billable members, for the form's payer picker. */
+export async function loadPayerOptions(
+  actorId: string,
+  societyId: string,
+): Promise<readonly ExpensePayerOption[]> {
+  return getExpenseRepository().listPayerOptions(societyId, actorId);
+}
+
+/**
+ * Create a draft — `POST /v1/expenses`.
+ *
+ * Nothing is retried here, and nothing is deduplicated: the create route carries no
+ * `Idempotency-Key` (only `publish` does, T066), so a blind retry after an ambiguous timeout
+ * could record the bill twice. The screen's synchronous in-flight guard is what prevents the
+ * *common* duplicate — a double tap — and an ambiguous network outcome is surfaced to the user
+ * instead of being retried for them.
+ */
+export async function createExpense(
+  actorId: string,
+  societyId: string,
+  payload: CreateExpensePayload,
+): Promise<ExpenseSummary> {
+  return getExpenseRepository().create(societyId, actorId, payload);
+}
+
+/** Edit a draft or pending-approval expense — `PATCH /v1/expenses/:expenseId`. */
+export async function updateExpense(
+  actorId: string,
+  societyId: string,
+  expenseId: string,
+  payload: UpdateExpensePayload,
+): Promise<ExpenseSummary> {
+  return getExpenseRepository().update(expenseId, societyId, actorId, payload);
 }
 
 /**

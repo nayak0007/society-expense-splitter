@@ -18,7 +18,8 @@
  * fact, not a re-pricing.
  */
 
-import type { AttachmentScanStatus, ExpenseStatus } from '@ses/domain';
+import type { CreateExpensePayload, UpdateExpensePayload } from '@ses/contracts';
+import type { AttachmentScanStatus, ExpenseStatus, PaymentSource } from '@ses/domain';
 
 /** One expense as the list and the detail header read it. */
 export interface ExpenseSummary {
@@ -32,6 +33,23 @@ export interface ExpenseSummary {
   /** `YYYY-MM-DD` — the stored date, not an instant. */
   readonly expenseDate: string;
   readonly vendorName: string | null;
+  /**
+   * Where the money came from (PRD §3.4) and who actually paid it.
+   *
+   * Added by T074: the form prefills itself from the server's row and diffs against it, so both
+   * fields have to travel on the summary a screen already reads. `paidByMemberId` is nullable
+   * because the column is — a draft is allowed to be incomplete.
+   */
+  readonly paymentSource: PaymentSource;
+  readonly paidByMemberId: string | null;
+  /**
+   * The **membership** that created the row.
+   *
+   * Carried by T074 because it is one of the two facts the edit gate reads (the other is the
+   * status): a Committee Member may edit their own draft and no one else's, and
+   * `canOnResource('expense.void', …)` decides that from this id — not from a role guess.
+   */
+  readonly createdBy: string;
   readonly status: ExpenseStatus;
   /** Bumped on every write; `> 1` is the "edited" signal. */
   readonly version: number;
@@ -124,7 +142,24 @@ export interface ExpenseListQuery {
   readonly limit?: number | undefined;
 }
 
-/** The read-only expense port the mobile feature consumes. */
+/** One selectable expense category, as the form's picker needs it. */
+export interface ExpenseCategoryOption {
+  readonly id: string;
+  readonly name: string;
+}
+
+/**
+ * One selectable payer — who the money actually came from (PRD §3.4's `paid_by_member_id`).
+ *
+ * Only the fields a picker renders: a member id is not a name, and a form that showed ids would
+ * be asking a treasurer to memorise uuids.
+ */
+export interface ExpensePayerOption {
+  readonly id: string;
+  readonly displayName: string;
+}
+
+/** The expense port the mobile feature consumes — reads for the list/detail, writes for the form. */
 export interface ExpenseRepository {
   list(societyId: string, actor: string, query: ExpenseListQuery): Promise<ExpensePage>;
   /** `null` for an expense the caller may not see — a cross-society id is a 404, folded here. */
@@ -168,4 +203,46 @@ export interface ExpenseRepository {
     societyId: string,
     actor: string,
   ): Promise<readonly { readonly id: string; readonly name: string }[]>;
+
+  // ── writes (T074) ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Create a draft. The server decides the state (`draft`, or `pending_approval` above the
+   * society's threshold) and mints the id; nothing is published, split or charged here.
+   */
+  create(societyId: string, actor: string, payload: CreateExpensePayload): Promise<ExpenseSummary>;
+
+  /**
+   * Edit a draft or pending-approval expense, or recalculate a published one.
+   *
+   * `payload` carries `expectedVersion`; a stale value is refused by the server with
+   * `409 VERSION_MISMATCH`, which the caller turns into a conflict the user resolves. This form
+   * only ever reaches the first two states — a published edit is a recalculation with its own
+   * response shape and its own screen (§15 of the T074 audit).
+   */
+  update(
+    expenseId: string,
+    societyId: string,
+    actor: string,
+    payload: UpdateExpensePayload,
+  ): Promise<ExpenseSummary>;
+
+  /**
+   * The society's **active** categories, for the form's picker.
+   *
+   * Separate from `listCategoryNames` on purpose: the list/detail screens resolve a label from a
+   * map they already hold, while a form needs an ordered set of *choices* — and a deactivated
+   * category must not be offered on a new expense even though it must still label a historical
+   * row (T062's `is_active`).
+   */
+  listCategoryOptions(societyId: string, actor: string): Promise<readonly ExpenseCategoryOption[]>;
+
+  /**
+   * The society's billable members, for the payer picker.
+   *
+   * Read through this feature's own adapter rather than imported from the members feature: the
+   * dependency-cruiser rule forbids a feature reaching into another's internals, and this is a
+   * read the form genuinely owns (the same reasoning `listBuildingOptions` records).
+   */
+  listPayerOptions(societyId: string, actor: string): Promise<readonly ExpensePayerOption[]>;
 }

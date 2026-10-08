@@ -9,6 +9,8 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { ErrorScreen } from '@/components/ui/ErrorScreen';
 import { LoadingIndicator } from '@/components/ui/LoadingIndicator';
 import { Text } from '@/components/ui/Text';
+import { selectActiveMembership, useSocietyStore } from '@/stores/society.store';
+import { canOnResource, memberSnapshotOf } from '@ses/domain';
 
 import { ExpenseCard } from '../components/ExpenseCard';
 import {
@@ -57,6 +59,7 @@ import { toRows } from './expense-list-rows';
  */
 export default function ExpenseListScreen() {
   const router = useRouter();
+  const membership = useSocietyStore(selectActiveMembership);
   const [filters, setFilters] = useState<ExpenseFilterState>(EMPTY_EXPENSE_FILTERS);
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [showFilters, setShowFilters] = useState(false);
@@ -102,9 +105,44 @@ export default function ExpenseListScreen() {
   const openExpense = (expense: ExpenseSummary): void =>
     router.push({ pathname: '/(app)/expenses/[id]', params: { id: expense.id } });
 
+  /*
+    The New action, gated by the same cell the route guard reads (T074).
+
+    `expense.create` is a conditional (scoped) column for a Committee Member — eligible, then narrowed against
+    the record — so the snapshot declares the intended state (`published: false`) exactly as the
+    API's own `canOnResource` call does. This is an *explanation*: the form and the API refuse the
+    same write underneath. Nothing is rendered for a caller the matrix does not pass, rather than a
+    button that opens a screen saying "denied".
+  */
+  const snapshot = membership === null ? null : memberSnapshotOf(membership);
+  const canCreate =
+    snapshot !== null &&
+    canOnResource(snapshot, 'expense.create', {
+      kind: 'expense',
+      societyId: snapshot.societyId,
+      createdByMembershipId: null,
+      published: false,
+    });
+
   return (
     <View className="flex-1 bg-surface">
-      <Stack.Screen options={{ title: 'Expenses' }} />
+      <Stack.Screen
+        options={{
+          title: 'Expenses',
+          // Absent rather than a disabled control: a role that cannot add an expense is not shown
+          // one, so the ledger is not cluttered with an action that only explains a refusal. Spread
+          // because `exactOptionalPropertyTypes` is on and `headerRight` is not `| undefined`.
+          ...(canCreate
+            ? {
+                headerRight: () => (
+                  <Button variant="text" onPress={() => router.push('/(app)/expenses/new')}>
+                    New
+                  </Button>
+                ),
+              }
+            : {}),
+        }}
+      />
 
       <View className="gap-3 px-lg pt-md">
         <Button variant="tonal" onPress={() => setShowFilters((current) => !current)}>

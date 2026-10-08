@@ -20,6 +20,8 @@
     "@hookform/resolvers": "^5.9.1",
     "@react-native-community/netinfo": "12.0.1",
     "@ses/application": "workspace:*",
+    "@ses/contracts": "workspace:*",
+    "@ses/domain": "workspace:*",
     "@shopify/flash-list": "2.0.2",
     "@supabase/supabase-js": "^2.116.0",
     "@tanstack/react-query": "^5.103.1",
