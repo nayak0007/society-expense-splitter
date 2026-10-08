@@ -164,6 +164,13 @@ const NARROWED_ROUTES: readonly string[] = [
   // D6.4's uploader branch, which is a narrower grant than the cell rather than a
   // wider one: the uploader may remove their own row whatever the role cell says.
   "AttachmentsController DELETE /attachments/:attachmentId",
+
+  // T072's GST upsert. `expense.create`'s cell — Admin/Treasurer full, Committee
+  // Member *draft only* — and `UpsertGstDetailsUseCase.upsert` narrows it with
+  // `canOnResource` against the stored expense (`snapshotOf`, where a
+  // `pending_approval` or `published` expense is not a draft) after refusing a
+  // `void` one for everybody (D4). No `gst.*` permission exists (D3).
+  "ExpensesController PUT /expenses/:expenseId/gst",
 ];
 
 async function collectRoutes(

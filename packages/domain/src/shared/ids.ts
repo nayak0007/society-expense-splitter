@@ -28,6 +28,14 @@ export type ExpenseId = Brand<string, "ExpenseId">;
  * exists to make uncompilable.
  */
 export type ExpenseCategoryId = Brand<string, "ExpenseCategoryId">;
+/**
+ * A row of `expense_comments`, the flat discussion stream on an expense
+ * (PRD §3.5.3 "Notes", Roadmap T072).
+ *
+ * Branded separately like every other id: a comment id passed where an expense id
+ * belongs must be a compile error, not a cross-table write.
+ */
+export type ExpenseCommentId = Brand<string, "ExpenseCommentId">;
 
 /** Boundary helpers — the only place a raw string becomes a branded id. */
 export const asUserId = (value: string): UserId => value as UserId;
@@ -42,3 +50,5 @@ export const asInvitationId = (value: string): InvitationId =>
 export const asExpenseId = (value: string): ExpenseId => value as ExpenseId;
 export const asExpenseCategoryId = (value: string): ExpenseCategoryId =>
   value as ExpenseCategoryId;
+export const asExpenseCommentId = (value: string): ExpenseCommentId =>
+  value as ExpenseCommentId;

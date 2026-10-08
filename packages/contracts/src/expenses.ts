@@ -5,6 +5,7 @@ import {
   CATEGORY_DISPLAY_ORDER_MIN,
   CATEGORY_ICON_MAX_LENGTH,
   CATEGORY_NAME_MAX_LENGTH,
+  EXPENSE_COMMENT_BODY_MAX_LENGTH,
   EXPENSE_DESCRIPTION_MAX_LENGTH,
   EXPENSE_REJECTION_REASON_MIN_LENGTH,
   EXPENSE_STATUSES,
@@ -12,6 +13,11 @@ import {
   EXPENSE_VENDOR_NAME_MAX_LENGTH,
   FLOOR_MAX,
   FLOOR_MIN,
+  GST_HSN_SAC_MAX_LENGTH,
+  GST_INVOICE_NUMBER_MAX_LENGTH,
+  GST_PLACE_OF_SUPPLY_MAX_LENGTH,
+  GST_WARNING_CODES,
+  GSTIN_LENGTH,
   IDEMPOTENCY_KEY_MAX_LENGTH,
   IDEMPOTENCY_KEY_MIN_LENGTH,
   OCCUPANCY_STATUSES,
@@ -23,6 +29,7 @@ import {
   UNASSIGNED_REASONS,
   VOID_REASON_MIN_LENGTH,
   WING_NAME_MAX_LENGTH,
+  isValidGstin,
 } from "@ses/domain";
 import { z } from "zod";
 
@@ -1045,4 +1052,233 @@ export const rejectExpenseResponseSchema = z.object({
 });
 export type RejectExpenseResponseDto = z.infer<
   typeof rejectExpenseResponseSchema
+>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GST details — Roadmap T072, PRD §3.5.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A GSTIN on an input field: optional, clearable, and **checksum-validated**.
+ *
+ * The check runs through `isValidGstin` — the domain's own value object, not a
+ * regex copied here — so the wire and the entity cannot disagree about what a
+ * usable GSTIN is. A structurally well-formed value with a wrong check digit (the
+ * transcription typo the PRD's task 29 exists to catch) is refused here, at the
+ * boundary, with the field named.
+ */
+const gstinInputSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(GSTIN_LENGTH)
+  .refine((value) => isValidGstin(value), {
+    message:
+      "That GSTIN is not valid. Check the fifteen characters and its check digit on the invoice.",
+  })
+  .nullable();
+
+const gstPaiseSchema = z
+  .number()
+  .int()
+  .nonnegative()
+  .max(Number.MAX_SAFE_INTEGER);
+
+/**
+ * `PUT /expenses/:expenseId/gst` — the whole GST record (D6).
+ *
+ * A `PUT` **replaces** the row: every field is a full statement of what the GST
+ * details now are, and an omitted optional field is written as its empty value
+ * (`null`, or `0` for an amount) rather than left untouched. That is what makes
+ * the route idempotent — sending the same body twice leaves the same row — and it
+ * is why a client edits the whole GST form rather than patching one field.
+ *
+ * ## The regime rule is checked here as well as in the database
+ *
+ * `taxable_value + taxes` is **not** validated: PRD §3.5.3 says warn, don't block,
+ * because real invoices round, so a mismatch is a warning on a successful response
+ * rather than a refusal. The *regime* rule — an invoice is intra-state
+ * (`CGST + SGST`) or inter-state (`IGST`), never both — is a real invariant the
+ * table enforces with `gst_single_regime`; refusing it here turns a 500-class
+ * constraint violation into a field error on `igstPaise`.
+ *
+ * Deliberately absent: `societyId` and `expenseId` (the URL and the header), and
+ * any derived or audit column.
+ */
+export const upsertExpenseGstSchema = z
+  .strictObject({
+    gstin: gstinInputSchema.optional(),
+    invoiceNumber: z
+      .string()
+      .trim()
+      .min(1)
+      .max(GST_INVOICE_NUMBER_MAX_LENGTH)
+      .nullable()
+      .optional(),
+    invoiceDate: expenseDateSchema.nullable().optional(),
+    taxableValuePaise: gstPaiseSchema.optional(),
+    cgstPaise: gstPaiseSchema.optional(),
+    sgstPaise: gstPaiseSchema.optional(),
+    igstPaise: gstPaiseSchema.optional(),
+    cessPaise: gstPaiseSchema.optional(),
+    hsnSac: z
+      .string()
+      .trim()
+      .min(1)
+      .max(GST_HSN_SAC_MAX_LENGTH)
+      .nullable()
+      .optional(),
+    placeOfSupply: z
+      .string()
+      .trim()
+      .min(1)
+      .max(GST_PLACE_OF_SUPPLY_MAX_LENGTH)
+      .nullable()
+      .optional(),
+    isReverseCharge: z.boolean().optional(),
+    itcEligible: z.boolean().optional(),
+  })
+  .refine(
+    (gst) =>
+      (gst.igstPaise ?? 0) === 0 ||
+      ((gst.cgstPaise ?? 0) === 0 && (gst.sgstPaise ?? 0) === 0),
+    {
+      message:
+        "A tax invoice is either inter-state (IGST) or intra-state (CGST + SGST), never both.",
+      path: ["igstPaise"],
+    },
+  );
+export type UpsertExpenseGstPayload = z.infer<typeof upsertExpenseGstSchema>;
+
+/**
+ * The stored GST record on the wire.
+ *
+ * The names mirror the entity, not the columns: money is integer paise (SAD §7.9),
+ * `invoiceDate` is the stored date, and the five components are the same five the
+ * PRD lists. A client never sees the database representation.
+ */
+export const expenseGstSchema = z.object({
+  expenseId: z.string(),
+  gstin: z.string().nullable(),
+  invoiceNumber: z.string().nullable(),
+  invoiceDate: z.string().nullable(),
+  taxableValuePaise: z.number().int(),
+  cgstPaise: z.number().int(),
+  sgstPaise: z.number().int(),
+  igstPaise: z.number().int(),
+  cessPaise: z.number().int(),
+  hsnSac: z.string().nullable(),
+  placeOfSupply: z.string().nullable(),
+  isReverseCharge: z.boolean(),
+  itcEligible: z.boolean(),
+});
+export type ExpenseGstDto = z.infer<typeof expenseGstSchema>;
+
+/**
+ * One non-blocking reconciliation warning (D7).
+ *
+ * `code` is the stable machine-readable discriminator and the only thing a client
+ * should branch on; the four amounts let a screen show the arithmetic behind it
+ * without recomputing it. `differencePaise` is `amount − (taxable + taxes)`.
+ */
+export const expenseGstWarningSchema = z.object({
+  code: z.enum(GST_WARNING_CODES),
+  taxableValuePaise: z.number().int(),
+  taxesPaise: z.number().int(),
+  amountPaise: z.number().int(),
+  differencePaise: z.number().int(),
+});
+export type ExpenseGstWarningDto = z.infer<typeof expenseGstWarningSchema>;
+
+/**
+ * `PUT /expenses/:expenseId/gst` — the stored record plus any warnings.
+ *
+ * Warnings are **structurally separate from an error**: the request succeeded, the
+ * row was written, and a `TAX_TOTAL_MISMATCH` here is the PRD's "warn, don't
+ * block". `warnings` is always present (empty when nothing is wrong) so a client
+ * never has to distinguish absent from empty.
+ */
+export const expenseGstResponseSchema = z.object({
+  gst: expenseGstSchema,
+  warnings: z.array(expenseGstWarningSchema),
+});
+export type ExpenseGstResponseDto = z.infer<typeof expenseGstResponseSchema>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Comments — Roadmap T072, PRD §3.5.3 "Notes"
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `POST /expenses/:expenseId/comments` — the body, and nothing else (D1).
+ *
+ * The author is the caller's own membership (accepting one would be accepting an
+ * attribution decision from the request), the sequence is the database's, and the
+ * comment is append-only: there is no `id`, no `parentId` (the stream is flat,
+ * D1) and no edit route. `expectedVersion` is deliberately absent — the stream is
+ * commutative, not a versioned row, so there is no optimistic lock to state.
+ *
+ * `body` is trimmed and required; control characters other than tab, newline and
+ * carriage return are refused, because a comment is prose and the others have no
+ * legitimate use in it.
+ */
+export const addExpenseCommentSchema = z.strictObject({
+  body: z
+    .string()
+    .trim()
+    .min(1)
+    .max(EXPENSE_COMMENT_BODY_MAX_LENGTH)
+    .refine(
+      // eslint-disable-next-line no-control-regex
+      (value) => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value),
+      {
+        message: "The comment contains characters that are not allowed.",
+      },
+    ),
+});
+export type AddExpenseCommentPayload = z.infer<typeof addExpenseCommentSchema>;
+
+/**
+ * One comment on the wire.
+ *
+ * `body` is `null` once the comment is soft-deleted: the record and its position
+ * in the stream are preserved (a deleted comment does not silently close the gap
+ * around it), the deletion is visible through `deleted`/`deletedAt`/`deletedBy`,
+ * and the prose itself is not returned to clients. The stored body is never lost —
+ * the row keeps it for audit — it is simply not the API's to publish.
+ */
+export const expenseCommentSchema = z.object({
+  id: z.string(),
+  expenseId: z.string(),
+  authorId: z.string(),
+  body: z.string().nullable(),
+  sequence: z.number().int(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  deleted: z.boolean(),
+  deletedAt: z.string().nullable(),
+  deletedBy: z.string().nullable(),
+});
+export type ExpenseCommentDto = z.infer<typeof expenseCommentSchema>;
+
+/** `POST /expenses/:expenseId/comments` — the appended comment. */
+export const expenseCommentResponseSchema = z.object({
+  comment: expenseCommentSchema,
+});
+export type ExpenseCommentResponseDto = z.infer<
+  typeof expenseCommentResponseSchema
+>;
+
+/**
+ * `GET /expenses/:expenseId/comments` — the whole stream, oldest first.
+ *
+ * Deliberately **not** paginated: a comment stream on a single expense is bounded
+ * by the number of people talking about one bill, and a cursor here would be
+ * complexity the product does not have a screen for. The order is the database's
+ * `sequence`, so a client renders the list as received.
+ */
+export const expenseCommentsResponseSchema = z.object({
+  comments: z.array(expenseCommentSchema),
+});
+export type ExpenseCommentsResponseDto = z.infer<
+  typeof expenseCommentsResponseSchema
 >;

@@ -80,3 +80,25 @@ export const EXPENSE_EVENT_PUBLISHER = Symbol("EXPENSE_EVENT_PUBLISHER");
 export const EXPENSE_REVISION_REPOSITORY = Symbol(
   "EXPENSE_REVISION_REPOSITORY",
 );
+
+/**
+ * The GST-details read and write — T072's `ExpenseGstDetailsRepository`.
+ *
+ * Its own token rather than a method on `EXPENSE_REPOSITORY` for the reason the
+ * revision and split tokens have one: it is a different table (`expense_gst_details`,
+ * 1:1 with the expense) with a different writer, and the e2e suite substitutes it
+ * independently — a fake that had to answer expenses *and* GST details would be the
+ * god-object the ports exist to avoid.
+ */
+export const EXPENSE_GST_DETAILS_REPOSITORY = Symbol(
+  "EXPENSE_GST_DETAILS_REPOSITORY",
+);
+
+/**
+ * The comment stream — T072's `ExpenseCommentRepository`.
+ *
+ * A third table (`expense_comments`), a third adapter and a third token, for the
+ * same reason each of the others has one: a comment is not an expense field and not
+ * a GST field, and its writer must be swappable on its own.
+ */
+export const EXPENSE_COMMENT_REPOSITORY = Symbol("EXPENSE_COMMENT_REPOSITORY");

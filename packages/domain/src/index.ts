@@ -48,6 +48,7 @@
 
 export * from "./shared/clock";
 export * from "./shared/errors";
+export * from "./shared/gstin.vo";
 export * from "./shared/ids";
 export * from "./shared/idempotency";
 export * from "./shared/money";
@@ -78,7 +79,9 @@ export * from "./invitation/errors";
 export * from "./invitation/invitation";
 export * from "./invitation/ports";
 export * from "./expense/category-value-objects";
+export * from "./expense/comment";
 export * from "./expense/errors";
+export * from "./expense/gst-details";
 export * from "./expense/events";
 export * from "./expense/expense-category";
 export * from "./expense/expense-split.vo";

@@ -1,4 +1,9 @@
 import {
+  expenseCommentResponseSchema,
+  expenseCommentSchema,
+  expenseCommentsResponseSchema,
+  expenseGstResponseSchema,
+  expenseGstSchema,
   expenseListResponseSchema,
   expenseResponseSchema,
   expenseRevisionsResponseSchema,
@@ -8,7 +13,12 @@ import {
   voidExpenseResponseSchema,
 } from "@ses/contracts";
 import type {
+  ExpenseCommentDto,
+  ExpenseCommentResponseDto,
+  ExpenseCommentsResponseDto,
   ExpenseDto,
+  ExpenseGstDto,
+  ExpenseGstResponseDto,
   ExpenseListResponseDto,
   ExpenseResponseDto,
   ExpenseRevisionsResponseDto,
@@ -16,8 +26,10 @@ import type {
   RecalculateExpenseResponseDto,
   VoidExpenseResponseDto,
 } from "@ses/contracts";
-import { paiseToWire } from "@ses/domain";
+import { isCommentDeleted, paiseToWire } from "@ses/domain";
 import type {
+  ExpenseCommentRecord,
+  ExpenseGstDetailsRecord,
   ExpensePublication,
   ExpenseRecalculation,
   ExpenseRecord,
@@ -26,6 +38,7 @@ import type {
 } from "@ses/domain";
 
 import type { ExpenseListResult } from "../application/use-cases/list-expenses.use-case";
+import type { UpsertGstDetailsOutcome } from "../application/use-cases/upsert-gst-details.use-case";
 
 /**
  * The expense record → the wire DTO — Roadmap T065.
@@ -204,5 +217,104 @@ export function expenseRevisionsToDto(
       changeNote: revision.changeNote,
       createdAt: revision.createdAt,
     })),
+  });
+}
+
+/**
+ * The GST details record → the wire DTO — Roadmap T072.
+ *
+ * Parses rather than constructs, like every mapper here: the contract schema is
+ * the client's parse target, so a renamed field fails loudly at this boundary
+ * instead of shipping as a payload the client cannot read. Each of the six amounts
+ * crosses through `paiseToWire` — the repository's single range-checked crossing
+ * point — so a malformed value throws instead of rounding.
+ */
+export function expenseGstToDto(
+  record: ExpenseGstDetailsRecord,
+): ExpenseGstDto {
+  return expenseGstSchema.parse({
+    expenseId: record.expenseId,
+    gstin: record.gstin,
+    invoiceNumber: record.invoiceNumber,
+    invoiceDate: record.invoiceDate,
+    taxableValuePaise: paiseToWire(record.taxableValuePaise),
+    cgstPaise: paiseToWire(record.cgstPaise),
+    sgstPaise: paiseToWire(record.sgstPaise),
+    igstPaise: paiseToWire(record.igstPaise),
+    cessPaise: paiseToWire(record.cessPaise),
+    hsnSac: record.hsnSac,
+    placeOfSupply: record.placeOfSupply,
+    isReverseCharge: record.isReverseCharge,
+    itcEligible: record.itcEligible,
+  });
+}
+
+/**
+ * The GST upsert outcome → the wire DTO — Roadmap T072, D7.
+ *
+ * The stored row plus the warnings the write produced. Warnings are structurally
+ * separate from an error: the request succeeded, and `TAX_TOTAL_MISMATCH` is the
+ * PRD's "warn, don't block". Every amount in a warning crosses through
+ * `paiseToWire` too.
+ */
+export function expenseGstResponseToDto(
+  outcome: UpsertGstDetailsOutcome,
+): ExpenseGstResponseDto {
+  return expenseGstResponseSchema.parse({
+    gst: expenseGstToDto(outcome.gst),
+    warnings: outcome.warnings.map((warning) => ({
+      code: warning.code,
+      taxableValuePaise: paiseToWire(warning.taxableValuePaise),
+      taxesPaise: paiseToWire(warning.taxesPaise),
+      amountPaise: paiseToWire(warning.amountPaise),
+      differencePaise: paiseToWire(warning.differencePaise),
+    })),
+  });
+}
+
+/**
+ * One comment → the wire DTO — Roadmap T072.
+ *
+ * ## A deleted comment keeps its place and loses its prose
+ *
+ * The record is returned either way: its `sequence` preserves the gap that a
+ * removed row would otherwise close, and `deleted`/`deletedAt`/`deletedBy` say who
+ * removed it. `body` is deliberately `null` when deleted — the stored prose is
+ * never lost (the row keeps it for audit), but publishing it would make the
+ * soft delete meaningless to a client.
+ */
+export function expenseCommentToDto(
+  record: ExpenseCommentRecord,
+): ExpenseCommentDto {
+  const deleted = isCommentDeleted(record);
+  return expenseCommentSchema.parse({
+    id: record.id,
+    expenseId: record.expenseId,
+    authorId: record.authorId,
+    body: deleted ? null : record.body,
+    sequence: record.sequence,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    deleted,
+    deletedAt: record.deletedAt,
+    deletedBy: record.deletedBy,
+  });
+}
+
+/** `POST /expenses/:expenseId/comments` — the appended comment. */
+export function expenseCommentResponseToDto(
+  record: ExpenseCommentRecord,
+): ExpenseCommentResponseDto {
+  return expenseCommentResponseSchema.parse({
+    comment: expenseCommentToDto(record),
+  });
+}
+
+/** `GET /expenses/:expenseId/comments` — the whole stream, oldest first. */
+export function expenseCommentsToDto(
+  comments: readonly ExpenseCommentRecord[],
+): ExpenseCommentsResponseDto {
+  return expenseCommentsResponseSchema.parse({
+    comments: comments.map((comment) => expenseCommentToDto(comment)),
   });
 }

@@ -271,6 +271,62 @@ export function ApiExpenseRevisionErrors(): ClassDecorator & MethodDecorator {
   });
 }
 
+/**
+ * The error responses the GST-details write can return — Roadmap T072, D3/D4/D7.
+ *
+ * The 404 is the module's usual indistinguishable-cases sentence with an expense
+ * added. The 403 is `expense.create` — Admin/Treasurer full, or a Committee
+ * Member's 🟡 *draft only* cell, which is why a Committee Member's write against a
+ * published, pending or void expense is refused by role-and-record rather than by
+ * role alone. The 409 names the one transition refusal: a **void** expense's GST is
+ * final (D4), and it fails before any row is written.
+ *
+ * The 422 is the field class: an invalid or non-checksum GSTIN, and an invoice
+ * that carries both IGST and CGST/SGST (the `gst_single_regime` invariant, checked
+ * at the contract so a constraint violation never becomes a 500). A tax-total
+ * mismatch is deliberately **not** here: it is a warning on a 200, not an error
+ * (PRD §3.5.3 "warn, don't block").
+ */
+export function ApiExpenseGstErrors(): ClassDecorator & MethodDecorator {
+  return ApiErrorResponses({
+    notFound:
+      "No such society or expense — or one the caller is not an active member of. This API deliberately does not distinguish these (PRD T041).",
+    forbidden:
+      "An active member whose role does not hold `expense.create` for this record: Admin or Treasurer (full), or a Committee Member on their own draft. A Committee Member cannot record GST against a published, pending-approval or void expense.",
+    conflict:
+      "The expense is void, so its GST details are final (`INVALID_TRANSITION`, D4) — nothing was written.",
+  });
+}
+
+/**
+ * The error responses the comment routes can return — Roadmap T072, D2/D8.
+ *
+ * The 404 keeps the module's three indefinite cases and adds the comment itself:
+ * an id outside the resolved society — and a comment outside the named expense —
+ * answer exactly as one that never existed (PRD T041).
+ *
+ * The 403 differs by route, and deliberately so: **listing and adding** need
+ * `expense.view` (every role but Guest — a Guest has no voice in the discussion),
+ * while **deleting** narrows to the comment's author or a society Admin. The
+ * delete route still declares `expense.view` as its guard, so this 403 describes
+ * the author-or-Admin rule the use case enforces, not the guard's cell.
+ *
+ * A comment performs no versioned write and no financial write, so no 409 is
+ * produced: the stream is append-only and its one mutation is an idempotent
+ * tombstone. The 422 is the body class (blank, or control characters other than
+ * tab/newline/carriage return).
+ */
+export function ApiExpenseCommentErrors(): ClassDecorator & MethodDecorator {
+  return ApiErrorResponses({
+    notFound:
+      "No such society, expense or comment — or one the caller is not an active member of. This API deliberately does not distinguish these (PRD T041).",
+    forbidden:
+      "An active member whose role does not hold `expense.view` (every role but Guest) to read or add a comment; or, for a delete, a caller who is neither the comment's author nor a society Admin.",
+    conflict:
+      "Not produced by this route: the stream is append-only and its one mutation (a soft delete) is idempotent.",
+  });
+}
+
 export function ApiExpenseDraftErrors(): ClassDecorator & MethodDecorator {
   return ApiErrorResponses({
     notFound:

@@ -19,14 +19,20 @@ import {
 import {
   EXPENSE_APPROVAL_POLICY_READER,
   EXPENSE_CLOCK,
+  EXPENSE_COMMENT_REPOSITORY,
   EXPENSE_EVENT_PUBLISHER,
+  EXPENSE_GST_DETAILS_REPOSITORY,
   EXPENSE_MEMBER_NAME_READER,
   EXPENSE_REPOSITORY,
   EXPENSE_REVISION_REPOSITORY,
   EXPENSE_SPLIT_REPOSITORY,
 } from "./application/expense.tokens";
+import { AddCommentUseCase } from "./application/use-cases/add-comment.use-case";
 import { ApproveExpenseUseCase } from "./application/use-cases/approve-expense.use-case";
 import { CreateExpenseUseCase } from "./application/use-cases/create-expense.use-case";
+import { DeleteCommentUseCase } from "./application/use-cases/delete-comment.use-case";
+import { ListCommentsUseCase } from "./application/use-cases/list-comments.use-case";
+import { UpsertGstDetailsUseCase } from "./application/use-cases/upsert-gst-details.use-case";
 import { DeleteDraftUseCase } from "./application/use-cases/delete-draft.use-case";
 import { GetExpenseUseCase } from "./application/use-cases/get-expense.use-case";
 import { ListApprovalQueueUseCase } from "./application/use-cases/list-approval-queue.use-case";
@@ -39,7 +45,9 @@ import { RejectExpenseUseCase } from "./application/use-cases/reject-expense.use
 import { UpdateExpenseUseCase } from "./application/use-cases/update-expense.use-case";
 import { VoidExpenseUseCase } from "./application/use-cases/void-expense.use-case";
 import { ExpenseCategoryRepositoryPostgres } from "./infrastructure/category.repository";
+import { ExpenseCommentRepositoryPostgres } from "./infrastructure/comment.repository";
 import { LoggingExpenseEventPublisher } from "./infrastructure/expense-event.publisher";
+import { ExpenseGstDetailsRepositoryPostgres } from "./infrastructure/gst-details.repository";
 import { ExpenseRepositoryPostgres } from "./infrastructure/expense.repository";
 import { ExpenseParticipantRepositoryPostgres } from "./infrastructure/participant.repository";
 import { ExpenseRevisionRepositoryPostgres } from "./infrastructure/revision.repository";
@@ -251,6 +259,29 @@ import { ExpensesController } from "./presentation/expenses.controller";
     // decisions, and publication stays a separate act through `expense_publish()`.
     ApproveExpenseUseCase,
     RejectExpenseUseCase,
+    // T072's GST details. A second table (`expense_gst_details`, 1:1 with the
+    // expense) and its own adapter, bound through its own token for the reason the
+    // revision and split adapters are: it is a different table with a different
+    // writer, and the e2e suite substitutes it on its own. It reads the expense
+    // through `EXPENSE_REPOSITORY`, so its authorisation narrowing and the amount
+    // it reconciles against are the same ones every expense route uses.
+    ExpenseGstDetailsRepositoryPostgres,
+    {
+      provide: EXPENSE_GST_DETAILS_REPOSITORY,
+      useExisting: ExpenseGstDetailsRepositoryPostgres,
+    },
+    UpsertGstDetailsUseCase,
+    // T072's comment stream. A third table and a third adapter; its reads and its
+    // append are the repository's, and its one mutation is the database's
+    // `expense_comment_soft_delete()` definer function.
+    ExpenseCommentRepositoryPostgres,
+    {
+      provide: EXPENSE_COMMENT_REPOSITORY,
+      useExisting: ExpenseCommentRepositoryPostgres,
+    },
+    AddCommentUseCase,
+    ListCommentsUseCase,
+    DeleteCommentUseCase,
   ],
 })
 export class ExpensesModule {}

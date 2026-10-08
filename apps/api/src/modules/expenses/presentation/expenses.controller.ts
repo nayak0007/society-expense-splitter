@@ -8,6 +8,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   Res,
 } from "@nestjs/common";
@@ -22,9 +23,13 @@ import {
   ApiTags,
 } from "@nestjs/swagger";
 import {
+  addExpenseCommentSchema,
   approveExpenseSchema,
   approveExpenseResponseSchema,
   createExpenseSchema,
+  expenseCommentResponseSchema,
+  expenseCommentsResponseSchema,
+  expenseGstResponseSchema,
   expenseListResponseSchema,
   expenseResponseSchema,
   expenseRevisionsResponseSchema,
@@ -38,10 +43,12 @@ import {
   rejectExpenseSchema,
   rejectExpenseResponseSchema,
   updateExpenseSchema,
+  upsertExpenseGstSchema,
   voidExpenseSchema,
   voidExpenseResponseSchema,
 } from "@ses/contracts";
 import type {
+  AddExpenseCommentPayload,
   ApproveExpensePayload,
   CreateExpensePayload,
   IdempotencyKeyPayload,
@@ -50,9 +57,10 @@ import type {
   PublishExpensePayload,
   RejectExpensePayload,
   UpdateExpensePayload,
+  UpsertExpenseGstPayload,
   VoidExpensePayload,
 } from "@ses/contracts";
-import { asExpenseId, asUserId } from "@ses/domain";
+import { asExpenseCommentId, asExpenseId, asUserId } from "@ses/domain";
 import { z } from "zod";
 
 import { ApiSocietyContext } from "../../../common/authorization/api-society-context.decorator";
@@ -68,18 +76,25 @@ import { NoEnvelope } from "../../../common/decorators/no-envelope.decorator";
 import { RequirePermission } from "../../../common/decorators/require-permission.decorator";
 import { ZodPipe } from "../../../common/pipes/zod.pipe";
 import { envelopeSchemaOf } from "../../../common/swagger/zod-openapi";
+import { AddCommentUseCase } from "../application/use-cases/add-comment.use-case";
 import { ApproveExpenseUseCase } from "../application/use-cases/approve-expense.use-case";
 import { CreateExpenseUseCase } from "../application/use-cases/create-expense.use-case";
+import { DeleteCommentUseCase } from "../application/use-cases/delete-comment.use-case";
 import { DeleteDraftUseCase } from "../application/use-cases/delete-draft.use-case";
 import { GetExpenseUseCase } from "../application/use-cases/get-expense.use-case";
+import { ListCommentsUseCase } from "../application/use-cases/list-comments.use-case";
 import { ListExpensesUseCase } from "../application/use-cases/list-expenses.use-case";
 import { ListRevisionsUseCase } from "../application/use-cases/list-revisions.use-case";
 import { PreviewSplitUseCase } from "../application/use-cases/preview-split.use-case";
 import { PublishExpenseUseCase } from "../application/use-cases/publish-expense.use-case";
 import { RejectExpenseUseCase } from "../application/use-cases/reject-expense.use-case";
 import { UpdateExpenseUseCase } from "../application/use-cases/update-expense.use-case";
+import { UpsertGstDetailsUseCase } from "../application/use-cases/upsert-gst-details.use-case";
 import { VoidExpenseUseCase } from "../application/use-cases/void-expense.use-case";
 import {
+  expenseCommentResponseToDto,
+  expenseCommentsToDto,
+  expenseGstResponseToDto,
   expenseListToDto,
   expensePublicationToDto,
   expenseResponseToDto,
@@ -90,7 +105,9 @@ import {
 import { expenseSplitPreviewToDto } from "./expense-preview.mapper";
 import {
   ApiExpenseApproveErrors,
+  ApiExpenseCommentErrors,
   ApiExpenseDraftErrors,
+  ApiExpenseGstErrors,
   ApiExpensePreviewErrors,
   ApiExpensePublishErrors,
   ApiExpenseRecalculateErrors,
@@ -136,6 +153,7 @@ import {
  */
 
 const expenseIdParam = z.uuid();
+const commentIdParam = z.uuid();
 
 @ApiTags("expenses")
 @ApiSocietyContext()
@@ -153,6 +171,10 @@ export class ExpensesController {
     private readonly voidExpense: VoidExpenseUseCase,
     private readonly approveExpense: ApproveExpenseUseCase,
     private readonly rejectExpense: RejectExpenseUseCase,
+    private readonly upsertGstDetails: UpsertGstDetailsUseCase,
+    private readonly listCommentsUseCase: ListCommentsUseCase,
+    private readonly addComment: AddCommentUseCase,
+    private readonly deleteComment: DeleteCommentUseCase,
   ) {}
 
   /**
@@ -704,5 +726,182 @@ export class ExpensesController {
       { expectedVersion: body.expectedVersion, reason: body.reason },
     );
     return expenseResponseToDto(rejected);
+  }
+
+  /**
+   * Record or replace an expense's GST details — PRD §3.5.3, completed by T072.
+   *
+   * `PUT` and not `PATCH`: the body is a full statement of the GST record, so the
+   * route is idempotent and an omitted optional field clears its value rather than
+   * leaving the stored one. The action is the matrix's `expense.create` — no
+   * `gst.*` capability exists (D3) — so Admin and Treasurer may write any non-void
+   * expense and a Committee Member only a draft, which is exactly the database
+   * policy's own rule.
+   *
+   * `200` rather than `201`: the row's identity is its expense and there is no new
+   * address to return. The response carries the stored GST record **and** a
+   * `warnings` array: PRD §3.5.3 says a tax-total mismatch warns rather than
+   * blocks, so a `TAX_TOTAL_MISMATCH` travels beside a successful write, never as
+   * an error envelope. A `void` expense is refused `409 INVALID_TRANSITION` before
+   * any row is written (D4), and the GSTIN is checksum-validated at the contract.
+   *
+   * Recording GST details does **not** invalidate a T070 approval (D5): the write
+   * names only `expense_gst_details`, so `approvedBy`/`approvedAt` survive and an
+   * approved expense is not silently sent back for a fresh decision.
+   */
+  @Put(":expenseId/gst")
+  @RequirePermission("expense.create")
+  @HttpCode(HttpStatus.OK)
+  @ApiExpenseGstErrors()
+  @ApiOperation({
+    summary: "Record an expense's GST details",
+    description:
+      "Admin, Treasurer, or the Committee Member who owns a draft. Replaces the whole GST record (a PUT, so an omitted optional field is cleared). The GSTIN is validated structurally and by its check digit, and an invoice that carries both IGST and CGST/SGST is refused. A void expense cannot be changed. `taxable_value + taxes` that does not equal the amount is returned as a non-blocking `TAX_TOTAL_MISMATCH` warning, never an error.",
+  })
+  @ApiParam({ name: "expenseId", description: "Expense UUID." })
+  @ApiOkResponse({
+    description:
+      "The stored GST record plus a `warnings` array. `warnings` is empty when the tax components reconcile with the amount; a `TAX_TOTAL_MISMATCH` entry means the write succeeded but the two do not add up.",
+    schema: envelopeSchemaOf(expenseGstResponseSchema),
+  })
+  async upsertGst(
+    @Ctx() context: RequestCtx,
+    @Param("expenseId", new ZodPipe(expenseIdParam)) expenseId: string,
+    @Body(new ZodPipe(upsertExpenseGstSchema)) body: UpsertExpenseGstPayload,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    const outcome = await this.upsertGstDetails.upsert(
+      asUserId(userId),
+      society.id,
+      asExpenseId(expenseId),
+      body,
+    );
+    return expenseGstResponseToDto(outcome);
+  }
+
+  /**
+   * The discussion stream of one expense — PRD §3.5.3 "Notes", completed by T072.
+   *
+   * Oldest first, ordered by the database's own per-expense sequence, and readable
+   * by every member who can see the expense (`expense.view` — every role but
+   * Guest). Deleted comments keep their position in the stream and carry
+   * `deleted: true`; their body is `null`. Deliberately not paginated: a comment
+   * stream on a single bill is bounded by the conversation, and a cursor here would
+   * be complexity no screen needs.
+   */
+  @Get(":expenseId/comments")
+  @RequirePermission("expense.view")
+  @ApiExpenseCommentErrors()
+  @ApiOperation({
+    summary: "List an expense's comments",
+    description:
+      "Every comment on the expense, oldest first, visible to any member who can see the expense. Soft-deleted comments are returned in place with `deleted: true` and a null `body`; the stored prose is not published.",
+  })
+  @ApiParam({ name: "expenseId", description: "Expense UUID." })
+  @ApiOkResponse({
+    description:
+      "The comment stream, oldest first. An expense with no comments answers `{ comments: [] }`.",
+    schema: envelopeSchemaOf(expenseCommentsResponseSchema),
+  })
+  async listComments(
+    @Ctx() context: RequestCtx,
+    @Param("expenseId", new ZodPipe(expenseIdParam)) expenseId: string,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    const comments = await this.listCommentsUseCase.list(
+      asUserId(userId),
+      society.id,
+      asExpenseId(expenseId),
+    );
+    return expenseCommentsToDto(comments);
+  }
+
+  /**
+   * Append one comment — PRD §3.5.3 "Notes", completed by T072.
+   *
+   * `201` with the appended comment. The author is the caller's own membership
+   * (the body carries only the text), the position is the database's, and the
+   * stream is flat — there are no replies and no `parent_id` (D1). A Guest is
+   * refused by the `expense.view` guard, which is D2's "Guest must not comment"
+   * with no extra rule: a role that cannot see the bill has no voice in its
+   * discussion.
+   */
+  @Post(":expenseId/comments")
+  @RequirePermission("expense.view")
+  @HttpCode(HttpStatus.CREATED)
+  @ApiExpenseCommentErrors()
+  @ApiOperation({
+    summary: "Add a comment to an expense",
+    description:
+      "Any member who can see the expense. Appends the comment to the flat stream and returns it with the database-assigned `sequence`. There is no reply structure and no edit route.",
+  })
+  @ApiParam({ name: "expenseId", description: "Expense UUID." })
+  @ApiCreatedResponse({
+    description: "The appended comment.",
+    schema: envelopeSchemaOf(expenseCommentResponseSchema),
+  })
+  async createComment(
+    @Ctx() context: RequestCtx,
+    @Param("expenseId", new ZodPipe(expenseIdParam)) expenseId: string,
+    @Body(new ZodPipe(addExpenseCommentSchema)) body: AddExpenseCommentPayload,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    const comment = await this.addComment.add(
+      asUserId(userId),
+      society.id,
+      asExpenseId(expenseId),
+      { body: body.body },
+    );
+    return expenseCommentResponseToDto(comment);
+  }
+
+  /**
+   * Soft-delete one comment — PRD §3.5.3's "soft-delete by author or admin", T072.
+   *
+   * `204` and no body: the comment's prose is gone from every read, and the row
+   * that remains is the tombstone (its position in the stream, its author and the
+   * deletion metadata). The verb is `DELETE` and the effect is a **soft** delete —
+   * no SQL `DELETE` is issued anywhere on this path (D8) — which is the module's
+   * existing delete-route convention (`DELETE /expenses/:expenseId` also answers
+   * 204).
+   *
+   * Authorised when the caller wrote the comment **or** holds the Admin-only
+   * `expense.approve` capability (D2): a rank-and-file member can remove their own
+   * words, an Admin can remove anyone's, and nobody else can. The guard declares
+   * `expense.view` only so a Guest is kept out; the real decision is the use case's,
+   * and the database's `expense_comment_soft_delete()` enforces the same two facts.
+   */
+  @Delete(":expenseId/comments/:commentId")
+  @RequirePermission("expense.view")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @NoEnvelope()
+  @ApiExpenseCommentErrors()
+  @ApiOperation({
+    summary: "Delete a comment",
+    description:
+      "Soft-deletes one comment, by its author or a society Admin. The comment keeps its position in the stream and is returned with `deleted: true` and a null body on subsequent reads; the stored body is never hard-deleted. Idempotent — deleting an already-deleted comment succeeds and changes nothing.",
+  })
+  @ApiParam({ name: "expenseId", description: "Expense UUID." })
+  @ApiParam({ name: "commentId", description: "Comment UUID." })
+  @ApiNoContentResponse({
+    description:
+      "Deleted. The comment's body is gone from every read; the tombstone remains in place.",
+  })
+  async removeComment(
+    @Ctx() context: RequestCtx,
+    @Param("expenseId", new ZodPipe(expenseIdParam)) expenseId: string,
+    @Param("commentId", new ZodPipe(commentIdParam)) commentId: string,
+  ): Promise<void> {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    await this.deleteComment.softDelete(
+      asUserId(userId),
+      society.id,
+      asExpenseId(expenseId),
+      asExpenseCommentId(commentId),
+    );
   }
 }

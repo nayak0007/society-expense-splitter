@@ -9,7 +9,9 @@ import type {
   AttachmentRepository,
   BuildingRepository,
   ExpenseCategoryRepository,
+  ExpenseCommentRepository,
   ExpenseEventPublisher,
+  ExpenseGstDetailsRepository,
   ExpenseMemberNameReader,
   ExpenseParticipantReader,
   ExpenseReferenceReader,
@@ -44,7 +46,9 @@ import {
   EXPENSE_REFERENCE_READER,
 } from "../../src/modules/expenses/application/expense-category.tokens";
 import {
+  EXPENSE_COMMENT_REPOSITORY,
   EXPENSE_EVENT_PUBLISHER,
+  EXPENSE_GST_DETAILS_REPOSITORY,
   EXPENSE_MEMBER_NAME_READER,
   EXPENSE_REPOSITORY,
   EXPENSE_REVISION_REPOSITORY,
@@ -305,6 +309,27 @@ export type TestAppOptions = {
    * endpoint no e2e suite has.
    */
   storage?: StorageProvider;
+  /**
+   * Substitutes the GST-details write (T072) — the `expense_gst_details` upsert.
+   *
+   * A thirteenth seam, bound separately from `expenses` for the reason every seam
+   * here is separate: the two are two tables and two adapters, and a suite has to be
+   * able to make the GST write refuse (a constraint, a rolled-back upsert) without
+   * also changing what the expense read says. The RLS policies, the atomic upsert
+   * and the approval-stamp preservation are real SQL and stay the integration
+   * suite's to prove.
+   */
+  gstDetails?: ExpenseGstDetailsRepository;
+  /**
+   * Substitutes the comment stream (T072) — the append, the ordered read and the
+   * soft delete.
+   *
+   * Bound separately from both above: it is the third table T072 owns, and its
+   * soft-delete definer function's author-or-Admin rule is a fact only the real
+   * database can decide. Here the suite pins the route, the guard chain, the
+   * response contract and the use cases' own author-or-Admin narrowing.
+   */
+  comments?: ExpenseCommentRepository;
 };
 
 /** A stand-in indicator whose only job is to report the status the test asked for. */
@@ -427,6 +452,16 @@ export async function createTestApp(
   }
   if (options.storage !== undefined) {
     builder.overrideProvider(STORAGE_PROVIDER).useValue(options.storage);
+  }
+  if (options.gstDetails !== undefined) {
+    builder
+      .overrideProvider(EXPENSE_GST_DETAILS_REPOSITORY)
+      .useValue(options.gstDetails);
+  }
+  if (options.comments !== undefined) {
+    builder
+      .overrideProvider(EXPENSE_COMMENT_REPOSITORY)
+      .useValue(options.comments);
   }
 
   const moduleRef = await builder.compile();

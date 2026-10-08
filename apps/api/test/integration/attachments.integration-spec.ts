@@ -355,7 +355,7 @@ async function refusal(promise: Promise<unknown>): Promise<Refusal> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("migrations #33 to #35 and their security posture", () => {
-  it("applied with the ledger at HEAD, in order, ending at T071's own files", async () => {
+  it("applied with the ledger at HEAD, in order, ending at the newest files", async () => {
     const rows = await owner<{ name: string }[]>`
       select name from ses_meta.migrations order by name
     `;
@@ -371,11 +371,17 @@ describe("migrations #33 to #35 and their security posture", () => {
     // Forward-only, so "the ledger ends at these files" and "0 pending" are one
     // sentence, and the ledger's own checksum guard is what makes editing #33 in place
     // impossible rather than merely discouraged — which is exactly why all three exist.
-    expect(names).toHaveLength(35);
-    expect(names.slice(-3)).toEqual([
+    //
+    // T072 appends the 36th file, so the three above are no longer the last three. The
+    // anchor is advanced rather than relaxed to `toHaveLength(greaterThanOrEqual(…))`:
+    // "the ledger ends exactly at HEAD's files, in order" is the sentence that has to
+    // stay true after every migration, and the names are what asserts it.
+    expect(names).toHaveLength(36);
+    expect(names.slice(-4)).toEqual([
       "20261011120000_attachments.sql",
       "20261012120000_attachments_insert_id_grant.sql",
       "20261013120000_attachments_uploader_fk.sql",
+      "20261014120000_expense_comments.sql",
     ]);
   });
 

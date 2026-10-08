@@ -1682,14 +1682,29 @@ describe("the documented Down block", () => {
       // mechanism, for the same reason, as the note further down about T067's index and
       // trigger on `dues`: a Down block for migration N is executable from HEAD only
       // once the objects of migrations > N are removed, and only their own files can
-      // restore them. Measured: without these four statements the block dies on
-      // `can_view_expenses` before it drops a single table.
+      // restore them. Measured: without these statements the block dies on
+      // `can_view_expenses` — or, since T072, on the comment stream's foreign key —
+      // before it drops a single table.
       //
       // The list is T071's and is deliberately exhaustive rather than clever. If a later
       // task adds another object referencing these predicates, this rehearsal fails
-      // loudly on the `DROP FUNCTION` below — which is how T071 itself found this — and
-      // the fix is one more line here, not a weakened assertion.
+      // loudly on the `DROP FUNCTION` below — which is how T071 itself found this, and
+      // how T072 found the comment stream — and the fix is one more line here, not a
+      // weakened assertion.
       await tx.unsafe(`drop table if exists public.attachments`);
+      // T072's objects are the same shape, and one of them adds a dependency the
+      // attachment trio did not have: `expense_comments` holds a composite foreign key
+      // to `expenses (id, society_id)`, so the block below now dies on `DROP TABLE
+      // public.expenses` with `2BP01` while the comment stream is still there
+      // (measured). The function is dropped *first* because it `RETURNS SETOF
+      // public.expense_comments`, which makes the table's row type a dependency of the
+      // function — the reverse order fails for the same reason. Both are T072's own
+      // documented Down, and the file's `IF NOT EXISTS` / `OR REPLACE` guards are what
+      // let the later-file loop put them back.
+      await tx.unsafe(
+        `drop function if exists public.expense_comment_soft_delete(uuid, uuid, uuid)`,
+      );
+      await tx.unsafe(`drop table if exists public.expense_comments`);
       await tx.unsafe(
         `drop function if exists public.can_delete_attachment(uuid, uuid, uuid)`,
       );
