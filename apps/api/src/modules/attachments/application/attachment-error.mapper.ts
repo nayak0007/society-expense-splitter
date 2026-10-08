@@ -54,6 +54,12 @@ export const ERROR_CODE_BY_ATTACHMENT_CODE: Readonly<
   content_mismatch: "VALIDATION_ERROR",
   quota_exceeded: "PLAN_LIMIT_EXCEEDED",
   storage_unavailable: "DEPENDENCY_UNAVAILABLE",
+  // SAD §10.7's two serving-gate refusals, and their two statuses: a file awaiting a
+  // scan is retryable once the scan lands, so 409; a quarantined file is terminal for
+  // the caller, so 403. Both are shaped-but-unreachable while no scanner is configured
+  // (ADR-0012 D3) — the *codes* exist so arming one later needs no new mapping.
+  scan_pending: "CONFLICT",
+  file_quarantined: "FORBIDDEN",
   // Not the caller's fault, not the store's: a shape this module could not place.
   unknown: "INTERNAL",
 };
@@ -71,6 +77,8 @@ const DETAIL_CODES: Readonly<Partial<Record<AttachmentErrorCode, string>>> = {
   content_mismatch: "CONTENT_MISMATCH",
   quota_exceeded: "ATTACHMENT_QUOTA_EXCEEDED",
   conflict: "ATTACHMENT_STATE_CONFLICT",
+  scan_pending: "SCAN_PENDING",
+  file_quarantined: "FILE_QUARANTINED",
 };
 
 /**

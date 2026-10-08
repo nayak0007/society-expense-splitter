@@ -188,6 +188,11 @@ class FakeAttachments implements AttachmentRepository {
     return Promise.resolve(visible ? candidate : null);
   }
 
+  // T073's read: completion never lists an expense's bills.
+  listCompletedForExpense(): Promise<readonly AttachmentRecord[]> {
+    return Promise.resolve([]);
+  }
+
   markComplete(
     attachmentId: string,
   ): Promise<Result<AttachmentRecord, AttachmentError>> {

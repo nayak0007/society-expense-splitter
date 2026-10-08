@@ -18,6 +18,7 @@ import type {
   ExpenseRepository,
   ExpenseSocietyReader,
   ExpenseSplitRepository,
+  ExpenseSplitsReader,
   InvitationRepository,
   InvitationTokenPort,
   ExpenseRevisionRepository,
@@ -53,6 +54,7 @@ import {
   EXPENSE_REPOSITORY,
   EXPENSE_REVISION_REPOSITORY,
   EXPENSE_SPLIT_REPOSITORY,
+  EXPENSE_SPLITS_READER,
 } from "../../src/modules/expenses/application/expense.tokens";
 import { ATTACHMENT_REPOSITORY } from "../../src/modules/attachments/application/attachment.tokens";
 import { STORAGE_PROVIDER } from "../../src/infrastructure/storage/storage.tokens";
@@ -240,6 +242,15 @@ export type TestAppOptions = {
    * fake takes the expense fake rather than duplicating its store).
    */
   splits?: ExpenseSplitRepository;
+  /**
+   * Substitutes the current-splits read (T073) — `GET /expenses/:id/splits`.
+   *
+   * Bound separately from `splits` for the reason every seam here is separate: in
+   * production the reader and the writer are two adapters over one table with two
+   * lifetimes (a read port and a definer-transaction writer), and a suite asserting the
+   * split-table response wants the reader substituted without touching the publish path.
+   */
+  splitsReader?: ExpenseSplitsReader;
   /**
    * Substitutes the revision-history read (T068) — the `expense_revisions` reader.
    *
@@ -431,6 +442,11 @@ export async function createTestApp(
   }
   if (options.splits !== undefined) {
     builder.overrideProvider(EXPENSE_SPLIT_REPOSITORY).useValue(options.splits);
+  }
+  if (options.splitsReader !== undefined) {
+    builder
+      .overrideProvider(EXPENSE_SPLITS_READER)
+      .useValue(options.splitsReader);
   }
   if (options.memberNames !== undefined) {
     builder

@@ -8,6 +8,7 @@ import {
   expenseResponseSchema,
   expenseRevisionsResponseSchema,
   expenseSchema,
+  expenseSplitsResponseSchema,
   publishExpenseResponseSchema,
   recalculateExpenseResponseSchema,
   voidExpenseResponseSchema,
@@ -22,6 +23,7 @@ import type {
   ExpenseListResponseDto,
   ExpenseResponseDto,
   ExpenseRevisionsResponseDto,
+  ExpenseSplitsResponseDto,
   PublishExpenseResponseDto,
   RecalculateExpenseResponseDto,
   VoidExpenseResponseDto,
@@ -34,6 +36,7 @@ import type {
   ExpenseRecalculation,
   ExpenseRecord,
   ExpenseRevisionRecord,
+  ExpenseSplitRecord,
   ExpenseVoid,
 } from "@ses/domain";
 
@@ -216,6 +219,38 @@ export function expenseRevisionsToDto(
       changedBy: revision.changedBy,
       changeNote: revision.changeNote,
       createdAt: revision.createdAt,
+    })),
+  });
+}
+
+/**
+ * The current split rows → the wire DTO — Roadmap T073.
+ *
+ * Parses rather than constructs, like every mapper here: the contract schema is the
+ * client's parse target, so a renamed field fails loudly at this boundary instead of
+ * shipping a payload the client cannot read. `amountPaise` crosses through
+ * `paiseToWire` — the repository's single range-checked crossing point (T012) — so a
+ * value above `Number.MAX_SAFE_INTEGER` throws rather than rounds. `weight` and
+ * `percent` stay decimal strings; nothing here puts a numeric column through a float.
+ */
+export function expenseSplitsToDto(
+  splits: readonly ExpenseSplitRecord[],
+): ExpenseSplitsResponseDto {
+  return expenseSplitsResponseSchema.parse({
+    splits: splits.map((split) => ({
+      id: split.id,
+      expenseId: split.expenseId,
+      memberId: split.memberId,
+      apartmentId: split.apartmentId,
+      amountPaise: paiseToWire(split.amount.paise),
+      weight: split.weight,
+      percent: split.percent,
+      assignedReason: split.assignedReason,
+      snapshot: {
+        memberName: split.snapshot.memberName,
+        apartmentNumber: split.snapshot.apartmentNumber,
+      },
+      createdAt: split.createdAt,
     })),
   });
 }

@@ -26,6 +26,7 @@ import {
   EXPENSE_REPOSITORY,
   EXPENSE_REVISION_REPOSITORY,
   EXPENSE_SPLIT_REPOSITORY,
+  EXPENSE_SPLITS_READER,
 } from "./application/expense.tokens";
 import { AddCommentUseCase } from "./application/use-cases/add-comment.use-case";
 import { ApproveExpenseUseCase } from "./application/use-cases/approve-expense.use-case";
@@ -38,6 +39,7 @@ import { GetExpenseUseCase } from "./application/use-cases/get-expense.use-case"
 import { ListApprovalQueueUseCase } from "./application/use-cases/list-approval-queue.use-case";
 import { ListExpensesUseCase } from "./application/use-cases/list-expenses.use-case";
 import { ListRevisionsUseCase } from "./application/use-cases/list-revisions.use-case";
+import { ListSplitsUseCase } from "./application/use-cases/list-splits.use-case";
 import { PreviewSplitUseCase } from "./application/use-cases/preview-split.use-case";
 import { PublishExpenseUseCase } from "./application/use-cases/publish-expense.use-case";
 import { RecalculateExpenseUseCase } from "./application/use-cases/recalculate-expense.use-case";
@@ -51,6 +53,7 @@ import { ExpenseGstDetailsRepositoryPostgres } from "./infrastructure/gst-detail
 import { ExpenseRepositoryPostgres } from "./infrastructure/expense.repository";
 import { ExpenseParticipantRepositoryPostgres } from "./infrastructure/participant.repository";
 import { ExpenseRevisionRepositoryPostgres } from "./infrastructure/revision.repository";
+import { ExpenseSplitsReaderPostgres } from "./infrastructure/split-reader.repository";
 import { ExpenseSplitRepositoryPostgres } from "./infrastructure/split.repository";
 import { ExpenseCategoriesController } from "./presentation/categories.controller";
 import { ExpensesController } from "./presentation/expenses.controller";
@@ -246,6 +249,18 @@ import { ExpensesController } from "./presentation/expenses.controller";
       useExisting: ExpenseRevisionRepositoryPostgres,
     },
     ListRevisionsUseCase,
+    // T073's current-splits read. A second adapter over `expense_splits` — but read-only,
+    // with its own token so the e2e suite substitutes it independently, and deliberately
+    // separate from `EXPENSE_SPLIT_REPOSITORY` (whose adapter is the *write* path through
+    // the definer transactions): a reader and a writer of one table are two capabilities
+    // with two lifetimes, and a token a use case could write through would be the second
+    // writer the split table must not have.
+    ExpenseSplitsReaderPostgres,
+    {
+      provide: EXPENSE_SPLITS_READER,
+      useExisting: ExpenseSplitsReaderPostgres,
+    },
+    ListSplitsUseCase,
     // T069's void. It reads through the same two adapters publication and
     // recalculation use — the expense repository for the row, and the split
     // writer, whose `expense_void()` transaction owns the due supersession, the

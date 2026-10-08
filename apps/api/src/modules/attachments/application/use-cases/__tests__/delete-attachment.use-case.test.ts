@@ -137,6 +137,11 @@ class FakeAttachments implements AttachmentRepository {
     return Promise.reject(new Error("delete never completes"));
   }
 
+  // T073's read: deletion never lists an expense's bills.
+  listCompletedForExpense(): Promise<readonly AttachmentRecord[]> {
+    return Promise.resolve([]);
+  }
+
   deleteById(attachmentId: string): Promise<void> {
     this.order.push("row");
     if (this.deleteFailure !== null) return Promise.reject(this.deleteFailure);

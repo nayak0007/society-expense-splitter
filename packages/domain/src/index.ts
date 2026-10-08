@@ -75,6 +75,7 @@ export * from "./attachment/attachment";
 export * from "./attachment/errors";
 export * from "./attachment/magic-bytes";
 export * from "./attachment/ports";
+export * from "./attachment/serving-gate";
 export * from "./invitation/errors";
 export * from "./invitation/invitation";
 export * from "./invitation/ports";

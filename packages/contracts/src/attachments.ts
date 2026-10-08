@@ -198,12 +198,15 @@ export type CompleteAttachmentUploadResponseDto = z.infer<
 /**
  * One attachment, as a read would return it.
  *
- * **No route in T071 returns this** — there is no list route and no detail route
- * (ADR-0012 D4) — and it is here anyway because two things need it as a *shape*:
- * the OpenAPI document's error and body composition reads the contract module as a
- * whole, and T073's expense detail will extend this object rather than invent a
- * second one. Its fields are the row's and none of them is a URL: a download link
- * is minted per read and never stored.
+ * **T071 shipped no route that returned this** (ADR-0012 D4 consigned the list and
+ * download routes to T073's expense detail, which now adds them). It is returned by
+ * `GET /expenses/:expenseId/attachments` and carries one thing a client must read
+ * carefully: `scanStatus`. `pending` is not `clean` — a bill that has not been
+ * scanned is not a bill that has been verified safe (ADR-0012 D3), and the field
+ * exists so a screen can say so.
+ *
+ * Its fields are the row's and **none of them is a URL**: a download link is minted
+ * per read and never stored, so there is nothing here to leak or expire.
  */
 export const attachmentSchema = z.object({
   id: z.uuid(),
@@ -218,3 +221,60 @@ export const attachmentSchema = z.object({
   createdAt: z.iso.datetime(),
 });
 export type AttachmentDto = z.infer<typeof attachmentSchema>;
+
+/**
+ * `GET /expenses/:expenseId/attachments` — the expense's **completed** bills.
+ *
+ * Only rows with a non-null `completedAt` are listed: an outstanding presign
+ * reservation is an upload that has not arrived, and its `completedAt === null` is
+ * exactly the difference the list must not blur. Deleted attachments are absent
+ * because the row is gone (ADR-0012 D6.3 removes the row, not the object).
+ *
+ * Ordered oldest first, the order the expense detail renders, and unpaginated for
+ * the reason the split list is: an expense has a handful of bills (PRD §3.4's cap is
+ * five), and a cursor over a set that small would be complexity without a screen.
+ */
+export const expenseAttachmentsResponseSchema = z.object({
+  attachments: z.array(attachmentSchema),
+});
+export type ExpenseAttachmentsResponseDto = z.infer<
+  typeof expenseAttachmentsResponseSchema
+>;
+
+/**
+ * `GET /attachments/:attachmentId/download` — a short-lived, authorized URL.
+ *
+ * ## The URL is the whole point, and it is the only secret in the body
+ *
+ * `url` is an opaque, time-limited signed credential for a **private** object
+ * (ADR-0012: "Attachments are never served without a time-limited URL; no bucket is
+ * public"). It is never persisted and never logged, and the client must treat it as
+ * opaque — nothing outside the storage adapter may parse it.
+ *
+ * ## `filename` is returned for the client to *use*, not to trust
+ *
+ * The stored `originalFilename` was sanitised at presign time (path separators
+ * stripped) and is exposed so a viewer can title the download and a "save as" can
+ * offer a sensible name. It is display metadata: the response deliberately does not
+ * put it into a `Content-Disposition` the server controls, so no header is built from
+ * client-influenced text and there is no header-injection surface at all.
+ *
+ * ## `scanStatus` travels, so the UI cannot imply safety it does not have
+ *
+ * The download is permitted — the serving gate is inert while no scanner is
+ * configured (ADR-0012 D3) — but the response says what the scan actually found, so
+ * the mobile client can label an unscanned bill as unscanned rather than rendering it
+ * as verified. It is the same value the list carries; repeating it here means a caller
+ * that jumped straight to a download link still sees it.
+ */
+export const attachmentDownloadUrlSchema = z.object({
+  url: z.string().min(1),
+  expiresAt: z.iso.datetime(),
+  filename: z.string(),
+  mimeType: z.string(),
+  sizeBytes: z.number().int().positive(),
+  scanStatus: z.enum(ATTACHMENT_SCAN_STATUSES),
+});
+export type AttachmentDownloadUrlDto = z.infer<
+  typeof attachmentDownloadUrlSchema
+>;

@@ -102,3 +102,15 @@ export const EXPENSE_GST_DETAILS_REPOSITORY = Symbol(
  * a GST field, and its writer must be swappable on its own.
  */
 export const EXPENSE_COMMENT_REPOSITORY = Symbol("EXPENSE_COMMENT_REPOSITORY");
+
+/**
+ * The current-splits read — T073's `ExpenseSplitsReader`.
+ *
+ * Its own token rather than a method on `EXPENSE_REPOSITORY`, for the reason the
+ * revision, GST and comment tokens have one: it is a different table
+ * (`expense_splits`) with a different writer (the publish/recalculation definer
+ * functions), and the e2e suite substitutes it independently. It is deliberately a
+ * *reader* (`listForExpense`, no writes): the split table's only writer is the definer
+ * transaction, and a token a use case could write through would invite a second one.
+ */
+export const EXPENSE_SPLITS_READER = Symbol("EXPENSE_SPLITS_READER");

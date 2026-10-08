@@ -33,6 +33,7 @@ import {
   expenseListResponseSchema,
   expenseResponseSchema,
   expenseRevisionsResponseSchema,
+  expenseSplitsResponseSchema,
   idempotencyKeySchema,
   listExpensesQuerySchema,
   previewSplitRequestSchema,
@@ -85,6 +86,7 @@ import { GetExpenseUseCase } from "../application/use-cases/get-expense.use-case
 import { ListCommentsUseCase } from "../application/use-cases/list-comments.use-case";
 import { ListExpensesUseCase } from "../application/use-cases/list-expenses.use-case";
 import { ListRevisionsUseCase } from "../application/use-cases/list-revisions.use-case";
+import { ListSplitsUseCase } from "../application/use-cases/list-splits.use-case";
 import { PreviewSplitUseCase } from "../application/use-cases/preview-split.use-case";
 import { PublishExpenseUseCase } from "../application/use-cases/publish-expense.use-case";
 import { RejectExpenseUseCase } from "../application/use-cases/reject-expense.use-case";
@@ -99,6 +101,7 @@ import {
   expensePublicationToDto,
   expenseResponseToDto,
   expenseRevisionsToDto,
+  expenseSplitsToDto,
   recalculateExpenseToDto,
   voidExpenseToDto,
 } from "./expense.mapper";
@@ -168,6 +171,7 @@ export class ExpensesController {
     private readonly deleteDraft: DeleteDraftUseCase,
     private readonly publishExpense: PublishExpenseUseCase,
     private readonly listRevisions: ListRevisionsUseCase,
+    private readonly listSplits: ListSplitsUseCase,
     private readonly voidExpense: VoidExpenseUseCase,
     private readonly approveExpense: ApproveExpenseUseCase,
     private readonly rejectExpense: RejectExpenseUseCase,
@@ -230,7 +234,7 @@ export class ExpensesController {
   @ApiOperation({
     summary: "List expenses",
     description:
-      "One page of the society's expenses, newest first (expense_date, then id descending), with a base64 cursor for the next page. Supports categoryId, status, dateFrom, dateTo, amountPaiseMin, amountPaiseMax, createdBy and full-text `q` over title, description and vendor. Unknown parameters and unknown sort keys are refused rather than ignored.",
+      "One page of the society's expenses, newest first (expense_date, then id descending), with a base64 cursor for the next page. Supports categoryId, status, dateFrom, dateTo, amountPaiseMin, amountPaiseMax, buildingId, createdBy and full-text `q` over title, description and vendor. `buildingId` matches an expense whose participant selector is scoped to that building (a society-wide expense names no building and matches none). Unknown parameters and unknown sort keys are refused rather than ignored.",
   })
   @ApiQuery({ name: "categoryId", required: false })
   @ApiQuery({ name: "status", required: false })
@@ -238,6 +242,7 @@ export class ExpensesController {
   @ApiQuery({ name: "dateTo", required: false })
   @ApiQuery({ name: "amountPaiseMin", required: false })
   @ApiQuery({ name: "amountPaiseMax", required: false })
+  @ApiQuery({ name: "buildingId", required: false })
   @ApiQuery({ name: "createdBy", required: false })
   @ApiQuery({ name: "q", required: false })
   @ApiQuery({ name: "cursor", required: false })
@@ -449,6 +454,49 @@ export class ExpensesController {
       asExpenseId(expenseId),
     );
     return expenseRevisionsToDto(revisions);
+  }
+
+  /**
+   * The current split table of one expense — PRD §3.5.3, Roadmap T073.
+   *
+   * The **persisted** `expense_splits` the bill was published (or last recalculated)
+   * with, read verbatim — never recomputed from the participant selector (a second
+   * split-engine path could disagree with what was charged) and never taken from a
+   * revision snapshot (that is history, not current state). Oldest first, unpaginated: an
+   * expense's splits are bounded by its participating flats and read as one table.
+   *
+   * Readable by every role that can see the expense (`expense.view`, every role but
+   * Guest), scoped by the same `X-Society-Id` and RLS identity as the expense itself, so
+   * another tenant's splits are structurally invisible and an id the caller cannot see
+   * answers 404. A draft or `pending_approval` expense has no splits and answers
+   * `{ splits: [] }` — it has an allocation, and that allocation is empty.
+   */
+  @Get(":expenseId/splits")
+  @RequirePermission("expense.view")
+  @ApiExpenseDraftErrors()
+  @ApiOperation({
+    summary: "List an expense's current splits",
+    description:
+      "The current persisted `expense_splits` rows for one expense, oldest first — what each participating flat/member owes right now, as the publish/recalculation path wrote them. Never a recomputation and never a revision snapshot. `amountPaise` is integer paise; `weight` and `percent` are decimal strings. Readable by every member who can see the expense; a draft or pending_approval expense answers `{ splits: [] }`.",
+  })
+  @ApiParam({ name: "expenseId", description: "Expense UUID." })
+  @ApiOkResponse({
+    description:
+      "The current split table. An expense that has not been allocated yet answers `{ splits: [] }`.",
+    schema: envelopeSchemaOf(expenseSplitsResponseSchema),
+  })
+  async splits(
+    @Ctx() context: RequestCtx,
+    @Param("expenseId", new ZodPipe(expenseIdParam)) expenseId: string,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    const splits = await this.listSplits.list(
+      asUserId(userId),
+      society.id,
+      asExpenseId(expenseId),
+    );
+    return expenseSplitsToDto(splits);
   }
 
   /**

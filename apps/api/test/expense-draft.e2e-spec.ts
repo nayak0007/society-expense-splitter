@@ -1,12 +1,17 @@
 import type { NestFastifyApplication } from "@nestjs/platform-fastify";
 import {
   DEFAULT_SOCIETY_SETTINGS,
+  asApartmentId,
   asExpenseId,
   asMemberId,
   asSocietyId,
   asUserId,
 } from "@ses/domain";
+import { Money as MoneyValue, paise as asPaise } from "@ses/domain";
 import type {
+  ExpenseId,
+  ExpenseSplitRecord,
+  ExpenseSplitsReader,
   MemberRole,
   MembershipStatus,
   Society,
@@ -148,10 +153,36 @@ const membershipReader: StructureMembershipReader = {
   },
 };
 
+/**
+ * The current-splits read, in memory — T073's route.
+ *
+ * A fake of the *read* port only: the route under test is the split-table read, and the
+ * real adapter's exact-bigint crossing and RLS posture are the integration suite's to
+ * prove. Rows are seeded per expense id, so a suite can assert what the route returns
+ * without publishing anything.
+ */
+class FakeSplitsReader implements ExpenseSplitsReader {
+  readonly rows = new Map<string, ExpenseSplitRecord[]>();
+
+  seed(expenseId: string, rows: ExpenseSplitRecord[]): void {
+    this.rows.set(expenseId, rows);
+  }
+
+  listForExpense(
+    expenseId: ExpenseId,
+    societyId: SocietyId,
+  ): Promise<readonly ExpenseSplitRecord[]> {
+    // Only this society's rows are addressable — the same visibility the real read has.
+    if (societyId !== SOCIETY_A) return Promise.resolve([]);
+    return Promise.resolve(this.rows.get(expenseId) ?? []);
+  }
+}
+
 let app: NestFastifyApplication;
 let auth: TestAuth;
 let categories: FakeCategoryRepository;
 let expenses: FakeExpenseRepository;
+let splitsReader: FakeSplitsReader;
 let categoryId: string;
 let foreignCategoryId: string;
 
@@ -172,6 +203,7 @@ beforeAll(async () => {
       GUEST_MEMBERSHIP,
     ],
   });
+  splitsReader = new FakeSplitsReader();
   app = await createTestApp({
     jwks: auth.jwks,
     reader,
@@ -179,6 +211,7 @@ beforeAll(async () => {
     categories,
     repository: societyRepository,
     expenses,
+    splitsReader,
   });
 });
 
@@ -214,6 +247,7 @@ beforeEach(() => {
 
   expenses.state.records.clear();
   expenses.state.calls.length = 0;
+  splitsReader.rows.clear();
 });
 
 const server = () => request(app.getHttpServer());
@@ -776,13 +810,25 @@ describe("GET /v1/expenses — list", () => {
   });
 
   it("refuses a filter the schema does not have rather than ignoring it", async () => {
-    const response = await call("get", `/v1/expenses?buildingId=${id("b1")}`, {
+    // `buildingId` became a supported filter in T073, so the example of an
+    // unsupported one is now `hasAttachments` (a join the schema still does not have).
+    const response = await call("get", "/v1/expenses?hasAttachments=true", {
       userId: ADMIN,
       societyId: SOCIETY_A,
     });
 
     expect(response.status).toBe(400);
     expect(response.body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("accepts the buildingId filter T073 added", async () => {
+    const response = await call("get", `/v1/expenses?buildingId=${id("b1")}`, {
+      userId: ADMIN,
+      societyId: SOCIETY_A,
+    });
+
+    expect(response.status).toBe(200);
+    expect(Array.isArray(response.body.data.expenses)).toBe(true);
   });
 
   it("refuses a malformed cursor rather than starting over", async () => {
@@ -836,5 +882,125 @@ describe("GET /v1/expenses — list", () => {
     });
 
     expect(response.status).toBe(403);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T073's current-splits read
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One stored split row, for the read route. */
+function splitRow(
+  index: number,
+  amountPaise: bigint,
+  overrides: Partial<ExpenseSplitRecord> = {},
+): ExpenseSplitRecord {
+  return {
+    id: `50000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    expenseId: asExpenseId(EXPENSE_PLACEHOLDER),
+    memberId: asMemberId(
+      `10000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    ),
+    apartmentId: asApartmentId(
+      `60000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    ),
+    amount: MoneyValue.fromPaise(asPaise(amountPaise)),
+    weight: "1.0000",
+    percent: null,
+    assignedReason: null,
+    snapshot: {
+      memberName: `Member ${index}`,
+      apartmentNumber: `A-10${index}`,
+    },
+    createdAt: `2026-10-07T09:0${index}:00.000Z`,
+    ...overrides,
+  };
+}
+
+const EXPENSE_PLACEHOLDER = "00000000-0000-4000-8000-000000000000";
+
+/** The split route, with a session and the society header actually set. */
+function getSplits(
+  expenseId: string,
+  options: { readonly userId?: UserId } = {},
+) {
+  return call("get", `/v1/expenses/${expenseId}/splits`, {
+    userId: options.userId ?? ADMIN,
+    societyId: SOCIETY_A,
+  });
+}
+
+describe("GET /v1/expenses/:expenseId/splits", () => {
+  it("requires a session before anything else", async () => {
+    const response = await call(
+      "get",
+      `/v1/expenses/${EXPENSE_PLACEHOLDER}/splits`,
+      {
+        societyId: SOCIETY_A,
+      },
+    );
+    expect(response.status).toBe(401);
+  });
+
+  it("answers an empty table for a draft that has not been allocated", async () => {
+    const expenseId = await createDraft();
+
+    const response = await getSplits(expenseId);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.splits).toEqual([]);
+  });
+
+  it("returns the persisted splits oldest first, money as integer paise", async () => {
+    const expenseId = await createDraft();
+    splitsReader.seed(expenseId, [
+      splitRow(1, 250_000n),
+      splitRow(2, 200_000n),
+    ]);
+
+    const response = await getSplits(expenseId);
+
+    expect(response.status).toBe(200);
+    const splits = response.body.data.splits as {
+      amountPaise: number;
+      weight: string | null;
+      snapshot: { memberName: string | null };
+    }[];
+    expect(splits).toHaveLength(2);
+    expect(splits[0]?.amountPaise).toBe(250_000);
+    expect(splits[1]?.amountPaise).toBe(200_000);
+    // The conservation the split table exists for, asserted on the wire's own numbers.
+    expect(splits.reduce((total, row) => total + row.amountPaise, 0)).toBe(
+      450_000,
+    );
+    expect(splits[0]?.weight).toBe("1.0000");
+    expect(splits[0]?.snapshot.memberName).toBe("Member 1");
+  });
+
+  it("lets a Resident read the split table — expense.view is green for them", async () => {
+    const expenseId = await createDraft();
+    const response = await getSplits(expenseId, { userId: RESIDENT });
+    expect(response.status).toBe(200);
+  });
+
+  it("refuses a Guest", async () => {
+    const expenseId = await createDraft();
+    const response = await getSplits(expenseId, { userId: GUEST });
+    expect(response.status).toBe(403);
+  });
+
+  it("answers 404 for an unknown expense id", async () => {
+    const response = await getSplits(EXPENSE_PLACEHOLDER);
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe("NOT_FOUND");
+  });
+
+  it("refuses a path parameter that is not a UUID before any query runs", async () => {
+    const response = await call("get", "/v1/expenses/not-a-uuid/splits", {
+      userId: ADMIN,
+      societyId: SOCIETY_A,
+    });
+    expect(response.status).toBe(422);
+    expect(response.body.error.field).toBe("expenseId");
   });
 });

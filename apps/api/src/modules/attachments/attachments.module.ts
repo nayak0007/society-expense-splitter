@@ -5,7 +5,9 @@ import { StorageModule } from "../../infrastructure/storage/storage.module";
 import { SocietiesModule } from "../societies/societies.module";
 import { ATTACHMENT_REPOSITORY } from "./application/attachment.tokens";
 import { CompleteUploadUseCase } from "./application/use-cases/complete-upload.use-case";
+import { CreateAttachmentDownloadUrlUseCase } from "./application/use-cases/create-attachment-download-url.use-case";
 import { DeleteAttachmentUseCase } from "./application/use-cases/delete-attachment.use-case";
+import { ListExpenseAttachmentsUseCase } from "./application/use-cases/list-expense-attachments.use-case";
 import { PresignUploadUseCase } from "./application/use-cases/presign-upload.use-case";
 import { AttachmentRepositoryPostgres } from "./infrastructure/attachment.repository";
 import { AttachmentsController } from "./presentation/attachments.controller";
@@ -85,6 +87,13 @@ import { AttachmentsController } from "./presentation/attachments.controller";
     PresignUploadUseCase,
     CompleteUploadUseCase,
     DeleteAttachmentUseCase,
+    // T073's two read use cases. They reuse `ATTACHMENT_REPOSITORY` (bound above) and —
+    // for the download URL — `STORAGE_PROVIDER`, already provided by `StorageModule`;
+    // neither adds a permission, an adapter, a table or a token. The list answers the
+    // expense detail's bill section, and the download mints a short-lived URL for one
+    // completed attachment's private object.
+    ListExpenseAttachmentsUseCase,
+    CreateAttachmentDownloadUrlUseCase,
   ],
   /**
    * Exported for exactly one consumer: `ExpensesModule`, whose draft hard-delete

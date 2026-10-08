@@ -296,6 +296,27 @@ export interface AttachmentRepository {
   ): Promise<AttachmentRecord | null>;
 
   /**
+   * The **completed** attachments of one expense, oldest first — T073's read.
+   *
+   * `completed_at IS NOT NULL` is the whole filter and it is not negotiable: a row
+   * with a null `completedAt` is an outstanding presign reservation — an upload that
+   * has not arrived — and listing it would put a bill in the expense detail that does
+   * not exist in the bucket. Deleted attachments are simply absent, because the row was
+   * removed (ADR-0012 D6.3 removes the row, not the object).
+   *
+   * Scoped by `entity_id` **and** `society_id`, and run under the caller's RLS
+   * identity, so another tenant's expense lists nothing and a foreign id is structurally
+   * absent rather than filtered here. Ordered oldest first — the order a bill list is
+   * read in — and unpaginated: an expense has a handful of bills (PRD §3.4's cap is
+   * five).
+   */
+  listCompletedForExpense(
+    expenseId: ExpenseId,
+    societyId: SocietyId,
+    actor: UserId,
+  ): Promise<readonly AttachmentRecord[]>;
+
+  /**
    * Stamp `completed_at` on a still-`pending` row and return what landed.
    *
    * `RETURNING` rather than a read-back, so a concurrent completion cannot be

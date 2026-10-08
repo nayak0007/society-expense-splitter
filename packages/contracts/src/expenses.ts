@@ -655,10 +655,22 @@ export type ExpenseResponseDto = z.infer<typeof expenseResponseSchema>;
  * `GET /expenses` — SAD §7.5's named filters, SAD §7.4's cursor.
  *
  * Every parameter is declared and a field outside this schema is refused rather than
- * ignored, which is what makes the three filters the schema does **not** have
- * deliberately loud: `buildingId`, `hasAttachments` and `cycleId` are the SAD's but
- * have no column or table yet (T060 withheld `cycle_id`; attachments are T071; the
- * PRD's building scope lives inside `participant_selector`).
+ * ignored, which is what makes the two filters the schema does **not** have
+ * deliberately loud: `hasAttachments` and `cycleId` are the SAD's but have no column
+ * or table yet (T060 withheld `cycle_id`; `hasAttachments` is a join T073 did not
+ * need).
+ *
+ * ## `buildingId` is T073's, and it names the selector's building scope
+ *
+ * An expense has no `building_id` column: its building scope is stored inside
+ * `participant_selector.buildings` (PRD §3.4's "building_id / wing — scope the expense
+ * to a subset", resolved by T063). `buildingId` therefore matches an expense **whose
+ * selector is scoped to that building**, which is the only building relationship the
+ * data model states unambiguously. A society-wide expense names no building and so
+ * matches no building filter; a wing is *not* used to infer a building, because a wing
+ * name is unique only per building (`uq_wings_building_name`), so the inference would
+ * be one-name-to-many-buildings and wrong for at least one of them. The full reasoning
+ * and the recorded limitation are on `ExpenseListQuery` in `@ses/domain`.
  *
  * `limit` clamps silently at 100, as SAD §7.4 requires ("Exceeding the max clamps
  * silently rather than erroring"); a non-numeric or non-positive one is still a
@@ -673,6 +685,8 @@ export const listExpensesQuerySchema = z
     dateTo: expenseDateSchema.optional(),
     amountPaiseMin: z.coerce.number().int().min(0).optional(),
     amountPaiseMax: z.coerce.number().int().min(0).optional(),
+    /** Building scope of the expense's participant selector (T073). */
+    buildingId: z.uuid().optional(),
     createdBy: z.uuid().optional(),
     /** Full-text search over title, description and vendor. */
     q: z.string().trim().min(1).max(200).optional(),
@@ -1281,4 +1295,69 @@ export const expenseCommentsResponseSchema = z.object({
 });
 export type ExpenseCommentsResponseDto = z.infer<
   typeof expenseCommentsResponseSchema
+>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Current splits — Roadmap T073, PRD §3.5.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One **current** `expense_splits` row — what a participating flat/member owes for
+ * this expense right now.
+ *
+ * ## Current state, never a recomputation and never a revision snapshot
+ *
+ * The rows are the persisted `expense_splits` the publish/recalculation path wrote
+ * (`expense_publish()`/`expense_recalculate()`), read verbatim. They are deliberately
+ * **not** recomputed from the participant selector — a fresh calculation would be a
+ * second split engine path and could disagree with the bill — and deliberately **not**
+ * taken from `expense_revisions.snapshot`, which is *history*: the snapshot describes a
+ * prior version's splits, not the live ones. For a `draft` or `pending_approval`
+ * expense no splits have been written, so the array is empty; that is the honest answer
+ * (the bill has no allocation yet), not an error.
+ *
+ * ## Money and weights keep the wire's exactness
+ *
+ * `amountPaise` is an integer, the SAD §7.9 money convention every other expense
+ * amount uses. `weight` and `percent` are `numeric` columns, so they travel as strings
+ * — the same reason `amount_paise` is read as text server-side — and a client renders
+ * them without ever putting them through a float. Both are nullable in the schema
+ * because the columns are: a `custom` allocation may carry an amount with no meaningful
+ * weight.
+ *
+ * `snapshot` carries the participant's name and flat number *as they were when the row
+ * was published* (PRD §7.3: a later rename must not rewrite history), typed permissively
+ * because it is an opaque stored record rather than a re-modelled shape.
+ */
+export const expenseSplitSchema = z.object({
+  id: z.string(),
+  expenseId: z.string(),
+  memberId: z.string().nullable(),
+  apartmentId: z.string().nullable(),
+  amountPaise: z.number().int(),
+  weight: z.string().nullable(),
+  percent: z.string().nullable(),
+  assignedReason: z.string().nullable(),
+  snapshot: z.object({
+    memberName: z.string().nullable().optional(),
+    apartmentNumber: z.string().nullable().optional(),
+  }),
+  createdAt: z.string(),
+});
+export type ExpenseSplitDto = z.infer<typeof expenseSplitSchema>;
+
+/**
+ * `GET /expenses/:expenseId/splits` — every current split row, oldest first.
+ *
+ * The whole set is returned in one response rather than paginated: an expense's splits
+ * are bounded by the number of participating flats (hundreds at most), the split table
+ * a treasurer reads is one screen, and the database's conservation trigger
+ * (`chk_split_total()`) already guarantees the rows total the expense amount exactly.
+ * No `nextCursor`/`hasMore` pair, because there is only ever one page.
+ */
+export const expenseSplitsResponseSchema = z.object({
+  splits: z.array(expenseSplitSchema),
+});
+export type ExpenseSplitsResponseDto = z.infer<
+  typeof expenseSplitsResponseSchema
 >;

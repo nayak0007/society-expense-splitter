@@ -233,6 +233,18 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
           sql`amount_paise <= ${query.amountPaiseMax.toString()}::bigint`,
         );
       }
+      if (query.buildingId !== undefined) {
+        // T073's building filter. `jsonb_exists` is the `?` operator's function form,
+        // chosen over the bare `?` so nothing in this fragment looks like a driver
+        // placeholder: it is a containment test on the stored array, so an expense
+        // scoped to several buildings is returned exactly once per building (no join,
+        // no duplication) and a selector with no `buildings` key yields SQL NULL — not
+        // true — so a society-wide expense matches no building, which is the definition
+        // `ExpenseListQuery` records.
+        conditions.push(
+          sql`jsonb_exists(participant_selector -> 'buildings', ${query.buildingId}::text)`,
+        );
+      }
       if (query.createdBy !== undefined) {
         conditions.push(sql`created_by = ${query.createdBy}::uuid`);
       }

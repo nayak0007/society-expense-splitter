@@ -1,4 +1,5 @@
 import {
+  asBuildingId,
   asExpenseCategoryId,
   asExpenseError,
   asExpenseId,
@@ -302,6 +303,8 @@ export interface ExpenseListRequest {
   readonly dateTo?: string | undefined;
   readonly amountPaiseMin?: number | undefined;
   readonly amountPaiseMax?: number | undefined;
+  /** T073: the expense's participant selector names this building. */
+  readonly buildingId?: string | undefined;
   readonly createdBy?: string | undefined;
   /** Full-text search over title, description and vendor. */
   readonly q?: string | undefined;
@@ -340,6 +343,9 @@ export function buildExpenseListQuery(
     ...(request.amountPaiseMax === undefined
       ? {}
       : { amountPaiseMax: paise(request.amountPaiseMax) }),
+    ...(request.buildingId === undefined
+      ? {}
+      : { buildingId: asBuildingId(request.buildingId) }),
     ...(request.createdBy === undefined
       ? {}
       : { createdBy: asMemberId(request.createdBy) }),

@@ -51,6 +51,11 @@ export const ATTACHMENT_ERROR_CODES = [
   "content_mismatch",
   "quota_exceeded",
   "storage_unavailable",
+  // T073's two serving-gate refusals (SAD §10.7, ADR-0012 D3). Shaped but
+  // unreachable while no scanner is configured — the gate is inert — and named so
+  // arming one later produces these codes rather than a generic conflict.
+  "scan_pending",
+  "file_quarantined",
   "unknown",
 ] as const;
 

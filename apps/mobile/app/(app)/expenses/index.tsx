@@ -1,12 +1,6 @@
-import { PlaceholderScreen } from '@/components/layout/PlaceholderScreen';
+import ExpenseListScreen from '@/features/expenses/screens/ExpenseListScreen';
 
-/** Expenses tab root — the expense list arrives in Phase 4. */
+/** Expenses tab root — the filterable ledger (Roadmap T073, PRD §3.5.3). */
 export default function Expenses() {
-  return (
-    <PlaceholderScreen
-      title="Expenses"
-      description="The society ledger will live here."
-      links={[['Payments tab', '/(app)/payments']]}
-    />
-  );
+  return <ExpenseListScreen />;
 }

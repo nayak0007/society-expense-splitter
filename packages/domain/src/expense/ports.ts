@@ -503,13 +503,36 @@ export interface ExpenseCursor {
  * The filters SAD §7.5 declares, plus search and the cursor — nothing generic.
  *
  * Named parameters only: a client cannot express a predicate the schema does not
- * have. `buildingId`, `hasAttachments` and `cycleId` from the SAD's example are
- * deliberately absent because no column or table supports them yet — `expenses` has
- * no `building_id` (the PRD's building scope is stored inside `participant_selector`),
- * `cycle_id` was withheld by T060 until the cycles module exists, and attachments are
- * T071's. The contract's strict query schema refuses them by name rather than
- * ignoring them, which is what lets the gap be reported instead of silently widening
- * a list.
+ * have. `hasAttachments` and `cycleId` from the SAD's example stay deliberately
+ * absent because no column or table supports them yet — `cycle_id` was withheld by
+ * T060 until the cycles module exists, and `hasAttachments` is a join T073 did not
+ * need. The contract's strict query schema refuses them by name rather than ignoring
+ * them, which is what lets the gap be reported instead of silently widening a list.
+ *
+ * ## `buildingId` (T073) means the expense's selector names that building
+ *
+ * The product question is "which expenses are scoped to this building". `expenses`
+ * has **no `building_id` column** — a building scope is stored inside
+ * `participant_selector.buildings` (PRD §3.4's "building_id / wing"; T063 resolved
+ * it). So an expense matches `buildingId` **iff its selector's canonical `buildings`
+ * array contains it**. Three consequences are accepted rather than worked around:
+ *
+ *  - a **society-wide** selector (`scope: 'society'`, `buildings: []`) names no
+ *    building, so it matches no building filter — it is billed to everyone, which is
+ *    exactly why it is not "scoped to" any one building;
+ *  - a match returns the row **once**: the predicate is a containment test on a stored
+ *    array, not a join, so an expense scoped to several buildings appears once in each
+ *    of those buildings' results and never duplicated within one;
+ *  - a **wing is not used to infer a building.** Wing names are unique only *per
+ *    building* (`uq_wings_building_name`), so a name resolves to zero or many
+ *    buildings and the inference would silently pick one. That limitation is recorded
+ *    rather than guessed at; a selector that narrows by wing without naming a building
+ *    is reachable through the building filter only if the treasurer also names the
+ *    building, which the split configurator's selector does when scope is `building`.
+ *
+ * The predicate rides the stored JSON, so it is one condition on the same statement as
+ * every other filter; the cursor is unaffected (it is still `(expense_date, id)`), and
+ * RLS plus the `society_id` predicate keep it tenant-scoped.
  */
 export interface ExpenseListQuery {
   readonly categoryId?: ExpenseCategoryId | undefined;
@@ -520,6 +543,8 @@ export interface ExpenseListQuery {
   readonly dateTo?: string | undefined;
   readonly amountPaiseMin?: Paise | undefined;
   readonly amountPaiseMax?: Paise | undefined;
+  /** An expense whose `participant_selector.buildings` contains this id. */
+  readonly buildingId?: BuildingId | undefined;
   readonly createdBy?: MemberId | undefined;
   /** Full-text query over title, description and vendor (the GIN index's expression). */
   readonly search?: string | undefined;
@@ -1022,6 +1047,61 @@ export interface ExpenseRevisionRepository {
     societyId: SocietyId,
     actor: UserId,
   ): Promise<readonly ExpenseRevisionRecord[]>;
+}
+
+/**
+ * One **current** `expense_splits` row — T073's read of PRD §3.5.3's split table.
+ *
+ * This is the *live* allocation the bill was published (or last recalculated) with,
+ * read from `expense_splits` verbatim. It is deliberately **not** recomputed from the
+ * participant selector (a fresh calculation would be a second split-engine path and
+ * could disagree with the bill), and deliberately **not** read from
+ * `expense_revisions.snapshot` (that is the *history* — a prior version's rows, not the
+ * current ones). A `draft` or `pending_approval` expense has no splits, so the array is
+ * empty, which is the honest answer rather than an error.
+ *
+ * `weight` and `percent` are `numeric` on the wire as digit strings (never a float),
+ * and `amount` is integer paise exactly as every other money value is. Both `memberId`
+ * and `apartmentId` are nullable because the column is: an unassigned flat is the
+ * documented PRD §3.5.4 case, and a member-only charge is legitimate.
+ */
+export interface ExpenseSplitRecord {
+  readonly id: string;
+  readonly expenseId: ExpenseId;
+  readonly memberId: MemberId | null;
+  readonly apartmentId: ApartmentId | null;
+  readonly amount: Money;
+  /** The engine's weight in the column's own scale, as a decimal string, or `null`. */
+  readonly weight: string | null;
+  /** The percentage, as a decimal string, or `null`. */
+  readonly percent: string | null;
+  readonly assignedReason: AssignedReason | null;
+  /** The participant's name and flat number as they were when the row was written. */
+  readonly snapshot: {
+    readonly memberName: string | null;
+    readonly apartmentNumber: string | null;
+  };
+  readonly createdAt: string;
+}
+
+/**
+ * The current-splits read — T073's `GET /expenses/:expenseId/splits`.
+ *
+ * A read-only port with one operation, for the reason the revision port has one:
+ * `expense_splits` is written only by the publish/recalculation definer transactions,
+ * so nothing above infrastructure may open a second writer. Visibility is the
+ * database's (`can_view_expenses` RLS), so a caller outside the society reads nothing;
+ * the use case answers `not_found` for a foreign or unknown expense before the reader
+ * is reached, which is what keeps a cross-society id indistinguishable from an absent
+ * one (PRD T041).
+ */
+export interface ExpenseSplitsReader {
+  /** Every current split of one expense, oldest first — never `null`, possibly empty. */
+  listForExpense(
+    expenseId: ExpenseId,
+    societyId: SocietyId,
+    actor: UserId,
+  ): Promise<readonly ExpenseSplitRecord[]>;
 }
 
 /**

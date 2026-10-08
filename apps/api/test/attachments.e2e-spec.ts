@@ -208,7 +208,7 @@ beforeEach(() => {
 const server = () => request(app.getHttpServer());
 
 async function call(
-  method: "post" | "delete",
+  method: "get" | "post" | "delete",
   path: string,
   options: {
     readonly userId?: UserId;
@@ -291,6 +291,44 @@ function remove(
     userId: options.userId ?? ADMIN,
     societyId: options.societyId === undefined ? SOCIETY_A : options.societyId,
   });
+}
+
+function get(
+  path: string,
+  options: {
+    readonly userId?: UserId;
+    readonly societyId?: string | null;
+  } = {},
+) {
+  return call("get", path, {
+    userId: options.userId ?? ADMIN,
+    societyId: options.societyId === undefined ? SOCIETY_A : options.societyId,
+  });
+}
+
+/** Seeds one stored attachment row out of band, for the T073 read routes. */
+function seedAttachment(
+  overrides: Partial<AttachmentRecord> & { readonly id: string },
+): AttachmentRecord {
+  const { id, ...rest } = overrides;
+  const record: AttachmentRecord = {
+    id,
+    societyId: SOCIETY_A,
+    entityType: "expense",
+    entityId: EXPENSE,
+    storageKey: `societies/${SOCIETY_A}/expenses/${EXPENSE}/${overrides.id}.jpg`,
+    originalFilename: "bill.jpg",
+    mimeType: "image/jpeg",
+    sizeBytes: 64,
+    checksum: "a".repeat(64),
+    uploadedBy: ADMIN_MEMBER,
+    scanStatus: "pending",
+    completedAt: "2026-10-07T10:05:00.000Z",
+    createdAt: "2026-10-07T10:00:00.000Z",
+    ...rest,
+  };
+  attachments.seedRow(record);
+  return record;
 }
 
 /**
@@ -752,3 +790,140 @@ function completedRow(index: number, sizeBytes: number): AttachmentRecord {
     createdAt: "2026-10-07T08:00:00.000Z",
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T073's read routes — the list and the download URL
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("GET /v1/expenses/:expenseId/attachments", () => {
+  it("requires a session before anything else", async () => {
+    const response = await call("get", `/v1/expenses/${EXPENSE}/attachments`, {
+      societyId: SOCIETY_A,
+    });
+    expect(response.status).toBe(401);
+  });
+
+  it("lists the expense's completed bills, oldest first, and not an outstanding reservation", async () => {
+    seedAttachment({
+      id: "30000000-0000-4000-8000-000000000002",
+      originalFilename: "second.pdf",
+      completedAt: "2026-10-07T10:10:00.000Z",
+      createdAt: "2026-10-07T10:09:00.000Z",
+    });
+    seedAttachment({
+      id: "30000000-0000-4000-8000-000000000001",
+      originalFilename: "first.jpg",
+      completedAt: "2026-10-07T10:05:00.000Z",
+      createdAt: "2026-10-07T10:00:00.000Z",
+    });
+    // An outstanding reservation: no `completedAt`, so it is not a bill.
+    seedAttachment({
+      id: "30000000-0000-4000-8000-000000000003",
+      completedAt: null,
+      createdAt: "2026-10-07T10:20:00.000Z",
+    });
+
+    const response = await get(`/v1/expenses/${EXPENSE}/attachments`);
+
+    expect(response.status).toBe(200);
+    const ids = (response.body.data.attachments as { id: string }[]).map(
+      (row) => row.id,
+    );
+    expect(ids).toEqual([
+      "30000000-0000-4000-8000-000000000001",
+      "30000000-0000-4000-8000-000000000002",
+    ]);
+    const first = response.body.data.attachments[0] as {
+      originalFilename: string;
+      scanStatus: string;
+      completedAt: string;
+    };
+    expect(first.originalFilename).toBe("first.jpg");
+    // The one field a client must not misread: an unscanned file is `pending`, not `clean`.
+    expect(first.scanStatus).toBe("pending");
+    expect(first.completedAt).toBe("2026-10-07T10:05:00.000Z");
+  });
+
+  it("answers 404 for an expense id that is not there", async () => {
+    const response = await get(`/v1/expenses/${ABSENT_ID}/attachments`);
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe("NOT_FOUND");
+  });
+
+  it("answers 404 — never 403 — for an expense in another society", async () => {
+    const response = await get(`/v1/expenses/${FOREIGN_EXPENSE}/attachments`, {
+      societyId: SOCIETY_A,
+    });
+    expect(response.status).toBe(404);
+  });
+});
+
+describe("GET /v1/attachments/:attachmentId/download", () => {
+  it("requires a session before anything else", async () => {
+    const response = await call(
+      "get",
+      `/v1/attachments/30000000-0000-4000-8000-000000000001/download`,
+      { societyId: SOCIETY_A },
+    );
+    expect(response.status).toBe(401);
+  });
+
+  it("mints a short-lived URL and returns the row's own metadata", async () => {
+    seedAttachment({ id: "30000000-0000-4000-8000-000000000001" });
+
+    const response = await get(
+      `/v1/attachments/30000000-0000-4000-8000-000000000001/download`,
+    );
+
+    expect(response.status).toBe(200);
+    const data = response.body.data as {
+      url: string;
+      expiresAt: string;
+      filename: string;
+      mimeType: string;
+      sizeBytes: number;
+      scanStatus: string;
+    };
+    expect(data.url).toContain("30000000-0000-4000-8000-000000000001.jpg");
+    expect(data.filename).toBe("bill.jpg");
+    expect(data.mimeType).toBe("image/jpeg");
+    // Served (the gate is inert with no scanner) but honestly labelled unscanned.
+    expect(data.scanStatus).toBe("pending");
+    expect(Number.isNaN(Date.parse(data.expiresAt))).toBe(false);
+  });
+
+  it("answers 404 for an attachment that never completed", async () => {
+    seedAttachment({
+      id: "30000000-0000-4000-8000-000000000003",
+      completedAt: null,
+    });
+    const response = await get(
+      `/v1/attachments/30000000-0000-4000-8000-000000000003/download`,
+    );
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe("NOT_FOUND");
+  });
+
+  it("answers 404 for an unknown attachment id", async () => {
+    const response = await get(`/v1/attachments/${ABSENT_ID}/download`);
+    expect(response.status).toBe(404);
+  });
+
+  it("answers 404 — never 403 — for an attachment in another society", async () => {
+    seedAttachment({
+      id: "30000000-0000-4000-8000-0000000000b2",
+      societyId: SOCIETY_B,
+      entityId: FOREIGN_EXPENSE,
+    });
+    const response = await get(
+      `/v1/attachments/30000000-0000-4000-8000-0000000000b2/download`,
+    );
+    expect(response.status).toBe(404);
+  });
+
+  it("refuses a path parameter that is not a UUID before any query runs", async () => {
+    const response = await get(`/v1/attachments/not-a-uuid/download`);
+    expect(response.status).toBe(422);
+    expect(response.body.error.field).toBe("attachmentId");
+  });
+});

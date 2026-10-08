@@ -1,10 +1,17 @@
+import {
+  attachmentDownloadUrlSchema,
+  expenseAttachmentsResponseSchema,
+} from "@ses/contracts";
 import type {
+  AttachmentDownloadUrlDto,
   CompleteAttachmentUploadResponseDto,
+  ExpenseAttachmentsResponseDto,
   PresignAttachmentUploadResponseDto,
 } from "@ses/contracts";
 import type { AttachmentRecord } from "@ses/domain";
 
 import type { CompleteUploadResult } from "../application/use-cases/complete-upload.use-case";
+import type { AttachmentDownloadResult } from "../application/use-cases/create-attachment-download-url.use-case";
 import type { PresignUploadResult } from "../application/use-cases/presign-upload.use-case";
 
 /**
@@ -77,4 +84,44 @@ export function attachmentToDto(record: AttachmentRecord) {
     completedAt: record.completedAt,
     createdAt: record.createdAt,
   };
+}
+
+/**
+ * `GET /expenses/:expenseId/attachments` — the completed bills, oldest first.
+ *
+ * Parses rather than constructs, like every mapper in this codebase: the contract
+ * schema is the client's parse target, so a rename fails loudly here instead of shipping
+ * a payload the mobile client cannot read. This is the object `attachmentSchema`'s own
+ * docstring said T073 would return — the row's fields and **no URL**, because a download
+ * link is minted per read and never stored.
+ */
+export function attachmentsToDto(
+  records: readonly AttachmentRecord[],
+): ExpenseAttachmentsResponseDto {
+  return expenseAttachmentsResponseSchema.parse({
+    attachments: records.map((record) => attachmentToDto(record)),
+  });
+}
+
+/**
+ * `GET /attachments/:attachmentId/download` — the signed URL and its metadata.
+ *
+ * `url` is passed through untouched and never inspected: it is an opaque, time-limited
+ * credential (see the contract's own note), and the one component that may understand
+ * its structure is the adapter that minted it. `expiresAt` is the API's own answer for
+ * when it dies, carries no secret, and lets a client refresh before a broken download.
+ * `filename` is the stored, already-sanitised display name — the client uses it, the
+ * server never turns it into a header.
+ */
+export function attachmentDownloadUrlToDto(
+  result: AttachmentDownloadResult,
+): AttachmentDownloadUrlDto {
+  return attachmentDownloadUrlSchema.parse({
+    url: result.url,
+    expiresAt: result.expiresAt,
+    filename: result.filename,
+    mimeType: result.mimeType,
+    sizeBytes: result.sizeBytes,
+    scanStatus: result.scanStatus,
+  });
 }

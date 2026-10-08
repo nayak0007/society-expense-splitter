@@ -259,6 +259,44 @@ export class AttachmentRepositoryPostgres implements AttachmentRepository {
   }
 
   /**
+   * The **completed** attachments of one expense, oldest first — T073's read.
+   *
+   * `completed_at is not null` is the filter, and it is what keeps an outstanding
+   * presign reservation (an upload that never arrived) out of the expense detail — a
+   * row with a null stamp is not a bill, it is an intention. `entity_type = 'expense'`
+   * beside the id keeps the read keyed on the same polymorphic pair the insert policy
+   * re-asserts, and `society_id` makes a cross-society id unaddressable as well as
+   * unreadable. `order by created_at` gives a stable, oldest-first list.
+   *
+   * The whole read runs inside `UnitOfWork` as the caller, so
+   * `attachments_select_member` (RLS) decides which rows exist; a Guest reads nothing
+   * and another tenant's rows are structurally absent. Failures are classified the same
+   * way every other read here is.
+   */
+  async listCompletedForExpense(
+    expenseId: ExpenseId,
+    societyId: SocietyId,
+    actor: UserId,
+  ): Promise<readonly AttachmentRecord[]> {
+    return this.run(actor, "read", async (tx) => {
+      const rows = await runQuery(
+        tx,
+        sql`
+          select ${ATTACHMENT_COLUMNS}
+            from public.attachments
+           where entity_type = 'expense'
+             and entity_id = ${expenseId}::uuid
+             and society_id = ${societyId}::uuid
+             and completed_at is not null
+           order by created_at asc
+        `,
+      );
+
+      return rows.map((row) => attachmentFromRow(parseRow(row)));
+    });
+  }
+
+  /**
    * Stamp `completed_at` on a still-pending row, or explain why it did not.
    *
    * `WHERE completed_at IS NULL` is the whole concurrency story: a second

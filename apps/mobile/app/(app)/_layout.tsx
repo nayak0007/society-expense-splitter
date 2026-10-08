@@ -72,7 +72,13 @@ export default function AppLayout() {
   return (
     <Tabs screenOptions={screenOptions}>
       <Tabs.Screen name="home" options={tabScreen('Home', 'home', 'home-outline')} />
-      <Tabs.Screen name="expenses" options={tabScreen('Expenses', 'receipt', 'receipt-outline')} />
+      {/* The Expenses tab owns a nested stack (app/(app)/expenses/_layout.tsx) that
+          renders its own header, so the tab header is switched off here — the same
+          arrangement the More tab uses. */}
+      <Tabs.Screen
+        name="expenses"
+        options={{ ...tabScreen('Expenses', 'receipt', 'receipt-outline'), headerShown: false }}
+      />
       <Tabs.Screen name="payments" options={tabScreen('Payments', 'wallet', 'wallet-outline')} />
       <Tabs.Screen name="community" options={tabScreen('Community', 'people', 'people-outline')} />
       {/* The More tab owns a nested stack (app/(app)/more/_layout.tsx), which

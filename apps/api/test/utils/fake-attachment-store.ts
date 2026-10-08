@@ -156,6 +156,25 @@ export function createFakeAttachmentRepository(): FakeAttachmentRepository {
       return Promise.resolve(record);
     },
 
+    listCompletedForExpense(
+      expenseId: ExpenseId,
+      societyId: SocietyId,
+    ): Promise<readonly AttachmentRecord[]> {
+      calls.push("listCompletedForExpense");
+      return Promise.resolve(
+        [...rows.values()]
+          .filter(
+            (row) =>
+              row.societyId === societyId &&
+              row.entityType === "expense" &&
+              row.entityId === expenseId &&
+              // The port's own filter: an outstanding reservation is not a bill.
+              row.completedAt !== null,
+          )
+          .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+      );
+    },
+
     markComplete(
       attachmentId: string,
       societyId: SocietyId,

@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  Get,
   HttpCode,
   HttpStatus,
   Param,
@@ -17,8 +18,10 @@ import {
   ApiTags,
 } from "@nestjs/swagger";
 import {
+  attachmentDownloadUrlSchema,
   completeAttachmentUploadResponseSchema,
   completeAttachmentUploadSchema,
+  expenseAttachmentsResponseSchema,
   presignAttachmentUploadResponseSchema,
   presignAttachmentUploadSchema,
 } from "@ses/contracts";
@@ -44,9 +47,16 @@ import {
   errorEnvelopeJsonSchema,
 } from "../../../common/swagger/zod-openapi";
 import { CompleteUploadUseCase } from "../application/use-cases/complete-upload.use-case";
+import { CreateAttachmentDownloadUrlUseCase } from "../application/use-cases/create-attachment-download-url.use-case";
 import { DeleteAttachmentUseCase } from "../application/use-cases/delete-attachment.use-case";
+import { ListExpenseAttachmentsUseCase } from "../application/use-cases/list-expense-attachments.use-case";
 import { PresignUploadUseCase } from "../application/use-cases/presign-upload.use-case";
-import { completeUploadToDto, presignUploadToDto } from "./attachment.mapper";
+import {
+  attachmentDownloadUrlToDto,
+  attachmentsToDto,
+  completeUploadToDto,
+  presignUploadToDto,
+} from "./attachment.mapper";
 import { ApiAttachmentErrors, ATTACHMENT_EXTRA_STATUS_COPY } from "./openapi";
 
 /**
@@ -74,13 +84,23 @@ import { ApiAttachmentErrors, ATTACHMENT_EXTRA_STATUS_COPY } from "./openapi";
  * {entityType, entityId, …}` body is **not** shipped — it is the generic form a
  * later multi-entity task can add as an alias over the same use case.
  *
- * ## No list route and no download route
+ * ## T073 added the list and download routes, which ADR-0012 D4 had deferred
  *
- * ADR-0012 D4, and the reason is worth repeating where a reader looks for the
- * missing route: the consumers that need them (T073's expense detail, T076's capture
- * flow, T132's OCR) need the presign/complete/delete trio first, and a route invented
- * before its screen exists would be a route nobody asked for behind a permission
- * nobody chose. `presignDownload` ships on the storage port with no HTTP surface.
+ * ADR-0012 D4 deliberately shipped no list route and no download route in T071 and named
+ * the consumers that would need them — T073's expense detail first. T073 is that
+ * consumer, so this controller now also serves:
+ *
+ * ```text
+ *   GET /v1/expenses/:expenseId/attachments     -> 200 { attachments: [...] }   (completed only)
+ *   GET /v1/attachments/:attachmentId/download   -> 200 { url, expiresAt, filename, mimeType, sizeBytes, scanStatus }
+ * ```
+ *
+ * Both declare the **reused** `expense.view` cell (ADR-0012 D5's download row) — a
+ * green cell for every role but Guest, so neither route narrows. The download is a
+ * `GET` that mints a URL and reads nothing beyond one attachment row; it is idempotent
+ * and side-effect-free, which is what makes `GET` correct rather than a `POST`. The
+ * object store's credentials never appear here: the URL is a derived, time-limited
+ * credential and the client treats it as opaque.
  *
  * ## The controller decides nothing
  *
@@ -109,6 +129,8 @@ export class AttachmentsController {
     private readonly presignUpload: PresignUploadUseCase,
     private readonly completeUpload: CompleteUploadUseCase,
     private readonly deleteAttachment: DeleteAttachmentUseCase,
+    private readonly listAttachments: ListExpenseAttachmentsUseCase,
+    private readonly createDownloadUrl: CreateAttachmentDownloadUrlUseCase,
   ) {}
 
   /**
@@ -273,5 +295,90 @@ export class AttachmentsController {
       society.id,
       attachmentId,
     );
+  }
+
+  /**
+   * The completed bills of one expense — T073's list route (ADR-0012 D4 deferred it).
+   *
+   * `200` with the expense's **completed** attachments, oldest first. Only rows with a
+   * non-null `completedAt` are returned: an outstanding presign reservation is an upload
+   * that never arrived, and listing it would put a bill in the detail screen that is not
+   * in the bucket. Cross-society and unknown expense ids answer `404` (the expense read),
+   * never a distinguishable `403`.
+   *
+   * `scanStatus` travels on every row and is the one field a client must read carefully.
+   * With no scanner configured the gate is inert (ADR-0012 D3), so a `pending` bill is
+   * listed and can be downloaded — but `pending` is **not** `clean`, and the UI must not
+   * render an unscanned file as verified.
+   */
+  @Get("expenses/:expenseId/attachments")
+  @RequirePermission("expense.view")
+  @ApiOperation({
+    summary: "List an expense's attachments",
+    description:
+      "The expense's completed bills, oldest first. Only uploads whose bytes were verified (`completed_at` set) are listed; an outstanding presign reservation is not a bill and is absent. Each row carries `scanStatus` — `pending` means the file has not been security-scanned (no scanner is configured, so it is served) and must be labelled as unscanned, not as verified. A society-wide or cross-society expense id answers 404.",
+  })
+  @ApiParam({ name: "expenseId", description: "Expense UUID." })
+  @ApiOkResponse({
+    description:
+      "The expense's completed attachments, oldest first. An expense with no bills answers `{ attachments: [] }`.",
+    schema: envelopeSchemaOf(expenseAttachmentsResponseSchema),
+  })
+  async list(
+    @Ctx() context: RequestCtx,
+    @Param("expenseId", new ZodPipe(expenseIdParam)) expenseId: string,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    const attachments = await this.listAttachments.list(
+      asUserId(userId),
+      society.id,
+      asExpenseId(expenseId),
+    );
+    return attachmentsToDto(attachments);
+  }
+
+  /**
+   * A short-lived, authorized download URL for one attachment — T073's download route.
+   *
+   * `200` with an opaque, time-limited signed URL for a **private** object, plus the
+   * URL's expiry and the row's own metadata. Authorization reuses `expense.view` — no
+   * new permission family (ADR-0012 D5/D8) — and the read is scoped by the attachment id
+   * **and** the caller's society under their own RLS identity, so a foreign or unknown id
+   * answers `404`. Only completed uploads are servable: an outstanding reservation is the
+   * same invisibility as an absent id.
+   *
+   * `filename` is the stored, already-sanitised display name — the client uses it as a
+   * save/title; the server never builds a `Content-Disposition` from it, so there is no
+   * header-injection surface. The URL is never logged. Viewing the bills of a **void**
+   * expense is permitted: D6.1 forbids *adding* a bill to a void expense, not auditing
+   * the evidence of a reversed one.
+   */
+  @Get("attachments/:attachmentId/download")
+  @RequirePermission("expense.view")
+  @ApiOperation({
+    summary: "Get an attachment download URL",
+    description:
+      "Mints a short-lived signed URL for one completed attachment's private object. Readable by every member who can view the expense; a cross-society or unknown id — and an upload that never completed — answers 404. The response carries `scanStatus`: with no scanner configured the gate is inert (ADR-0012 D3) so the file is served, but `pending` is not `clean` and the client must not imply it is verified. No bucket credentials are ever exposed and no object is public.",
+  })
+  @ApiParam({ name: "attachmentId", description: "Attachment UUID." })
+  @ApiOkResponse({
+    description:
+      "A time-limited signed URL (`url`), when it expires, and the file's sanitised name, MIME type, size and scan status.",
+    schema: envelopeSchemaOf(attachmentDownloadUrlSchema),
+  })
+  async download(
+    @Ctx() context: RequestCtx,
+    @Param("attachmentId", new ZodPipe(attachmentIdParam))
+    attachmentId: string,
+  ) {
+    const { userId } = requireActor(context);
+    const { society } = requireSociety(context);
+    const result = await this.createDownloadUrl.create(
+      asUserId(userId),
+      society.id,
+      attachmentId,
+    );
+    return attachmentDownloadUrlToDto(result);
   }
 }
