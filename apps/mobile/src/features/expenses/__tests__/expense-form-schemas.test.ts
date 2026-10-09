@@ -12,6 +12,7 @@ import {
   formValuesToCreatePayload,
   formValuesToUpdatePayload,
   isVersionConflict,
+  migrateDraftValues,
   staleVersionFromError,
   todayIsoDate,
 } from '../schemas/expense-form.schemas';
@@ -117,12 +118,31 @@ describe('formValuesToCreatePayload', () => {
     expect(payload).not.toHaveProperty('paidByMemberId');
   });
 
-  it('never sends split configuration — that is T075, and omission means category defaults', () => {
+  it('carries the split fields (T075) with the product’s own defaults when untouched', () => {
     const payload = formValuesToCreatePayload(validValues(), PAISE);
-    expect(payload).not.toHaveProperty('splitStrategy');
-    expect(payload).not.toHaveProperty('apartmentBasis');
-    expect(payload).not.toHaveProperty('splitConfig');
-    expect(payload).not.toHaveProperty('participantSelector');
+    expect(payload.splitStrategy).toBe('equal');
+    expect(payload.apartmentBasis).toBeNull();
+    expect(payload.splitConfig).toEqual({});
+    expect(payload.participantSelector).toEqual({});
+  });
+
+  it('carries a configured split verbatim', () => {
+    const payload = formValuesToCreatePayload(
+      validValues({
+        splitStrategy: 'percentage',
+        apartmentBasis: null,
+        splitConfig: { percentages: [{ apartmentId: 'apt-1', basisPoints: 3333 }] },
+        participantSelector: { buildings: ['11111111-1111-4111-8111-111111111111'] },
+      }),
+      PAISE,
+    );
+    expect(payload.splitStrategy).toBe('percentage');
+    expect(payload.splitConfig).toEqual({
+      percentages: [{ apartmentId: 'apt-1', basisPoints: 3333 }],
+    });
+    expect(payload.participantSelector).toEqual({
+      buildings: ['11111111-1111-4111-8111-111111111111'],
+    });
   });
 
   it('refuses to build a payload with no amount', () => {
@@ -187,6 +207,40 @@ describe('formValuesToUpdatePayload', () => {
       paymentSource: 'petty_cash',
       expectedVersion: 4,
     });
+  });
+});
+
+describe('migrateDraftValues (T075 §10)', () => {
+  it('lifts a T074 draft forward, preserving every field it carried', () => {
+    const legacy = {
+      title: 'Lift AMC',
+      amount: '1,000.00',
+      expenseDate: '2026-10-01',
+      categoryId: 'cat-1',
+      description: 'Quarterly',
+      vendorName: 'Otis',
+      paymentSource: 'society_account',
+      paidByMemberId: null,
+    };
+    const migrated = migrateDraftValues(legacy);
+    expect(migrated).not.toBeNull();
+    expect(migrated?.title).toBe('Lift AMC');
+    expect(migrated?.vendorName).toBe('Otis');
+    expect(migrated?.description).toBe('Quarterly');
+    // The split it actually described: the product's own defaults.
+    expect(migrated?.splitStrategy).toBe('equal');
+    expect(migrated?.splitConfig).toEqual({});
+    expect(migrated?.participantSelector).toEqual({});
+  });
+
+  it('passes a current draft through unchanged', () => {
+    const current = validValues();
+    expect(migrateDraftValues(current)).toEqual(current);
+  });
+
+  it('refuses a draft that fits neither shape', () => {
+    expect(migrateDraftValues({ title: 42 })).toBeNull();
+    expect(migrateDraftValues(null)).toBeNull();
   });
 });
 

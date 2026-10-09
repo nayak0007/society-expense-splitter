@@ -29,10 +29,16 @@ import {
   expenseResponseSchema,
   expenseRevisionsResponseSchema,
   expenseSplitsResponseSchema,
+  previewSplitResponseSchema,
   buildingListResponseSchema,
   memberListResponseSchema,
 } from '@ses/contracts';
-import type { CreateExpensePayload, ExpenseDto, UpdateExpensePayload } from '@ses/contracts';
+import type {
+  CreateExpensePayload,
+  ExpenseDto,
+  PreviewSplitResponseDto,
+  UpdateExpensePayload,
+} from '@ses/contracts';
 
 import { apiRequest, isApiError } from '@/lib/api/api-client';
 
@@ -48,6 +54,7 @@ import type {
   ExpenseRevisionView,
   ExpenseSplitView,
   ExpenseSummary,
+  SplitPreviewRequest,
 } from './expense.repository';
 
 /** One expense DTO → the port's summary. Copying fields is deliberate: the wire shape is
@@ -66,6 +73,10 @@ function toSummary(dto: ExpenseDto): ExpenseSummary {
     paidByMemberId: dto.paidByMemberId,
     createdBy: dto.createdBy,
     status: dto.status,
+    splitStrategy: dto.splitStrategy,
+    apartmentBasis: dto.apartmentBasis,
+    splitConfig: dto.splitConfig,
+    participantSelector: dto.participantSelector,
     version: dto.version,
     publishedAt: dto.publishedAt,
     voidedAt: dto.voidedAt,
@@ -254,7 +265,12 @@ export class ApiExpenseRepository implements ExpenseRepository {
     // exactly what T062's deactivation exists to prevent.
     return categories
       .filter((category) => category.isActive)
-      .map((category) => ({ id: category.id, name: category.name }));
+      .map((category) => ({
+        id: category.id,
+        name: category.name,
+        defaultSplitStrategy: category.defaultSplitStrategy,
+        defaultApartmentBasis: category.defaultApartmentBasis,
+      }));
   }
 
   async listPayerOptions(
@@ -271,6 +287,35 @@ export class ApiExpenseRepository implements ExpenseRepository {
     return members
       .filter((member) => member.status === 'active')
       .map((member) => ({ id: member.id, displayName: member.displayName }));
+  }
+
+  async previewSplit(
+    societyId: string,
+    _actor: string,
+    request: SplitPreviewRequest,
+  ): Promise<PreviewSplitResponseDto> {
+    const { signal, ...fields } = request;
+    // Absent and `null` are different facts on the wire and the same one here: an omitted
+    // `categoryId` means "consult no category defaults", which is exactly what `null` says,
+    // and the strict schema refuses neither. Every optional dimension is omitted when it has
+    // no value so the request the server sees is the smallest one that means what was asked.
+    const body = {
+      amountPaise: fields.amountPaise,
+      ...(fields.categoryId == null ? {} : { categoryId: fields.categoryId }),
+      ...(fields.splitStrategy === undefined ? {} : { splitStrategy: fields.splitStrategy }),
+      ...(fields.apartmentBasis == null ? {} : { apartmentBasis: fields.apartmentBasis }),
+      ...(fields.splitConfig === undefined || Object.keys(fields.splitConfig).length === 0
+        ? {}
+        : { splitConfig: fields.splitConfig }),
+      participantSelector: fields.participantSelector,
+    };
+
+    return apiRequest('POST', 'expenses/preview-split', {
+      schema: previewSplitResponseSchema,
+      societyId,
+      body,
+      ...(signal === undefined ? {} : { signal }),
+    });
   }
 
   async create(

@@ -72,4 +72,15 @@ export const expenseKeys = {
   /** The society's billable members, for the form's payer picker (T074). */
   payerOptions: (societyId: string | null, userId: string | null) =>
     ['expense', 'payer-options', societyId, userId] as const,
+  /**
+   * One `preview-split` answer (T075), keyed by a canonical string of the request.
+   *
+   * `requestKey` is the caller's own canonicalisation of the request — the configurator
+   * builds it from the amount, strategy, basis, config and selector, so two requests
+   * that mean the same thing hit one cache entry and a changed strategy is a new one.
+   * The society and user are in the key for the same reason every other key carries
+   * them: a cached split must never be served to the wrong tenant or session.
+   */
+  splitPreview: (societyId: string | null, userId: string | null, requestKey: string) =>
+    ['expense', 'split-preview', societyId, userId, requestKey] as const,
 };

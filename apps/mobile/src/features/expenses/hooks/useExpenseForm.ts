@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+
+import { useSplitWorkspace } from './use-split-config';
+import { useExpenseCategoryOptions } from './use-expenses';
 import { useForm } from 'react-hook-form';
 import type { UseFormReturn } from 'react-hook-form';
 
@@ -28,6 +31,18 @@ import {
   writeExpenseDraft,
 } from '../services/expense-draft.store';
 import type { ExpenseDraftScope } from '../services/expense-draft.store';
+import {
+  clearSplitWorkspace,
+  ensureSplitWorkspace,
+  readSplitWorkspace,
+  updateSplitContext,
+  updateSplitState,
+} from '../services/split-config.store';
+import {
+  splitStateFromValues,
+  toParticipantSelectorPayload,
+  toSplitConfigPayload,
+} from '../schemas/split.schemas';
 import { expenseErrorMessage } from '../services/expense.service';
 
 import { useCreateExpense, useUpdateExpense } from './use-expense-actions';
@@ -112,6 +127,8 @@ interface InitialState {
   readonly values: ExpenseFormValues;
   readonly restoredDraftAt: string | null;
   readonly ignoredStaleDraft: boolean;
+  /** Whether the split was the user's choice or a category default (T075 §9). */
+  readonly splitCustomized: boolean;
 }
 
 export function useExpenseForm({
@@ -137,6 +154,29 @@ export function useExpenseForm({
     readInitialState(scope, expense === null ? null : expense.version, baseline),
   );
 
+  /*
+    The split workspace (T075) is seeded here, **before** the configurator can be opened, so a
+    pushed configurator route reads the same configuration the form opened with. It is seeded
+    from the values the first render chose (a restored draft, the server's row, or the defaults),
+    and its `customized` flag comes from the draft/row rather than from a guess.
+  */
+  const [workspaceSeeded] = useState(() => {
+    if (draftKey === null) return false;
+    if (readSplitWorkspace(draftKey) !== null) return true;
+    ensureSplitWorkspace(draftKey, {
+      state: splitStateFromValues(initial.values, initial.splitCustomized),
+      context: {
+        amountPaise: parseRupeeText(initial.values.amount).paise,
+        categoryId: initial.values.categoryId.length === 0 ? null : initial.values.categoryId,
+        defaultStrategy: null,
+      },
+    });
+    return true;
+  });
+
+  // Live view of the workspace, so the form re-renders when the configurator writes to it.
+  const workspace = useSplitWorkspace(workspaceSeeded ? draftKey : null);
+
   const form = useForm<ExpenseFormValues>({
     resolver: expenseFormResolver,
     defaultValues: initial.values,
@@ -152,6 +192,81 @@ export function useExpenseForm({
     });
     return () => subscription.unsubscribe();
   }, [form]);
+
+  /*
+    Mirror the split workspace into the form's own values (T075 §10).
+
+    The workspace is the editor's source of truth (it holds the text a treasurer is typing);
+    the form holds the **contract payload** so the draft persists it and the payload builders
+    carry it. This effect is the one crossing: when the configurator writes the workspace, the
+    converted payload lands in the form, and because `setValue` notifies `watch`, `valuesRef`
+    and the autosave see it too.
+  */
+  const workspaceState = workspace?.state ?? null;
+  useEffect(() => {
+    if (workspaceState === null) return;
+    const nextBasis = workspaceState.strategy === 'apartment' ? workspaceState.basis : null;
+    const nextConfig = toSplitConfigPayload(workspaceState, null);
+    const nextSelector = toParticipantSelectorPayload(workspaceState.selector);
+    form.setValue('splitStrategy', workspaceState.strategy);
+    form.setValue('apartmentBasis', nextBasis);
+    form.setValue('splitConfig', nextConfig);
+    form.setValue('participantSelector', nextSelector);
+    valuesRef.current = {
+      ...valuesRef.current,
+      splitStrategy: workspaceState.strategy,
+      apartmentBasis: nextBasis,
+      splitConfig: nextConfig,
+      participantSelector: nextSelector,
+    };
+  }, [workspaceState, form]);
+
+  /*
+    The category drives the split's default until the user takes it over (§9).
+
+    The category's `default_split_strategy` is published to the workspace's context (so the
+    configurator shows it) and applied **only** while the split is untouched — a user who chose
+    a strategy keeps it when the category changes, and a category that cannot supply a basis is
+    never used to silently change one.
+  */
+  const { categories } = useExpenseCategoryOptions();
+  const watchedCategoryId = form.watch('categoryId');
+  /*
+    The effect listens to the **resolved facts**, never to the `categories` array itself.
+
+    `categories` is a new array on renders the query has not filled yet (`query.data ?? []`), and
+    this component subscribes to the workspace, so depending on the array made the effect re-run
+    on every render: the write below notifies the subscriber, the re-render hands back a fresh
+    array, and the pair pins React at its update limit. A category id, a default strategy and a
+    default basis are primitives that only move when the *choice* moves.
+  */
+  const categoryOption = categories.find((category) => category.id === watchedCategoryId);
+  const categoryDefaultStrategy = categoryOption?.defaultSplitStrategy ?? null;
+  const categoryDefaultBasis = categoryOption?.defaultApartmentBasis ?? null;
+  useEffect(() => {
+    if (draftKey === null) return;
+    updateSplitContext(draftKey, {
+      categoryId: watchedCategoryId.length === 0 ? null : watchedCategoryId,
+      defaultStrategy: categoryDefaultStrategy,
+    });
+    const current = readSplitWorkspace(draftKey);
+    if (current === null || current.state.customized) return;
+    /*
+      A category that names **no** default strategy is not a category that has chosen `null`.
+
+      The option list is where a nil default lives (`default_split_strategy` is nullable in
+      `expense_categories`), so `null` here means "this category leaves the split alone" — and
+      writing it into the workspace would replace the product's own default with nothing, which
+      the form's resolver then refuses as an invalid strategy. Only a category that actually
+      names one applies it.
+    */
+    if (categoryDefaultStrategy === null) return;
+    if (current.state.strategy === categoryDefaultStrategy) return;
+    updateSplitState(draftKey, {
+      strategy: categoryDefaultStrategy,
+      basis: categoryDefaultStrategy === 'apartment' ? (categoryDefaultBasis ?? 'per_flat') : null,
+    });
+  }, [draftKey, watchedCategoryId, categoryDefaultStrategy, categoryDefaultBasis]);
 
   /*
     The amount's paise start from the values the form opened with.
@@ -179,7 +294,12 @@ export function useExpenseForm({
     write: (values) => {
       // Nothing is stored without a session and a tenant: a draft nobody can address is worse than
       // no draft, because it would outlive the switch that made it unreadable.
-      writeExpenseDraft(scope, values, expectedVersionRef.current);
+      writeExpenseDraft(
+        scope,
+        values,
+        expectedVersionRef.current,
+        readSplitWorkspace(draftKey)?.state.customized ?? false,
+      );
     },
     // Suspended while a save is in flight, so the interval cannot race the clear-on-success.
     enabled: draftKey !== null && !create.isPending && !update.isPending,
@@ -202,6 +322,7 @@ export function useExpenseForm({
           formValuesToCreatePayload(values, amountRef.current),
         );
         clearExpenseDraft(scope);
+        clearSplitWorkspace(draftKey);
         onSaved(created);
         return;
       }
@@ -226,6 +347,7 @@ export function useExpenseForm({
 
       const updated = await update.mutateAsync(payload);
       clearExpenseDraft(scope);
+      clearSplitWorkspace(draftKey);
       expectedVersionRef.current = updated.version;
       onSaved(updated);
     } catch (caught: unknown) {
@@ -292,6 +414,10 @@ export function useExpenseForm({
 
   const discardDraft = (): void => {
     clearExpenseDraft(scope);
+    clearSplitWorkspace(draftKey);
+    if (draftKey !== null) {
+      ensureSplitWorkspace(draftKey, { state: splitStateFromValues(baseline, false) });
+    }
     const cleared = baseline;
     form.reset(cleared);
     valuesRef.current = cleared;
@@ -305,6 +431,7 @@ export function useExpenseForm({
     readValues: () => valuesRef.current,
     setAmountPaise: (paise) => {
       amountRef.current = paise;
+      if (draftKey !== null) updateSplitContext(draftKey, { amountPaise: paise });
     },
     submit: () => void submit(),
     isSaving,
@@ -334,12 +461,30 @@ function readInitialState(
   servedVersion: number | null,
   baseline: ExpenseFormValues,
 ): InitialState {
+  // A create has no served row (`null`); an edit does. That is also the split's seed: a row's
+  // configuration is the user's choice, a fresh create's is the product's default.
+  const customizedFallback = servedVersion !== null;
   const draft = readExpenseDraft(scope);
   if (draft === null) {
-    return { values: baseline, restoredDraftAt: null, ignoredStaleDraft: false };
+    return {
+      values: baseline,
+      restoredDraftAt: null,
+      ignoredStaleDraft: false,
+      splitCustomized: customizedFallback,
+    };
   }
   if (isDraftStale(draft, servedVersion)) {
-    return { values: baseline, restoredDraftAt: null, ignoredStaleDraft: true };
+    return {
+      values: baseline,
+      restoredDraftAt: null,
+      ignoredStaleDraft: true,
+      splitCustomized: customizedFallback,
+    };
   }
-  return { values: draft.values, restoredDraftAt: draft.savedAt || null, ignoredStaleDraft: false };
+  return {
+    values: draft.values,
+    restoredDraftAt: draft.savedAt || null,
+    ignoredStaleDraft: false,
+    splitCustomized: draft.splitCustomized,
+  };
 }

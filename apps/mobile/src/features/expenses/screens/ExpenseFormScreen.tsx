@@ -15,6 +15,7 @@ import { asMemberId, canOnResource, memberSnapshotOf } from '@ses/domain';
 
 import { AmountInput } from '../components/AmountInput';
 import { CategoryPicker } from '../components/CategoryPicker';
+import { SplitSection } from '../components/SplitSection';
 import { VendorField } from '../components/VendorField';
 import { useExpense } from '../hooks/use-expense';
 import { useExpenseCategoryOptions, useExpensePayerOptions } from '../hooks/use-expenses';
@@ -152,21 +153,24 @@ function ExpenseForm({
       });
     return (
       <RequirePermission action="expense.create" authorized={canCreate}>
-        <ExpenseFormBody controller={controller} mode={mode} />
+        <ExpenseFormBody controller={controller} mode={mode} expenseId={expense?.id ?? null} />
       </RequirePermission>
     );
   }
 
-  return <ExpenseFormBody controller={controller} mode={mode} />;
+  return <ExpenseFormBody controller={controller} mode={mode} expenseId={expense?.id ?? null} />;
 }
 
 /** The sticky amount header + the scrollable remainder — PRD §3.4's layout, in one place. */
 function ExpenseFormBody({
   controller,
   mode,
+  expenseId,
 }: {
   readonly controller: ExpenseFormController;
   readonly mode: 'create' | 'edit';
+  /** The row being edited, or `null` while creating — the split workspace's scope segment. */
+  readonly expenseId: string | null;
 }) {
   const { form } = controller;
   const { categories, isLoading: categoriesLoading } = useExpenseCategoryOptions();
@@ -342,6 +346,8 @@ function ExpenseFormBody({
             />
 
             <VendorField control={form.control} />
+
+            <SplitSection expenseId={expenseId} />
 
             <Button
               variant="filled"

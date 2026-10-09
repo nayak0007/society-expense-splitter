@@ -36,8 +36,18 @@
 
 import { mmkvStorage } from '@/lib/storage/mmkv';
 
-import { expenseDraftValuesSchema } from '../schemas/expense-form.schemas';
+import { migrateDraftValues } from '../schemas/expense-form.schemas';
 import type { ExpenseFormValues } from '../schemas/expense-form.schemas';
+
+/**
+ * The version of the stored draft's shape.
+ *
+ * T074 wrote version 1 (no split fields); T075 writes version 2 (the four split fields, plus
+ * `splitCustomized` in the record). The number is written alongside a draft so a build can tell
+ * which shape it is reading, and `migrateDraftValues` lifts a v1 draft forward without losing a
+ * field (T075 §10).
+ */
+export const EXPENSE_DRAFT_SCHEMA_VERSION = 2;
 
 /** Which draft this is. `expenseId: null` means the create form. */
 export interface ExpenseDraftScope {
@@ -52,6 +62,16 @@ export interface ExpenseDraftRecord {
   /** The server version the values were based on; `null` for a create draft. */
   readonly basedOnVersion: number | null;
   readonly savedAt: string;
+  /** The shape's version; see {@link EXPENSE_DRAFT_SCHEMA_VERSION}. */
+  readonly schemaVersion: number;
+  /**
+   * Whether the user took the split strategy/basis away from the category's default (T075 §9).
+   *
+   * Local form metadata, **never** a contract field: it decides whether a category change may
+   * re-apply a default, and it has no place on the wire. Stored here rather than in `values` so
+   * it cannot leak into a payload builder that copies `values` wholesale.
+   */
+  readonly splitCustomized: boolean;
 }
 
 /**
@@ -85,19 +105,26 @@ export function readExpenseDraft(scope: ExpenseDraftScope): ExpenseDraftRecord |
       readonly values?: unknown;
       readonly basedOnVersion?: unknown;
       readonly savedAt?: unknown;
+      readonly schemaVersion?: unknown;
+      readonly splitCustomized?: unknown;
     };
-    const values = expenseDraftValuesSchema.safeParse(parsed.values);
-    if (!values.success) {
+    const values = migrateDraftValues(parsed.values);
+    if (values === null) {
       clearExpenseDraft(scope);
       return null;
     }
     return {
-      values: values.data,
+      values,
       basedOnVersion:
         typeof parsed.basedOnVersion === 'number' && Number.isInteger(parsed.basedOnVersion)
           ? parsed.basedOnVersion
           : null,
       savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : '',
+      schemaVersion:
+        typeof parsed.schemaVersion === 'number' && Number.isInteger(parsed.schemaVersion)
+          ? parsed.schemaVersion
+          : 1,
+      splitCustomized: parsed.splitCustomized === true,
     };
   } catch {
     // Not JSON at all — nothing here can be recovered, and leaving it would fail forever.
@@ -111,6 +138,7 @@ export function writeExpenseDraft(
   scope: ExpenseDraftScope,
   values: ExpenseFormValues,
   basedOnVersion: number | null,
+  splitCustomized = false,
   now: Date = new Date(),
 ): ExpenseDraftRecord | null {
   const key = expenseDraftKey(scope);
@@ -120,6 +148,8 @@ export function writeExpenseDraft(
     values,
     basedOnVersion,
     savedAt: now.toISOString(),
+    schemaVersion: EXPENSE_DRAFT_SCHEMA_VERSION,
+    splitCustomized,
   };
   mmkvStorage.set(key, JSON.stringify(record));
   return record;

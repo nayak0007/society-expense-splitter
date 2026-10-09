@@ -132,8 +132,53 @@ describe('a stored draft is read, never trusted', () => {
   });
 });
 
+describe('T074 → T075 migration (T075 §10)', () => {
+  it('lifts a T074 draft forward with the split defaults, keeping every field', () => {
+    // Exactly what a T074 build wrote: schema version 1, no split fields.
+    mmkvStorage.set(
+      expenseDraftKey(scope) ?? '',
+      JSON.stringify({
+        values: {
+          title: 'Lift AMC',
+          amount: '1,000.00',
+          expenseDate: '2026-10-01',
+          categoryId: 'cat-1',
+          description: 'Quarterly',
+          vendorName: 'Otis',
+          paymentSource: 'society_account',
+          paidByMemberId: null,
+        },
+        basedOnVersion: null,
+        savedAt: '2026-10-01T10:00:00.000Z',
+        schemaVersion: 1,
+      }),
+    );
+
+    const read = readExpenseDraft(scope);
+    expect(read?.values.title).toBe('Lift AMC');
+    expect(read?.values.vendorName).toBe('Otis');
+    expect(read?.values.splitStrategy).toBe('equal');
+    expect(read?.splitCustomized).toBe(false);
+    expect(read?.schemaVersion).toBe(1);
+  });
+
+  it('round-trips the T075 version and the customized flag', () => {
+    const written = writeExpenseDraft(scope, emptyExpenseForm(), null, true);
+    expect(written?.schemaVersion).toBe(2);
+    const read = readExpenseDraft(scope);
+    expect(read?.schemaVersion).toBe(2);
+    expect(read?.splitCustomized).toBe(true);
+  });
+});
+
 describe('isDraftStale', () => {
-  const draft = { values: emptyExpenseForm(), basedOnVersion: 3, savedAt: '' };
+  const draft = {
+    values: emptyExpenseForm(),
+    basedOnVersion: 3,
+    savedAt: '',
+    schemaVersion: 2,
+    splitCustomized: false,
+  };
 
   it('is stale only when both versions are known and differ', () => {
     expect(isDraftStale(draft, 3)).toBe(false);

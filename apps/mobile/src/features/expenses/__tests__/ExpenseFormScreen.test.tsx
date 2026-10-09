@@ -163,8 +163,22 @@ describe('create — submit', () => {
       categoryId: 'cat-1',
       paymentSource: 'society_account',
     });
-    // An omitted strategy means "the category's defaults" — T075 owns the configurator.
-    expect(payload).not.toHaveProperty('splitStrategy');
+    /*
+      T075 sends the split the form displays.
+
+      T074 left `splitStrategy` out with the note "T075 owns the configurator", on the reasoning
+      that an omitted strategy means "the category's defaults". Now that the form *shows* the
+      method (§12) and the controller has resolved the category's default into the workspace (§9),
+      an omitted key would make the payload disagree with the summary on screen — the split is a
+      field like any other, and what a treasurer sees is what is sent. The defaults are the
+      product's own (`equal`, no basis, empty config, whole-society selector).
+    */
+    expect(payload).toMatchObject({
+      splitStrategy: 'equal',
+      apartmentBasis: null,
+      splitConfig: {},
+      participantSelector: {},
+    });
     expect(payload).not.toHaveProperty('status');
   });
 
@@ -374,6 +388,10 @@ function readOrEmpty(): {
   vendorName: string;
   paymentSource: 'society_account';
   paidByMemberId: null;
+  splitStrategy: 'equal';
+  apartmentBasis: null;
+  splitConfig: Record<string, never>;
+  participantSelector: Record<string, never>;
 } {
   return {
     title: '',
@@ -384,6 +402,10 @@ function readOrEmpty(): {
     vendorName: '',
     paymentSource: 'society_account',
     paidByMemberId: null,
+    splitStrategy: 'equal',
+    apartmentBasis: null,
+    splitConfig: {},
+    participantSelector: {},
   };
 }
 

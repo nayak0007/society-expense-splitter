@@ -30,12 +30,15 @@
  * attachments are T076's.
  */
 
+import { participantSelectorSchema, splitConfigSchema } from '@ses/contracts';
 import type { CreateExpensePayload, UpdateExpensePayload } from '@ses/contracts';
 import {
+  APARTMENT_BASES,
   EXPENSE_DESCRIPTION_MAX_LENGTH,
   EXPENSE_TITLE_MAX_LENGTH,
   EXPENSE_VENDOR_NAME_MAX_LENGTH,
   PAYMENT_SOURCES,
+  SPLIT_STRATEGIES,
 } from '@ses/domain';
 import type { PaymentSource } from '@ses/domain';
 import { z } from 'zod';
@@ -100,6 +103,23 @@ export const expenseFormSchema = z.object({
     ),
   paymentSource: z.enum(PAYMENT_SOURCES),
   paidByMemberId: z.string().nullable(),
+  /**
+   * The split's four fields (T075).
+   *
+   * They are the **contract's own parsed shapes** — the same schemas the API validates the
+   * request with — so a form that submits a split cannot submit one the server refuses, and a
+   * persisted draft carries exactly what would be sent. The split *editor's* text state lives
+   * in the split workspace (`split-config.store.ts`) and is converted to these shapes on every
+   * edit; the form only ever holds the converted contract payload.
+   *
+   * `splitConfig` and `participantSelector` default to `{}`, which the server reads as "the
+   * product's own defaults" (no per-participant entries; every eligible flat) — the behaviour
+   * an untouched configuration must have (§9).
+   */
+  splitStrategy: z.enum(SPLIT_STRATEGIES),
+  apartmentBasis: z.enum(APARTMENT_BASES).nullable(),
+  splitConfig: splitConfigSchema,
+  participantSelector: participantSelectorSchema,
 });
 
 export type ExpenseFormValues = z.infer<typeof expenseFormSchema>;
@@ -113,8 +133,16 @@ export type ExpenseFormValues = z.infer<typeof expenseFormSchema>;
  * is how this was found (the store's own test failed on a partially typed row). What the draft
  * store needs to know is narrower and strictly factual: *is this the shape this build writes?* A
  * renamed or removed field, or a type that changed, answers no; an unfinished value answers yes.
+ *
+ * ## Versioned, so a T074 draft survives T075
+ *
+ * T075 added the four split fields, which changes this shape. {@link expenseDraftValuesSchemaV1}
+ * is the exact T074 shape, kept so `migrateDraftValues` can lift an old draft forward without
+ * losing a single non-split field (title, amount, category, vendor, …). The split fields are
+ * added with the product's own defaults, so a migrated draft behaves as an untouched split — the
+ * same state a T074 draft was actually in.
  */
-export const expenseDraftValuesSchema = z.object({
+export const expenseDraftValuesSchemaV1 = z.object({
   title: z.string(),
   amount: z.string(),
   expenseDate: z.string(),
@@ -123,6 +151,13 @@ export const expenseDraftValuesSchema = z.object({
   vendorName: z.string(),
   paymentSource: z.enum(PAYMENT_SOURCES),
   paidByMemberId: z.string().nullable(),
+});
+
+export const expenseDraftValuesSchema = expenseDraftValuesSchemaV1.extend({
+  splitStrategy: z.enum(SPLIT_STRATEGIES),
+  apartmentBasis: z.enum(APARTMENT_BASES).nullable(),
+  splitConfig: splitConfigSchema,
+  participantSelector: participantSelectorSchema,
 });
 
 /**
@@ -166,6 +201,15 @@ export function todayIsoDate(now: Date = new Date()): string {
  * PRD's list implies for a society-raised bill and what the API stores when the field is
  * omitted. `expenseDate` defaults to today (PRD §3.4: "Defaults to today").
  */
+/**
+ * The empty form.
+ *
+ * `paymentSource` defaults to `society_account` — the treasurer's own money, which is what the
+ * PRD's list implies for a society-raised bill and what the API stores when the field is
+ * omitted. `expenseDate` defaults to today (PRD §3.4: "Defaults to today"). The split fields
+ * default through `defaultSplitFields` (T075), so an untouched create is an equal split with no
+ * per-far configuration.
+ */
 export function emptyExpenseForm(now: Date = new Date()): ExpenseFormValues {
   return {
     title: '',
@@ -176,7 +220,41 @@ export function emptyExpenseForm(now: Date = new Date()): ExpenseFormValues {
     vendorName: '',
     paymentSource: 'society_account',
     paidByMemberId: null,
+    ...defaultSplitFields(),
   };
+}
+
+/**
+ * The split fields a form starts with — the product's own defaults.
+ *
+ * `equal`/no basis/empty config/empty selector is exactly what the server applies for an
+ * untouched split (an omitted key means "the category's default, or `equal`"), so a form that
+ * never opens the configurator sends a split identical in meaning to one that omits the keys.
+ * The category's own default strategy is layered on by the controller once the category is
+ * known (§9), which is why this helper does not read a category.
+ */
+export function defaultSplitFields(): Pick<
+  ExpenseFormValues,
+  'splitStrategy' | 'apartmentBasis' | 'splitConfig' | 'participantSelector'
+> {
+  return { splitStrategy: 'equal', apartmentBasis: null, splitConfig: {}, participantSelector: {} };
+}
+
+/**
+ * Migrate a stored draft's values to this build's shape, or `null` when it cannot be read.
+ *
+ * A T075 build may open a draft a T074 build wrote, which has no split fields. That draft is
+ * lifted forward by adding the **defaults** — the split it actually described — while every
+ * field it *did* carry is preserved verbatim, so nothing a treasurer typed is lost (T075 §10).
+ * A draft that fits neither shape (a renamed field, a changed type) is refused, as before.
+ */
+export function migrateDraftValues(raw: unknown): ExpenseFormValues | null {
+  const current = expenseDraftValuesSchema.safeParse(raw);
+  if (current.success) return current.data;
+
+  const legacy = expenseDraftValuesSchemaV1.safeParse(raw);
+  if (!legacy.success) return null;
+  return { ...legacy.data, ...defaultSplitFields() };
 }
 
 /** Prefill the edit form from the server's row (`null`s become empty strings). */
@@ -190,6 +268,10 @@ export function expenseToFormValues(expense: ExpenseSummary): ExpenseFormValues 
     vendorName: expense.vendorName ?? '',
     paymentSource: expense.paymentSource,
     paidByMemberId: expense.paidByMemberId,
+    splitStrategy: expense.splitStrategy,
+    apartmentBasis: expense.apartmentBasis,
+    splitConfig: expense.splitConfig,
+    participantSelector: expense.participantSelector,
   };
 }
 
@@ -221,6 +303,10 @@ export function formValuesToCreatePayload(
     expenseDate: values.expenseDate.trim(),
     categoryId: values.categoryId,
     paymentSource: values.paymentSource,
+    splitStrategy: values.splitStrategy,
+    apartmentBasis: values.apartmentBasis,
+    splitConfig: values.splitConfig,
+    participantSelector: values.participantSelector,
     ...(description.length === 0 ? {} : { description }),
     ...(vendorName.length === 0 ? {} : { vendorName }),
     ...(values.paidByMemberId === null ? {} : { paidByMemberId: values.paidByMemberId }),
@@ -294,6 +380,21 @@ export function formValuesToUpdatePayload({
 
   if (values.paidByMemberId !== baseline.paidByMemberId) {
     patch.paidByMemberId = values.paidByMemberId;
+  }
+
+  // The split's four fields (T075), diffed the same way: a strategy/basis move, or a config or
+  // selector whose canonical JSON changed. Comparing the config by its serialisation is exact
+  // rather than lenient — it is already the contract's parsed shape, so two equal configurations
+  // serialise identically, and any real edit is a different string.
+  if (values.splitStrategy !== baseline.splitStrategy) patch.splitStrategy = values.splitStrategy;
+  if ((values.apartmentBasis ?? null) !== (baseline.apartmentBasis ?? null)) {
+    patch.apartmentBasis = values.apartmentBasis;
+  }
+  if (JSON.stringify(values.splitConfig) !== JSON.stringify(baseline.splitConfig)) {
+    patch.splitConfig = values.splitConfig;
+  }
+  if (JSON.stringify(values.participantSelector) !== JSON.stringify(baseline.participantSelector)) {
+    patch.participantSelector = values.participantSelector;
   }
 
   if (Object.keys(patch).length === 0) return null;

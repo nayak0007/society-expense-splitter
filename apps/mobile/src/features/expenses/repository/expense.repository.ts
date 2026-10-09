@@ -18,8 +18,20 @@
  * fact, not a re-pricing.
  */
 
-import type { CreateExpensePayload, UpdateExpensePayload } from '@ses/contracts';
-import type { AttachmentScanStatus, ExpenseStatus, PaymentSource } from '@ses/domain';
+import type {
+  CreateExpensePayload,
+  ParticipantSelectorPayload,
+  PreviewSplitResponseDto,
+  SplitConfigPayload,
+  UpdateExpensePayload,
+} from '@ses/contracts';
+import type {
+  ApartmentBasis,
+  AttachmentScanStatus,
+  ExpenseStatus,
+  PaymentSource,
+  SplitStrategy,
+} from '@ses/domain';
 
 /** One expense as the list and the detail header read it. */
 export interface ExpenseSummary {
@@ -51,6 +63,20 @@ export interface ExpenseSummary {
    */
   readonly createdBy: string;
   readonly status: ExpenseStatus;
+  /**
+   * The split's four stored fields, added by T075.
+   *
+   * The form both hydrates the configurator from them on an edit and diffs against
+   * them on save, so they travel on the summary a screen already reads — the same
+   * argument `paymentSource`/`paidByMemberId` make above. `splitConfig` and
+   * `participantSelector` are the contract's own parsed shapes (the response schema
+   * guarantees them), never opaque objects, so the editor can read an entry without
+   * re-validating a `jsonb` blob.
+   */
+  readonly splitStrategy: SplitStrategy;
+  readonly apartmentBasis: ApartmentBasis | null;
+  readonly splitConfig: SplitConfigPayload;
+  readonly participantSelector: ParticipantSelectorPayload;
   /** Bumped on every write; `> 1` is the "edited" signal. */
   readonly version: number;
   readonly publishedAt: string | null;
@@ -142,10 +168,20 @@ export interface ExpenseListQuery {
   readonly limit?: number | undefined;
 }
 
-/** One selectable expense category, as the form's picker needs it. */
+/**
+ * One selectable expense category, as the form's picker needs it.
+ *
+ * The category's split defaults travel with it (T075 §9): `default_split_strategy` is
+ * what an untouched split initializes from, and `default_apartment_basis` is the basis
+ * an `apartment` strategy starts with. They are read here rather than fetched
+ * separately because the category response already carries them — the form would
+ * otherwise make a second call to answer a question the first one already answered.
+ */
 export interface ExpenseCategoryOption {
   readonly id: string;
   readonly name: string;
+  readonly defaultSplitStrategy: SplitStrategy;
+  readonly defaultApartmentBasis: ApartmentBasis | null;
 }
 
 /**
@@ -157,6 +193,24 @@ export interface ExpenseCategoryOption {
 export interface ExpensePayerOption {
   readonly id: string;
   readonly displayName: string;
+}
+
+/**
+ * One `POST /expenses/preview-split` request, minus the parts the port fills in.
+ *
+ * `splitConfig` and `participantSelector` are the contract's own payload shapes, so
+ * the adapter can hand them straight to `apiRequest` and the shared schema validates
+ * them at the boundary — the configurator never constructs a wire body by hand.
+ */
+export interface SplitPreviewRequest {
+  readonly amountPaise: number;
+  readonly categoryId?: string | null | undefined;
+  readonly splitStrategy?: SplitStrategy | undefined;
+  readonly apartmentBasis?: ApartmentBasis | null | undefined;
+  readonly splitConfig?: SplitConfigPayload | undefined;
+  readonly participantSelector: ParticipantSelectorPayload;
+  /** Aborts an in-flight preview when a newer one supersedes it (the editor's own guard). */
+  readonly signal?: AbortSignal | undefined;
 }
 
 /** The expense port the mobile feature consumes — reads for the list/detail, writes for the form. */
@@ -236,6 +290,22 @@ export interface ExpenseRepository {
    * row (T062's `is_active`).
    */
   listCategoryOptions(societyId: string, actor: string): Promise<readonly ExpenseCategoryOption[]>;
+
+  // ── split preview (T075) ────────────────────────────────────────────────────────────────
+
+  /**
+   * Price a split without writing anything — `POST /expenses/preview-split`.
+   *
+   * The response is the contract's own DTO: the preview is a pure read whose fields are
+   * already the ones a screen renders (allocations, warnings, unassigned), and a second
+   * view-model copy would be a mapping with nothing to add. The adapter parses the
+   * envelope against `previewSplitResponseSchema`, so a shape change fails at the boundary.
+   */
+  previewSplit(
+    societyId: string,
+    actor: string,
+    request: SplitPreviewRequest,
+  ): Promise<PreviewSplitResponseDto>;
 
   /**
    * The society's billable members, for the payer picker.

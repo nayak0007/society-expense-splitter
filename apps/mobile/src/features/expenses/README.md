@@ -6,21 +6,32 @@ per-attachment download route. Nothing here writes money.
 
 ## Layout
 
-| Path                                   | What it is                                                   |
-| -------------------------------------- | ------------------------------------------------------------ |
-| `screens/ExpenseListScreen.tsx`        | The ledger: filters, month grouping, infinite scroll, states |
-| `screens/ExpenseDetailScreen.tsx`      | One expense: header, split table, revisions, notes, bills    |
-| `screens/expense-list-rows.ts`         | Pure: month groups → the flat row list `FlashList` renders   |
-| `components/ExpenseCard.tsx`           | One list row (+ its `StatusBadge`)                           |
-| `components/SplitTable.tsx`            | The current split table and its conservation footer          |
-| `components/RevisionChip.tsx`          | The "edited" chip that opens the history                     |
-| `components/ExpenseFilters.tsx`        | The controlled filter panel + `toExpenseListQuery`           |
-| `hooks/use-expenses.ts`                | Infinite list, month grouping, category/building options     |
-| `hooks/use-expense.ts`                 | Detail, splits, revisions, comments, attachments, download   |
-| `repository/expense.repository*.ts`    | The read-only port, its API adapter and the composition root |
-| `services/expense.service.ts`          | Repository wiring + error → copy                             |
-| `schemas/expense.schemas.ts`           | Labels and integer-paise/Indian-grouping formatting          |
-| `__fixtures__/expense-perf-fixture.ts` | The deterministic 1 000-expense dataset                      |
+| Path                                                              | What it is                                                   |
+| ----------------------------------------------------------------- | ------------------------------------------------------------ |
+| `screens/ExpenseListScreen.tsx`                                   | The ledger: filters, month grouping, infinite scroll, states |
+| `screens/ExpenseDetailScreen.tsx`                                 | One expense: header, split table, revisions, notes, bills    |
+| `screens/expense-list-rows.ts`                                    | Pure: month groups → the flat row list `FlashList` renders   |
+| `components/ExpenseCard.tsx`                                      | One list row (+ its `StatusBadge`)                           |
+| `components/SplitTable.tsx`                                       | The current split table and its conservation footer          |
+| `components/RevisionChip.tsx`                                     | The "edited" chip that opens the history                     |
+| `components/ExpenseFilters.tsx`                                   | The controlled filter panel + `toExpenseListQuery`           |
+| `hooks/use-expenses.ts`                                           | Infinite list, month grouping, category/building options     |
+| `hooks/use-expense.ts`                                            | Detail, splits, revisions, comments, attachments, download   |
+| `repository/expense.repository*.ts`                               | The read-only port, its API adapter and the composition root |
+| `services/expense.service.ts`                                     | Repository wiring + error → copy                             |
+| `schemas/expense.schemas.ts`                                      | Labels and integer-paise/Indian-grouping formatting          |
+| `__fixtures__/expense-perf-fixture.ts`                            | The deterministic 1 000-expense dataset                      |
+| `screens/SplitConfiguratorScreen.tsx`                             | The split editor: strategy, per-flat values, live preview    |
+| `screens/ParticipantSelectorScreen.tsx`                           | The selector: scope, building/wing/floor/occupancy, excludes |
+| `components/SplitSection.tsx`                                     | The form's split summary + the two entry points              |
+| `components/StrategySelector.tsx`                                 | The five strategies and the six apartment bases              |
+| `components/{Percentage,Shares,CustomAmount,FloorBand}Editor.tsx` | One editor per strategy                                      |
+| `hooks/use-split-preview.ts`                                      | Roster + debounced preview, offline fallback                 |
+| `hooks/use-split-config.ts`                                       | `useSyncExternalStore` over the split workspace              |
+| `services/split-config.store.ts`                                  | The route-safe workspace (keyed by the draft key)            |
+| `services/offline-snapshot.store.ts`                              | The last resolved participant snapshot, for offline          |
+| `schemas/split.schemas.ts`                                        | Editor text ⇄ the contract's integer scales + payloads       |
+| `split/offline-preview.ts`                                        | `@ses/split-engine` run on-device over a snapshot            |
 
 ## `FlashList` version reconciliation
 
@@ -79,6 +90,48 @@ measurement silently reported `0.00 ms`.
 
 The suite's remaining perf assertions are about the dataset's **scale and integrity** (1 000 unique
 ids, 40 cursor pages reassembling without duplicates, one row per expense plus its month header).
+
+## The split configurator (T075)
+
+The editor is **two pushed routes** that read and write one **route-safe workspace**
+(`services/split-config.store.ts`), keyed by the same `user`/`society`/`expense` draft key the
+form's autosave uses. Nothing travels through navigation parameters, so a large participant
+snapshot cannot appear in a deep-link URL, and one member's half-configured split can never
+surface in another member's form. The form seeds the workspace before the configurator can open
+and mirrors it into its own four contract fields (`splitStrategy`, `apartmentBasis`, `splitConfig`,
+`participantSelector`), which is also what the draft persists.
+
+The preview is **debounced 400 ms** (`SPLIT_PREVIEW_DEBOUNCE_MS`), collapses a burst of edits into
+one request, drops a slow earlier answer rather than letting it overwrite a later one, and keeps
+the last good result marked stale while a newer one is in flight.
+
+**Offline, the app runs the real engine, never an estimate:** `split/offline-preview.ts` projects
+the last resolved snapshot through `computeSplit` from `@ses/split-engine` — a direct
+`@ses/mobile` dependency for exactly this — and when it cannot, it says so instead of inventing
+numbers: no snapshot held, a snapshot from another society, a snapshot resolved against a
+different selector, or one older than its freshness bound each produce a refusal sentence.
+
+The custom strategy is blocked until the remainder is exactly ₹0: the editor shows a live
+`Remaining: ₹X` (never clamped — an over-allocation reads negative) and `splitStateProblem`
+disables **Done** until the configuration is coherent, which is also how a percentage split is
+held to 100% before the configurator returns.
+
+### What is _not_ verified here (device-only)
+
+The offline path is proven in-process (engine parity over the same facts, plus the hook's fallback
+on a network failure) and **not** on a device with the radio actually off. No emulator or physical
+handset is available in this environment, so these remain open and are reported as exceptions
+rather than claimed:
+
+1. Put the target device in **airplane mode**, open a draft that has resolved participants once,
+   edit the split, and confirm the preview numbers match the online result for the same snapshot —
+   then confirm that clearing the app data (so no snapshot is held) replaces the numbers with the
+   refusal sentence instead of a fabricated split.
+2. On the same device, confirm the configurator's Done button is unreachable while the remainder
+   is not ₹0 and that the participant selector's controls are comfortably tappable in one hand.
+
+A Jest component test asserts structure and behaviour; it is not a device measurement and is not
+reported as one.
 
 ## Deferred: bill thumbnails
 

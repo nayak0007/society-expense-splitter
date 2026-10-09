@@ -14,7 +14,11 @@
  * the adapter, which is where scope (the society header) is established.
  */
 
-import type { CreateExpensePayload, UpdateExpensePayload } from '@ses/contracts';
+import type {
+  CreateExpensePayload,
+  PreviewSplitResponseDto,
+  UpdateExpensePayload,
+} from '@ses/contracts';
 
 import type {
   ExpenseAttachmentDownload,
@@ -27,6 +31,7 @@ import type {
   ExpenseRevisionView,
   ExpenseSplitView,
   ExpenseSummary,
+  SplitPreviewRequest,
 } from '../repository/expense.repository';
 import { getExpenseRepository } from '../repository/expense.deps';
 
@@ -123,6 +128,22 @@ export async function loadPayerOptions(
   societyId: string,
 ): Promise<readonly ExpensePayerOption[]> {
   return getExpenseRepository().listPayerOptions(societyId, actorId);
+}
+
+/**
+ * Price a split without writing anything — `POST /expenses/preview-split` (T075).
+ *
+ * A read in every sense that matters: the API writes no row, and this service
+ * deliberately takes no in-flight guard, because a superseded preview is a stale answer
+ * to drop rather than a mutation to deduplicate. The `signal` on the request is how the
+ * preview hook cancels one it no longer needs.
+ */
+export async function loadSplitPreview(
+  actorId: string,
+  societyId: string,
+  request: SplitPreviewRequest,
+): Promise<PreviewSplitResponseDto> {
+  return getExpenseRepository().previewSplit(societyId, actorId, request);
 }
 
 /**
