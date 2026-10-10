@@ -52,14 +52,26 @@ jest.mock('../hooks/use-expense', () => ({
 const mockCreate = jest.fn();
 const mockUpdate = jest.fn();
 let mockPending = false;
+// T076: the upload runner is mocked so a staged bill's flush never leaves the process. The form's
+// own wiring (`uploadAllForExpense` on save) is still the real production code.
+const mockRun: jest.Mock = jest.fn(async () => undefined);
 
 jest.mock('../hooks/use-expense-actions', () => ({
   useCreateExpense: () => ({ mutateAsync: mockCreate, isPending: mockPending }),
   useUpdateExpense: () => ({ mutateAsync: mockUpdate, isPending: mockPending }),
 }));
 
+jest.mock('../services/attachment-upload.service', () => {
+  const actual = jest.requireActual('../services/attachment-upload.service');
+  return {
+    ...actual,
+    runAttachmentUpload: (...args: unknown[]) => mockRun(...args),
+  };
+});
+
 import ExpenseFormScreen from '../screens/ExpenseFormScreen';
 import { useExpense } from '../hooks/use-expense';
+import { createUpload, readUpload, resetAllUploads } from '../services/attachment-upload.store';
 
 const mockUseExpense = useExpense as jest.Mock;
 
@@ -69,6 +81,8 @@ beforeEach(() => {
   mockCreate.mockReset();
   mockUpdate.mockReset();
   mockPending = false;
+  mockRun.mockReset().mockResolvedValue(undefined);
+  resetAllUploads();
   delete mockParams.id;
   mmkvStorage.clearAll();
   setSession('admin');
@@ -282,6 +296,80 @@ describe('create — duplicate taps and ambiguous failures', () => {
     expect(readExpenseDraft(scope)).not.toBeNull();
     expect(AMOUNT().props.value).toBe('60,000.00');
     expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * T076's unsaved-expense path, proven at the form's own integration point.
+ *
+ * A bill captured before the expense exists is *staged* in the module-level upload register — not
+ * uploaded — because the presign route needs a persisted parent. What only the form can prove is
+ * the binding: a confirmed create adopts the staged file onto the server's id and flushes it, a
+ * failed create leaves the file staged and unbound, and leaving the screen does not discard it
+ * (the register outlives the form, which is the whole point of it being a register).
+ */
+describe('attachments — staged bills (T076)', () => {
+  function stageBill(): string {
+    return createUpload({
+      scope: 'soc-1:user-1',
+      expenseId: null,
+      fileName: 'bill.jpg',
+      mimeType: 'image/jpeg',
+      sizeBytes: 120_000,
+      checksum: 'a'.repeat(64),
+      uri: 'file:///cache/bill.jpg',
+      isImage: true,
+      width: 1600,
+      height: 1200,
+      state: 'ready',
+      step: 'reserve',
+    });
+  }
+
+  it('binds a staged bill to the expense the server created and starts its upload', async () => {
+    const key = stageBill();
+    mockCreate.mockResolvedValue(makeExpense({ id: 'exp-new', status: 'draft' }));
+    await render(<ExpenseFormScreen />);
+    // Visible on the form while the expense is still unsaved — staged, with no Upload action.
+    expect(screen.getByText('bill.jpg')).toBeTruthy();
+    await fillValidCreateForm();
+
+    await fireEvent.press(screen.getByText('Save expense'));
+
+    await waitFor(() => expect(mockRun).toHaveBeenCalledTimes(1));
+    expect(mockRun.mock.calls[0]?.[0]).toBe(key);
+    // The staged file now belongs to the id the API minted — one expense, one attachment.
+    expect(readUpload(key)?.expenseId).toBe('exp-new');
+  });
+
+  it('keeps a staged bill staged, and sends nothing, when the create fails', async () => {
+    const key = stageBill();
+    mockCreate.mockRejectedValue(new ApiError(500, 'INTERNAL_ERROR', 'Something broke'));
+    await render(<ExpenseFormScreen />);
+    await fillValidCreateForm();
+
+    await fireEvent.press(screen.getByText('Save expense'));
+
+    await waitFor(() => expect(screen.getByText('Something broke')).toBeTruthy());
+    // No parent exists, so nothing was bound and no bytes were sent.
+    expect(readUpload(key)?.expenseId).toBeNull();
+    expect(readUpload(key)?.state).toBe('ready');
+    expect(mockRun).not.toHaveBeenCalled();
+  });
+
+  it('does not discard a staged bill when the form is left', async () => {
+    const key = stageBill();
+    const first = await render(<ExpenseFormScreen />);
+    expect(screen.getByText('bill.jpg')).toBeTruthy();
+
+    await act(async () => {
+      first.unmount();
+    });
+    // Still staged and still unbound — navigating away must not silently throw it away.
+    expect(readUpload(key)?.expenseId).toBeNull();
+
+    await render(<ExpenseFormScreen />);
+    expect(screen.getByText('bill.jpg')).toBeTruthy();
   });
 });
 
