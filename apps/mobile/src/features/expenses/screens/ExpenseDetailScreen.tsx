@@ -12,6 +12,7 @@ import { Text } from '@/components/ui/Text';
 import { RevisionChip } from '../components/RevisionChip';
 import { SplitTable } from '../components/SplitTable';
 import { StatusBadge } from '../components/ExpenseCard';
+import { UploadProgress } from '../components/UploadProgress';
 import {
   useExpense,
   useExpenseAttachments,
@@ -20,8 +21,10 @@ import {
   useExpenseSplits,
   fetchAttachmentDownloadUrl,
 } from '../hooks/use-expense';
+import { useAttachmentUploader, useAttachmentUploads } from '../hooks/use-attachment-upload';
 import { useExpenseCategoryNames } from '../hooks/use-expenses';
 import type { ExpenseAttachmentView } from '../repository/expense.repository';
+import { formatAttachmentBytes, scanStatusLabel } from '../schemas/attachment.schemas';
 import { formatExpenseDate, formatPaise } from '../schemas/expense.schemas';
 import { expenseErrorMessage } from '../services/expense.service';
 import { selectActiveMembership, useSocietyStore } from '@/stores/society.store';
@@ -65,6 +68,11 @@ export default function ExpenseDetailScreen() {
   const { comments } = useExpenseComments(expenseId);
   const { attachments } = useExpenseAttachments(expenseId);
   const { names } = useExpenseCategoryNames();
+  // Bills this device is still sending for this expense (T076). Read from the upload
+  // register rather than from a query, so progress is visible here even when the capture
+  // happened on the scanner route this screen pushed.
+  const { uploads } = useAttachmentUploads(expenseId);
+  const uploader = useAttachmentUploader();
   const [showRevisions, setShowRevisions] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
@@ -117,6 +125,24 @@ export default function ExpenseDetailScreen() {
       societyId: snapshot.societyId,
       createdByMembershipId: asMemberId(expense.createdBy),
       published: false,
+    });
+
+  /*
+    Whether this screen offers "Add bill".
+
+    The API's presign route narrows `expense.create` against the **stored** expense, with
+    `published = status !== 'draft'` — the same snapshot `attachment.support.ts` builds. Mirroring
+    it here means the button and the server agree: a Committee Member sees it on their own draft
+    and not on someone else's, and a `void` expense refuses everybody (the lifecycle gate runs
+    first on the server, and the button is simply absent here).
+  */
+  const canAttach =
+    snapshot !== null &&
+    canOnResource(snapshot, 'expense.create', {
+      kind: 'expense',
+      societyId: snapshot.societyId,
+      createdByMembershipId: asMemberId(expense.createdBy),
+      published: expense.status !== 'draft',
     });
 
   return (
@@ -208,6 +234,34 @@ export default function ExpenseDetailScreen() {
           </Section>
 
           <Section title="Bills">
+            {canAttach ? (
+              <Button
+                variant="tonal"
+                size="sm"
+                onPress={() =>
+                  router.push({
+                    pathname: '/(app)/expenses/scan',
+                    params: { expenseId: expense.id },
+                  })
+                }
+              >
+                Add bill
+              </Button>
+            ) : null}
+            {uploads.length === 0 ? null : (
+              <View className="gap-3">
+                {uploads.map((upload) => (
+                  <UploadProgress
+                    key={upload.key}
+                    upload={upload}
+                    onUpload={undefined}
+                    onRetry={() => uploader.retryUpload(upload.key)}
+                    onCancel={() => uploader.cancelUpload(upload.key)}
+                    onDiscard={() => uploader.discardUpload(upload.key)}
+                  />
+                ))}
+              </View>
+            )}
             {attachments.length === 0 ? (
               <Text variant="bodyMedium" color="onSurfaceVariant">
                 No bills attached yet.
@@ -223,9 +277,20 @@ export default function ExpenseDetailScreen() {
                       {attachment.originalFilename}
                     </Text>
                     <Text variant="bodySmall" color="onSurfaceVariant">
-                      {`${formatBytes(attachment.sizeBytes)} · ${scanStatusLabel(attachment)}`}
+                      {`${formatAttachmentBytes(attachment.sizeBytes)} · ${scanStatusLabel(attachment.scanStatus)}`}
                     </Text>
                   </View>
+                  <Button
+                    variant="text"
+                    onPress={() =>
+                      router.push({
+                        pathname: '/(modals)/attachment/[id]',
+                        params: { id: attachment.id },
+                      })
+                    }
+                  >
+                    View
+                  </Button>
                   <Button variant="text" onPress={() => void download(attachment)}>
                     Download
                   </Button>
@@ -276,31 +341,4 @@ function Section({ title, children }: { readonly title: string; readonly childre
       </View>
     </Card>
   );
-}
-
-/**
- * The scan-status line.
- *
- * `pending` is deliberately **not** rendered as "scanned" or "safe": no scanner exists, so
- * nothing writes `clean` (ADR-0012 D3), and a client must not imply a verification that did
- * not happen. A downloaded file is still labelled for what the scan says.
- */
-function scanStatusLabel(attachment: ExpenseAttachmentView): string {
-  switch (attachment.scanStatus) {
-    case 'clean':
-      return 'Scan: clean';
-    case 'infected':
-      return 'Scan: infected — do not open';
-    case 'failed':
-      return 'Scan: could not be completed';
-    default:
-      return 'Not yet security-scanned';
-  }
-}
-
-/** Bytes → a short human string; integer arithmetic only, no money involved. */
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${String(bytes)} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

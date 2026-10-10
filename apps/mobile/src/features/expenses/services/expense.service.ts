@@ -21,6 +21,9 @@ import type {
 } from '@ses/contracts';
 
 import type {
+  AttachmentCompletion,
+  AttachmentUploadRequest,
+  AttachmentUploadTarget,
   ExpenseAttachmentDownload,
   ExpenseAttachmentView,
   ExpenseCategoryOption,
@@ -96,6 +99,31 @@ export async function requestAttachmentDownloadUrl(
   attachmentId: string,
 ): Promise<ExpenseAttachmentDownload> {
   return getExpenseRepository().requestDownloadUrl(attachmentId, societyId, actorId);
+}
+
+/** Reserve an upload and mint its presigned PUT — T071's `POST /expenses/:id/attachments`. */
+export async function reserveAttachmentUpload(
+  actorId: string,
+  societyId: string,
+  expenseId: string,
+  request: AttachmentUploadRequest,
+): Promise<AttachmentUploadTarget> {
+  return getExpenseRepository().requestAttachmentUpload(expenseId, societyId, actorId, request);
+}
+
+/** Confirm a finished upload — T071's `POST /attachments/:id/complete`. */
+export async function confirmAttachmentUpload(
+  actorId: string,
+  societyId: string,
+  attachmentId: string,
+  checksum: string,
+): Promise<AttachmentCompletion> {
+  return getExpenseRepository().completeAttachmentUpload(
+    attachmentId,
+    societyId,
+    actorId,
+    checksum,
+  );
 }
 
 /** `id → name` for the society's expense categories, so a row can render a name. */

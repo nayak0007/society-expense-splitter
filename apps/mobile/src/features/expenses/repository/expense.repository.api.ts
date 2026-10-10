@@ -22,7 +22,11 @@
 
 import {
   attachmentDownloadUrlSchema,
+  completeAttachmentUploadResponseSchema,
+  completeAttachmentUploadSchema,
   expenseAttachmentsResponseSchema,
+  presignAttachmentUploadResponseSchema,
+  presignAttachmentUploadSchema,
   expenseCategoryListResponseSchema,
   expenseCommentsResponseSchema,
   expenseListResponseSchema,
@@ -43,6 +47,9 @@ import type {
 import { apiRequest, isApiError } from '@/lib/api/api-client';
 
 import type {
+  AttachmentCompletion,
+  AttachmentUploadRequest,
+  AttachmentUploadTarget,
   ExpenseAttachmentDownload,
   ExpenseAttachmentView,
   ExpenseCategoryOption,
@@ -231,6 +238,58 @@ export class ApiExpenseRepository implements ExpenseRepository {
       { schema: attachmentDownloadUrlSchema, societyId },
     );
     return { url, expiresAt, filename, mimeType, sizeBytes, scanStatus };
+  }
+
+  /**
+   * Reserve an upload and get its presigned PUT.
+   *
+   * The request goes through the contract's own `strictObject` before it is sent, so a
+   * unknown field or an out-of-range size is caught here rather than being refused by the
+   * API — and the checksum is lower-cased by the same schema the server parses with. The
+   * response's `uploadUrl` is treated as an opaque credential: it is passed through and
+   * never logged, and only the storage transport ever sees it.
+   */
+  async requestAttachmentUpload(
+    expenseId: string,
+    societyId: string,
+    _actor: string,
+    request: AttachmentUploadRequest,
+  ): Promise<AttachmentUploadTarget> {
+    const body = presignAttachmentUploadSchema.parse(request);
+    const response = await apiRequest('POST', `expenses/${expenseId}/attachments`, {
+      schema: presignAttachmentUploadResponseSchema,
+      societyId,
+      body,
+    });
+    return {
+      attachmentId: response.attachmentId,
+      uploadUrl: response.uploadUrl,
+      storageKey: response.storageKey,
+      expiresAt: response.expiresAt,
+      requiredHeaders: response.requiredHeaders,
+    };
+  }
+
+  /**
+   * Confirm a finished upload.
+   *
+   * Only `{ checksum }` travels: the size, type, storage key and scan status are the row's
+   * on the server, and a body field for any of them would be a claim the server must ignore.
+   * The answer is the literal `processing` — a verified upload is *not* a scanned one.
+   */
+  async completeAttachmentUpload(
+    attachmentId: string,
+    societyId: string,
+    _actor: string,
+    checksum: string,
+  ): Promise<AttachmentCompletion> {
+    const body = completeAttachmentUploadSchema.parse({ checksum });
+    const response = await apiRequest('POST', `attachments/${attachmentId}/complete`, {
+      schema: completeAttachmentUploadResponseSchema,
+      societyId,
+      body,
+    });
+    return { status: response.status };
   }
 
   async listCategoryNames(societyId: string, _actor: string): Promise<ReadonlyMap<string, string>> {

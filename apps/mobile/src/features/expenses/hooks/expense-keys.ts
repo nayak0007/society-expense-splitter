@@ -54,6 +54,15 @@ export const expenseKeys = {
     ['expense', 'comments', societyId, expenseId, userId] as const,
   attachments: (expenseId: string | null, societyId: string | null, userId: string | null) =>
     ['expense', 'attachments', societyId, expenseId, userId] as const,
+  /**
+   * The prefix of every bill-list key, for a refresh that does not know the scope.
+   *
+   * An upload completes in a service, outside React, and knows the expense id but not the
+   * active society/user that the full key carries — so it invalidates this prefix and lets
+   * React Query match every scope's entry. Only the mounted one refetches; the others are
+   * merely marked stale, which is the correct outcome for a bill that just changed.
+   */
+  attachmentsAll: ['expense', 'attachments'] as const,
   /** The category `id → name` map the list and detail resolve a category label from. */
   categoryNames: (societyId: string | null, userId: string | null) =>
     ['expense', 'category-names', societyId, userId] as const,

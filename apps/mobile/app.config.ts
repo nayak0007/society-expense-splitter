@@ -62,7 +62,23 @@ const appConfig: ExpoConfig = {
   experiments: {
     typedRoutes: true,
   },
-  plugins: ['expo-router'],
+  plugins: [
+    'expo-router',
+    // T076: the bill scanner captures through the camera, so iOS needs an
+    // NSCameraUsageDescription and Android needs CAMERA. Nothing else is
+    // requested: the gallery and PDF flows use the OS pickers, which hand back
+    // the one chosen item without granting this app the library — hence
+    // `photosPermission: false` and `microphonePermission: false`.
+    [
+      'expo-image-picker',
+      {
+        cameraPermission:
+          'Resident 360 uses the camera so you can photograph a bill or receipt to attach to an expense.',
+        photosPermission: false,
+        microphonePermission: false,
+      },
+    ],
+  ],
   extra: {
     ...EXPO_PUBLIC_VARS,
     eas: {

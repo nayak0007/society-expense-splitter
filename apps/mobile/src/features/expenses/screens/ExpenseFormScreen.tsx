@@ -14,10 +14,12 @@ import { selectActiveMembership, useSocietyStore } from '@/stores/society.store'
 import { asMemberId, canOnResource, memberSnapshotOf } from '@ses/domain';
 
 import { AmountInput } from '../components/AmountInput';
+import { AttachmentGrid } from '../components/AttachmentGrid';
 import { CategoryPicker } from '../components/CategoryPicker';
 import { SplitSection } from '../components/SplitSection';
 import { VendorField } from '../components/VendorField';
 import { useExpense } from '../hooks/use-expense';
+import { useAttachmentUploader, useAttachmentUploads } from '../hooks/use-attachment-upload';
 import { useExpenseCategoryOptions, useExpensePayerOptions } from '../hooks/use-expenses';
 import { useExpenseForm } from '../hooks/useExpenseForm';
 import type { ExpenseFormController } from '../hooks/useExpenseForm';
@@ -130,11 +132,24 @@ function ExpenseForm({
   const router = useRouter();
   const membership = useSocietyStore(selectActiveMembership);
   const snapshot = membership === null ? null : memberSnapshotOf(membership);
+  const uploader = useAttachmentUploader();
 
   const controller = useExpenseForm({
     mode,
     expense,
     onSaved: (saved) => {
+      /*
+        T076's unsaved-expense path. A bill captured before this expense existed was *staged*,
+        not uploaded: the presign route needs a persisted parent, and there is none until this
+        moment. Now that the server has minted an id, the staged files are adopted onto it and
+        sent. The flush is started before the navigation so it is not tied to this component's
+        life — the upload register outlives the screen, and the detail screen we are about to
+        open reads the same register for progress.
+
+        Nothing here can create a second expense: the id is already the server's, and the
+        upload path cannot reach the create route.
+      */
+      uploader.uploadAllForExpense(saved.id);
       // The server mints the id on create, so the created row is opened by its id; an edit returns
       // to the row it edited. `replace`, so Back does not land on a form that has just been saved.
       router.replace({ pathname: '/(app)/expenses/[id]', params: { id: saved.id } });
@@ -349,6 +364,8 @@ function ExpenseFormBody({
 
             <SplitSection expenseId={expenseId} />
 
+            <AttachmentSection expenseId={expenseId} />
+
             <Button
               variant="filled"
               size="lg"
@@ -366,6 +383,67 @@ function ExpenseFormBody({
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
+    </View>
+  );
+}
+
+/**
+ * The form's bill section — Roadmap T076.
+ *
+ * ## It shows what this session is about to attach, not what the expense already has
+ *
+ * A stored bill is the detail screen's job (it has the room and the authorisation gates).
+ * What belongs on the form is the **local** state: files captured for this draft that have
+ * not been attached yet, and their upload progress if the expense already existed. Reading
+ * the upload register rather than a query also keeps this section free of the network, so
+ * the form's own tests need no cache provider.
+ *
+ * ## The create mode explains itself
+ *
+ * With no `expenseId` the files are staged and the Upload action is deliberately absent:
+ * there is no parent to attach to until Save. The copy says so, which is the difference
+ * between "the app is broken" and "this will send when I save".
+ */
+function AttachmentSection({ expenseId }: { readonly expenseId: string | null }) {
+  const router = useRouter();
+  const uploader = useAttachmentUploader();
+  const { uploads } = useAttachmentUploads(expenseId);
+
+  return (
+    <View className="gap-2">
+      <Text variant="titleSmall">Bills</Text>
+      <Text variant="bodySmall" color="onSurfaceVariant">
+        {expenseId === null
+          ? 'Add a photo or PDF now; it is attached when you save.'
+          : 'Captured bills upload when you tap Upload.'}
+      </Text>
+      <Button
+        variant="outlined"
+        onPress={() =>
+          expenseId === null
+            ? router.push('/(app)/expenses/scan')
+            : router.push({
+                pathname: '/(app)/expenses/scan',
+                params: { expenseId },
+              })
+        }
+      >
+        Add bill
+      </Button>
+      <AttachmentGrid
+        attachments={[]}
+        uploads={uploads}
+        onOpenAttachment={() => undefined}
+        onUpload={expenseId === null ? undefined : uploader.upload}
+        onRetry={uploader.retryUpload}
+        onCancel={uploader.cancelUpload}
+        onDiscard={uploader.discardUpload}
+        emptyMessage={
+          expenseId === null
+            ? 'No bill added yet.'
+            : 'Nothing captured on this device for this expense.'
+        }
+      />
     </View>
   );
 }

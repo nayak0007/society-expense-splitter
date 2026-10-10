@@ -133,6 +133,57 @@ rather than claimed:
 A Jest component test asserts structure and behaviour; it is not a device measurement and is not
 reported as one.
 
+## Bill capture, compression, upload and viewing (T076)
+
+Three pushed surfaces over one module-level upload register:
+
+| Path                                    | What it is                                                      |
+| --------------------------------------- | --------------------------------------------------------------- |
+| `screens/BillScannerScreen.tsx`         | Camera / gallery / PDF capture, the ready list, explicit Upload |
+| `screens/AttachmentViewerScreen.tsx`    | Authorized fetch, `ZoomableImage`, or a platform PDF viewer     |
+| `components/AttachmentGrid.tsx`         | Stored rows (size + scan status) beside in-flight uploads       |
+| `components/UploadProgress.tsx`         | One upload's step, progress and the actions its state allows    |
+| `components/ZoomableImage.tsx`          | Pinch/pan over RN core `Animated` + `PanResponder` (no new dep) |
+| `hooks/use-attachment-upload.ts`        | Pickers, permissions, the controller, `useAttachmentUploads`    |
+| `services/attachment.service.ts`        | The compression/validation pipeline and the SHA-256             |
+| `services/attachment-upload.store.ts`   | The state machine, the reservation, scope isolation, staging    |
+| `services/attachment-upload.service.ts` | `runAttachmentUpload` — reserve → PUT → complete, step recovery |
+| `lib/storage/files.ts`                  | Byte primitives: size, read, delete, SHA-256, raw-binary `PUT`  |
+| `schemas/attachment.schemas.ts`         | T071 limits from `@ses/domain`, MIME resolution, labels, format |
+
+Picking a file **never uploads it**: it is compressed, hashed and left `ready` until the user taps
+Upload. The upload itself is reservation → raw `PUT` → completion, with a `PUT success` deliberately
+**not** treated as completion. A reservation is reused across a retry (one server row, not two), and
+a `confirm`-stage failure re-calls only `complete`, whose replay the API answers as a 200 no-op.
+Everything is keyed `"{society}:{user}"`, so switching society or account abandons the previous
+tenant's items and aborts their transports.
+
+**Compression:** longest edge ≤ 1600 px (never upscaled), primary `q0.7`, a second pass at `q0.55`
+only above the **400 KB target** (not a gate), and PDFs passed through untouched. HEIC/PNG become
+JPEG because `SaveFormat.JPEG` writes new pixels — which **is** the EXIF strip and the orientation
+bake-in. The SHA-256 is taken over the compressed output, i.e. the exact bytes that are uploaded and
+that the presigned signature pins.
+
+### What is _not_ verified here (device-only)
+
+Every one of these needs real hardware, which is unavailable in this environment, so they are open
+and reported as exceptions rather than claimed:
+
+1. **Camera capture and its crop.** In-app tests drive a picker double; confirm on device that the
+   system camera opens, the crop step is offered, and a denied permission shows the fallback copy
+   without throwing.
+2. **A real 4 MB photo uploading as under 400 KB.** Capture a genuine 4 MB JPEG/HEIC, attach it, and
+   confirm the object in storage is a JPEG under 400 KB at ≤ 1600 px on its longest edge. The unit
+   tests prove the pipeline's arithmetic on sized fixtures; only the device proves it on real bytes.
+3. **EXIF absent from the uploaded object.** Re-download the completed object and inspect it with a
+   metadata reader (`exiftool`, `identify -verbose`) to confirm no EXIF/GPS/orientation block. The
+   tests prove the _format_ is a re-encode; they do not read the shipped object's tags.
+4. **Upload progress accuracy** on a live, throttled network.
+5. **Zoom/pan feel** in the viewer, and that a PDF opens in the platform viewer.
+6. **Both themes** (light and dark) on real screens for the scanner, the grid and the viewer.
+
+A Jest component test is not a device measurement and is not reported as one.
+
 ## Deferred: bill thumbnails
 
 The Roadmap's detail acceptance names "bill thumbnails". They **cannot be delivered** under the

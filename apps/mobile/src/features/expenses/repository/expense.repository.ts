@@ -139,6 +139,47 @@ export interface ExpenseAttachmentDownload {
   readonly scanStatus: AttachmentScanStatus;
 }
 
+/**
+ * The four facts a presign request declares (T071's strict contract body).
+ *
+ * `sizeBytes` and `checksum` are the load-bearing pair: the first becomes the exact
+ * length the presigned PUT's signature pins, and the second is re-verified against the
+ * stored object at completion. Both must describe the bytes that will actually be
+ * uploaded, which is why the preparation step produces them together.
+ */
+export interface AttachmentUploadRequest {
+  readonly fileName: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+  readonly checksum: string;
+}
+
+/**
+ * A reservation: the server-minted attachment id and an opaque, time-limited upload URL.
+ *
+ * `uploadUrl` is a **credential**, not a resource: nothing here parses it, and it is
+ * never logged, cached or persisted. `requiredHeaders` are the signature's own
+ * expectations and carry no secret.
+ */
+export interface AttachmentUploadTarget {
+  readonly attachmentId: string;
+  readonly uploadUrl: string;
+  readonly storageKey: string;
+  readonly expiresAt: string;
+  readonly requiredHeaders: Readonly<Record<string, string>>;
+}
+
+/**
+ * The completion answer — `processing`, and deliberately not `clean`.
+ *
+ * No scanner exists (ADR-0012 D3), so nothing writes `clean` and a client must not
+ * infer that a verified upload has been security-scanned. The literal type is what stops
+ * that inference at compile time.
+ */
+export interface AttachmentCompletion {
+  readonly status: 'processing';
+}
+
 /** One page of the society's expenses plus the cursor for the next page. */
 export interface ExpensePage {
   readonly expenses: readonly ExpenseSummary[];
@@ -243,6 +284,33 @@ export interface ExpenseRepository {
     societyId: string,
     actor: string,
   ): Promise<ExpenseAttachmentDownload>;
+  /**
+   * Reserve an upload and mint its presigned PUT — `POST /expenses/:expenseId/attachments`.
+   *
+   * The row exists on the server the moment this answers, so the caller must either send
+   * the bytes and complete, or abandon the reservation (it stops counting against the
+   * society's plan quota after 15 minutes). It is **not** idempotent: only call it when a
+   * file is genuinely ready, and never retry it blindly.
+   */
+  requestAttachmentUpload(
+    expenseId: string,
+    societyId: string,
+    actor: string,
+    request: AttachmentUploadRequest,
+  ): Promise<AttachmentUploadTarget>;
+  /**
+   * Confirm a finished upload — `POST /attachments/:attachmentId/complete`.
+   *
+   * Safe to call again with the same checksum: replaying a completed upload answers the
+   * same `processing` without writing anything, which is what makes "the PUT landed but
+   * the response was lost" recoverable without a second reservation.
+   */
+  completeAttachmentUpload(
+    attachmentId: string,
+    societyId: string,
+    actor: string,
+    checksum: string,
+  ): Promise<AttachmentCompletion>;
   /** `id → name` for the society's categories, so a row can render a category name. */
   listCategoryNames(societyId: string, actor: string): Promise<ReadonlyMap<string, string>>;
   /**

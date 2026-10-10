@@ -9,6 +9,8 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { useSessionRestore } from '@/features/auth/hooks/useSessionRestore';
 import { handleAuthDeepLink } from '@/features/auth/services/auth-deep-link';
+import { expenseKeys } from '@/features/expenses/hooks/expense-keys';
+import { registerExpenseAttachmentsInvalidator } from '@/features/expenses/services/expense-query-invalidation';
 import { useSocietyBootstrap } from '@/features/society/hooks/use-society-bootstrap';
 import { handleSocietyDeepLink } from '@/features/society/services/society-deep-link';
 import { createQueryClient } from '@/lib/api/query-client';
@@ -32,6 +34,20 @@ export function AppProviders({ children }: { children: ReactNode }) {
     const teardown = setupReactQueryNetwork();
     return teardown;
   }, []);
+
+  // The attachment feature refreshes the bill list when an upload completes. It runs from
+  // a service (an upload outlives the screen that started it), so it cannot reach for
+  // `useQueryClient` — the provider registers the invalidation here instead, where the
+  // real client lives. Scoped to the bill keys: attaching a bill does not change the
+  // ledger, and refetching the whole expense namespace would be a heavy way to say so.
+  useEffect(() => {
+    registerExpenseAttachmentsInvalidator(() => {
+      void queryClient.invalidateQueries({ queryKey: expenseKeys.attachmentsAll });
+    });
+    return () => {
+      registerExpenseAttachmentsInvalidator(null);
+    };
+  }, [queryClient]);
 
   // Session persistence: restore the SecureStore-backed session on cold
   // start and keep the zustand store in sync with every auth event.
