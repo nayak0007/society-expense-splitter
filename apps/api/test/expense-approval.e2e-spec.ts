@@ -351,6 +351,18 @@ function reject(
 const REASON = "The vendor invoice does not match the quote.";
 
 describe("POST /v1/expenses/:expenseId/approve", () => {
+  it("refuses a path parameter that is not a UUID before any query runs", async () => {
+    const response = await call("post", "/v1/expenses/not-a-uuid/approve", {
+      userId: ADMIN,
+      societyId: SOCIETY_A,
+      body: { expectedVersion: 1 },
+    });
+
+    expect(response.status).toBe(422);
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
+    expect(response.body.error.field).toBe("expenseId");
+  });
+
   it("stamps the approval, clears stale rejection metadata and leaves the status awaiting publication", async () => {
     const { id } = await pendingExpense();
 
@@ -520,6 +532,29 @@ describe("POST /v1/expenses/:expenseId/approve", () => {
 });
 
 describe("POST /v1/expenses/:expenseId/reject", () => {
+  it("requires a session", async () => {
+    const response = await call(
+      "post",
+      "/v1/expenses/20000000-0000-4000-8000-000000000001/reject",
+      { societyId: SOCIETY_A, body: { expectedVersion: 1, reason: REASON } },
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe("UNAUTHENTICATED");
+  });
+
+  it("refuses a path parameter that is not a UUID before any query runs", async () => {
+    const response = await call("post", "/v1/expenses/not-a-uuid/reject", {
+      userId: ADMIN,
+      societyId: SOCIETY_A,
+      body: { expectedVersion: 1, reason: REASON },
+    });
+
+    expect(response.status).toBe(422);
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
+    expect(response.body.error.field).toBe("expenseId");
+  });
+
   it("returns the expense to draft with the three stamps and the approval cleared", async () => {
     const { id } = await pendingExpense();
     await approve(id, { expectedVersion: 1 });

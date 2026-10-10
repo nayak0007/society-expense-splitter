@@ -266,6 +266,39 @@ describe("authentication and the society header", () => {
 
     expect(guardReads).toHaveLength(1);
   });
+
+  it("requires a session on every write verb too — the chain is global", async () => {
+    const responses = await Promise.all([
+      call("post", "/v1/expense-categories", {
+        societyId: SOCIETY_A,
+        body: { name: "Water" },
+      }),
+      call(
+        "patch",
+        "/v1/expense-categories/0a000000-0000-4000-8000-000000000001",
+        {
+          societyId: SOCIETY_A,
+          body: { name: "Water" },
+        },
+      ),
+      call(
+        "delete",
+        "/v1/expense-categories/0a000000-0000-4000-8000-000000000001",
+        {
+          societyId: SOCIETY_A,
+        },
+      ),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([
+      401, 401, 401,
+    ]);
+    expect(responses.map((response) => response.body.error.code)).toEqual([
+      "UNAUTHENTICATED",
+      "UNAUTHENTICATED",
+      "UNAUTHENTICATED",
+    ]);
+  });
 });
 
 describe("permissions", () => {
@@ -766,6 +799,17 @@ describe("patch", () => {
 });
 
 describe("delete", () => {
+  it("refuses a non-UUID id as a validation error, not a 500", async () => {
+    const response = await call("delete", "/v1/expense-categories/not-a-uuid", {
+      userId: ADMIN,
+      societyId: SOCIETY_A,
+    });
+
+    expect(response.status).toBe(422);
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
+    expect(response.body.error.field).toBe("categoryId");
+  });
+
   it("soft-deletes: the route answers 204 and every read path loses it", async () => {
     const category = await seedViaApi({ name: "Painting" });
 

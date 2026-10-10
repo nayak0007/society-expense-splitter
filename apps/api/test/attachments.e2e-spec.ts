@@ -58,6 +58,7 @@ const SOCIETY_B = asSocietyId("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
 const ADMIN: UserId = asUserId("11111111-1111-4111-8111-111111111111");
 const COMMITTEE: UserId = asUserId("77777777-7777-4777-8777-777777777777");
 const RESIDENT: UserId = asUserId("33333333-3333-4333-8333-333333333333");
+const GUEST: UserId = asUserId("44444444-4444-4444-8444-444444444444");
 
 const EXPENSE = asExpenseId("20000000-0000-4000-8000-000000000001");
 const FOREIGN_EXPENSE = asExpenseId("20000000-0000-4000-8000-0000000000b2");
@@ -66,6 +67,7 @@ const ABSENT_ID = "99999999-9999-4999-8999-999999999999";
 const ADMIN_MEMBER = asMemberId("10000000-0000-4000-8000-000000000001");
 const COMMITTEE_MEMBER = asMemberId("10000000-0000-4000-8000-000000000007");
 const RESIDENT_MEMBER = asMemberId("10000000-0000-4000-8000-000000000003");
+const GUEST_MEMBER = asMemberId("10000000-0000-4000-8000-000000000004");
 
 const MAX_BYTES = 10 * 1024 * 1024;
 
@@ -109,6 +111,7 @@ const COMMITTEE_MEMBERSHIP = membershipOf(
   COMMITTEE_MEMBER,
 );
 const RESIDENT_MEMBERSHIP = membershipOf(RESIDENT, "resident", RESIDENT_MEMBER);
+const GUEST_MEMBERSHIP = membershipOf(GUEST, "guest", GUEST_MEMBER);
 
 const societies = new Map<string, Society>([[SOCIETY_A, society()]]);
 
@@ -176,6 +179,7 @@ beforeEach(() => {
   memberships.set(key(SOCIETY_A, ADMIN), ADMIN_MEMBERSHIP);
   memberships.set(key(SOCIETY_A, COMMITTEE), COMMITTEE_MEMBERSHIP);
   memberships.set(key(SOCIETY_A, RESIDENT), RESIDENT_MEMBERSHIP);
+  memberships.set(key(SOCIETY_A, GUEST), GUEST_MEMBERSHIP);
 
   attachments.state.expenses.clear();
   attachments.state.rows.clear();
@@ -591,6 +595,27 @@ describe("POST /v1/expenses/:expenseId/attachments", () => {
 });
 
 describe("POST /v1/attachments/:attachmentId/complete", () => {
+  it("requires a session before anything else", async () => {
+    const response = await call(
+      "post",
+      "/v1/attachments/30000000-0000-4000-8000-000000000001/complete",
+      { societyId: SOCIETY_A, body: { checksum: sha256(jpeg()) } },
+    );
+
+    expect(response.status).toBe(401);
+  });
+
+  it("refuses a Resident — expense.create is not theirs", async () => {
+    const response = await complete(
+      "30000000-0000-4000-8000-000000000001",
+      undefined,
+      { userId: RESIDENT },
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe("FORBIDDEN");
+  });
+
   it("answers 200 with `processing` — never `clean`", async () => {
     const { id } = await reserveAndUpload();
 
@@ -696,6 +721,16 @@ describe("POST /v1/attachments/:attachmentId/complete", () => {
 });
 
 describe("DELETE /v1/attachments/:attachmentId", () => {
+  it("requires a session before anything else", async () => {
+    const response = await call(
+      "delete",
+      "/v1/attachments/30000000-0000-4000-8000-000000000001",
+      { societyId: SOCIETY_A },
+    );
+
+    expect(response.status).toBe(401);
+  });
+
   it("answers 204 with no body, and removes the row before the object", async () => {
     const { id, storageKey } = await reserveAndUpload();
 
@@ -796,6 +831,23 @@ function completedRow(index: number, sizeBytes: number): AttachmentRecord {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("GET /v1/expenses/:expenseId/attachments", () => {
+  it("refuses a Guest — expense.view is not theirs", async () => {
+    const response = await get(`/v1/expenses/${EXPENSE}/attachments`, {
+      userId: GUEST,
+    });
+
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe("FORBIDDEN");
+  });
+
+  it("refuses a path parameter that is not a UUID before any query runs", async () => {
+    const response = await get("/v1/expenses/not-a-uuid/attachments");
+
+    expect(response.status).toBe(422);
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
+    expect(response.body.error.field).toBe("expenseId");
+  });
+
   it("requires a session before anything else", async () => {
     const response = await call("get", `/v1/expenses/${EXPENSE}/attachments`, {
       societyId: SOCIETY_A,
@@ -859,6 +911,16 @@ describe("GET /v1/expenses/:expenseId/attachments", () => {
 });
 
 describe("GET /v1/attachments/:attachmentId/download", () => {
+  it("refuses a Guest — expense.view is not theirs", async () => {
+    const response = await get(
+      "/v1/attachments/30000000-0000-4000-8000-000000000001/download",
+      { userId: GUEST },
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe("FORBIDDEN");
+  });
+
   it("requires a session before anything else", async () => {
     const response = await call(
       "get",

@@ -579,6 +579,28 @@ describe("PATCH /v1/expenses/:expenseId on a published expense", () => {
 });
 
 describe("GET /v1/expenses/:expenseId/revisions", () => {
+  it("requires a session before anything else", async () => {
+    const response = await call(
+      "get",
+      "/v1/expenses/20000000-0000-4000-8000-000000000001/revisions",
+      { societyId: SOCIETY_A },
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe("UNAUTHENTICATED");
+  });
+
+  it("refuses a path parameter that is not a UUID before any query runs", async () => {
+    const response = await call("get", "/v1/expenses/not-a-uuid/revisions", {
+      userId: ADMIN,
+      societyId: SOCIETY_A,
+    });
+
+    expect(response.status).toBe(422);
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
+    expect(response.body.error.field).toBe("expenseId");
+  });
+
   it("is readable by a Resident — the history is a transparency feature", async () => {
     const expenseId = await publishedExpense();
     await revise(expenseId, { expectedVersion: 2, title: "Revised" });

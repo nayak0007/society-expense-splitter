@@ -316,6 +316,18 @@ describe("authentication and the society header", () => {
 });
 
 describe("GST details", () => {
+  it("refuses a path parameter that is not a UUID before any query runs", async () => {
+    const response = await call("put", "/v1/expenses/not-a-uuid/gst", {
+      userId: ADMIN,
+      societyId: SOCIETY_A,
+      body: {},
+    });
+
+    expect(response.status).toBe(422);
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
+    expect(response.body.error.field).toBe("expenseId");
+  });
+
   it("records GST and returns no warning when the components reconcile", async () => {
     const response = await putGst({
       gstin: VALID_GSTIN,
@@ -406,6 +418,33 @@ describe("GST details", () => {
 });
 
 describe("comments", () => {
+  it("refuses a Guest the comment stream — expense.view is not theirs", async () => {
+    const response = await listComments({ userId: GUEST });
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe("FORBIDDEN");
+  });
+
+  it("refuses a non-UUID expense id at the boundary, naming the parameter", async () => {
+    const response = await call("get", "/v1/expenses/not-a-uuid/comments", {
+      userId: ADMIN,
+      societyId: SOCIETY_A,
+    });
+
+    expect(response.status).toBe(422);
+    expect(response.body.error.field).toBe("expenseId");
+  });
+
+  it("refuses a non-UUID comment id at the boundary, naming the parameter", async () => {
+    const response = await call(
+      "delete",
+      `/v1/expenses/${EXPENSE}/comments/not-a-uuid`,
+      { userId: ADMIN, societyId: SOCIETY_A },
+    );
+
+    expect(response.status).toBe(422);
+    expect(response.body.error.field).toBe("commentId");
+  });
+
   it("lets every non-Guest role comment and refuses a Guest", async () => {
     for (const userId of [ADMIN, TREASURER, COMMITTEE, RESIDENT, TENANT]) {
       const response = await addComment(
