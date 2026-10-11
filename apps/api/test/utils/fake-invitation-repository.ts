@@ -6,6 +6,7 @@ import {
   asInvitationId,
   asMemberId,
   asSocietyId,
+  invitationExpiry,
 } from "@ses/domain";
 import type {
   CreateInvitationInput,
@@ -209,7 +210,14 @@ export class FakeInvitationRepository implements InvitationRepository {
       phone: spec.phone ?? null,
       role: spec.role ?? "resident",
       status: spec.status ?? "sent",
-      expiresAt: spec.expiresAt ?? "2026-10-10T10:00:00.000Z",
+      // Relative to the server clock, not a literal date, because the route folds expiry against
+      // that clock at read time (`invitation.mapper.ts`: `invitationStatusAt(invitation, now)`). A
+      // pinned literal — this used to be "2026-10-10T10:00:00.000Z" — was live when written and
+      // silently became past, so a default-seeded row ("the live one") started rendering
+      // `expired: true` and a real assertion failed a year later for no product reason. Reusing the
+      // production rule (`invitationExpiry` = `now + INVITATION_TTL_DAYS`) keeps the default live in
+      // perpetuity, and it is the same convention `societies.e2e-spec.ts` uses for an expired code.
+      expiresAt: spec.expiresAt ?? invitationExpiry(new Date()),
       openedAt: null,
       acceptedAt:
         spec.status === "accepted" ? "2026-09-26T11:00:00.000Z" : null,

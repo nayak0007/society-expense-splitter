@@ -7,6 +7,7 @@ import {
   asMemberId,
   asSocietyId,
   asUserId,
+  invitationExpiry,
 } from "@ses/domain";
 import type {
   InvitationPreview,
@@ -362,11 +363,19 @@ describe("POST /v1/invitations", () => {
 
 describe("GET /v1/invitations", () => {
   it("lists the society's invitations with expiry folded in", async () => {
+    // Both expiries are expressed relative to the server clock, because `expired` is derived
+    // against it at read time (`invitation.mapper.ts`), never stored: a literal date is live when
+    // written and silently rots into the past. One past (`expired: true`), one future
+    // (`expired: false`) — the same relative-date convention `societies.e2e-spec.ts` uses for an
+    // expired join code.
     invitations.seedInvitation({
       societyId: SOCIETY_A,
-      expiresAt: "2026-09-01T10:00:00.000Z",
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
     });
-    invitations.seedInvitation({ societyId: SOCIETY_A });
+    invitations.seedInvitation({
+      societyId: SOCIETY_A,
+      expiresAt: invitationExpiry(new Date()),
+    });
     invitations.seedInvitation({ societyId: SOCIETY_B });
 
     const response = await call("get", "/v1/invitations", {
@@ -494,7 +503,7 @@ describe("GET /v1/invitations/preview/:token", () => {
     requiresAccountMatch: true,
     status: "opened",
     expired: false,
-    expiresAt: "2026-10-10T10:00:00.000Z",
+    expiresAt: invitationExpiry(new Date()),
   };
 
   it("is reachable signed out — no token header, no society header", async () => {
