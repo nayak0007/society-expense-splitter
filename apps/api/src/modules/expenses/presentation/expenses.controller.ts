@@ -75,6 +75,7 @@ import {
 import { HeaderParam } from "../../../common/decorators/header-param.decorator";
 import { NoEnvelope } from "../../../common/decorators/no-envelope.decorator";
 import { RequirePermission } from "../../../common/decorators/require-permission.decorator";
+import { Audited } from "../../audit/audited.decorator";
 import { ZodPipe } from "../../../common/pipes/zod.pipe";
 import { envelopeSchemaOf } from "../../../common/swagger/zod-openapi";
 import { AddCommentUseCase } from "../application/use-cases/add-comment.use-case";
@@ -192,6 +193,7 @@ export class ExpensesController {
    * `status = 'draft'` from them). Nothing is published, split or charged here; that
    * is T066.
    */
+  @Audited("expense.created")
   @Post()
   @RequirePermission("expense.create")
   @HttpCode(HttpStatus.CREATED)
@@ -371,6 +373,9 @@ export class ExpensesController {
    * refused on a draft edit, which has no revision to annotate. A `void` expense is
    * refused on both doors: T069 owns reversal by voiding.
    */
+  // Two actions: a draft edit records `expense.updated`, a published edit is T068's
+  // recalculation (ADR-0009) — the same route, decided by the stored row.
+  @Audited("expense.updated", "expense.recalculated")
   @Patch(":expenseId")
   @RequirePermission("expense.void")
   @ApiExpenseDraftErrors()
@@ -508,6 +513,7 @@ export class ExpensesController {
    * and the absence of splits, so a stale client cannot delete anything the rules
    * refuse.
    */
+  @Audited("expense.deleted")
   @Delete(":expenseId")
   @RequirePermission("expense.void")
   @HttpCode(HttpStatus.NO_CONTENT)

@@ -18,6 +18,8 @@ import { CacheModule } from "./infrastructure/cache/cache.module";
 import { DatabaseModule } from "./infrastructure/database/database.module";
 import { StorageModule } from "./infrastructure/storage/storage.module";
 import { AttachmentsModule } from "./modules/attachments/attachments.module";
+import { AuditInterceptor } from "./modules/audit/audit.interceptor";
+import { AuditModule } from "./modules/audit/audit.module";
 import { ExpensesModule } from "./modules/expenses/expenses.module";
 import { HealthModule } from "./modules/health/health.module";
 import { InvitationsModule } from "./modules/invitations/invitations.module";
@@ -81,6 +83,12 @@ import { buildLoggerParams } from "./observability/logger";
     // and because `ExpensesModule` consumes one of its ports (the draft-deletion
     // cleanup), which is a contract this module exports rather than an internals reach.
     AttachmentsModule,
+    // T050's audit infrastructure (ADR-0014). No route and no controller: it owns the
+    // append-only audit table's write seam and the `@Audited()` declaration. Imported
+    // where it is used (here for the interceptor, and by the member and expense
+    // modules whose repositories record rows) rather than made `@Global()`, so the
+    // dependency stays visible in the graph.
+    AuditModule,
   ],
   providers: [
     // T048 — the member module's bulk import reads the invitations module's repository
@@ -116,6 +124,11 @@ import { buildLoggerParams } from "./observability/logger";
     // request context is established before the envelope interceptor reads the
     // request id out of it.
     { provide: APP_INTERCEPTOR, useClass: RequestContextInterceptor },
+    // Registered **after** the context interceptor, because it writes the route's
+    // `@Audited()` declaration into that context. Nest runs interceptors
+    // outermost-first, so this one is inside the context and outside the envelope —
+    // which is also what keeps a refused request's envelope unwrapped by audit code.
+    { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
     { provide: APP_INTERCEPTOR, useClass: ResponseEnvelopeInterceptor },
     { provide: APP_FILTER, useClass: ApiExceptionFilter },
   ],

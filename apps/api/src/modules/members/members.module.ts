@@ -3,6 +3,9 @@ import { Module } from "@nestjs/common";
 import { CacheModule } from "../../infrastructure/cache/cache.module";
 import { DatabaseModule } from "../../infrastructure/database/database.module";
 import { StructureModule } from "../structure/structure.module";
+// T050 — the member repository records role and membership mutations through the
+// audit service, so the module depends on it explicitly rather than through a global.
+import { AuditModule } from "../audit/audit.module";
 import { IMPORT_FLAT_READER } from "./application/csv-import.tokens";
 import { MembersOperations } from "./application/members.operations";
 import { MEMBER_REPOSITORY } from "./application/member.tokens";
@@ -55,7 +58,7 @@ import { PermissionsController } from "./presentation/permissions.controller";
   // explicitly rather than reached for globally, following `DatabaseModule`'s own
   // note: the reader of this file should be able to see that this module's writes
   // are ordered against a cache.
-  imports: [DatabaseModule, StructureModule, CacheModule],
+  imports: [DatabaseModule, StructureModule, CacheModule, AuditModule],
   // Two controllers, one use-case class: the role catalogue and the permission reads answer the
   // same questions as the member routes and read the same port (`findViewer`, `findById`,
   // `countActiveByRole`), so splitting the *operations* would split one implementation of a rule

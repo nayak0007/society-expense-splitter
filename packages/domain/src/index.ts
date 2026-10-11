@@ -25,6 +25,11 @@
  *                 outstanding formula and the balance projection the publishing
  *                 transaction expresses in SQL). Payments, allocation and
  *                 statements arrive with T079+.
+ *  - `audit/` — the audit vocabulary (T050, ADR-0014): the category and action
+ *                 unions, the `AuditEntry` shape the database writer persists, and
+ *                 the recursive redaction rule. Pure data and pure rules; the API
+ *                 layer supplies the trusted request context and the SQL is the
+ *                 persistence authority.
  *  - `attachment/` — the Attachments module (T071): the value rules that decide
  *                 what a bill may be (per-type caps, the MIME→extension map, the
  *                 SAD §10.3 key layout, the SHA-256 shape), the magic-number
@@ -71,6 +76,7 @@ export * from "./structure/errors";
 export * from "./structure/rules";
 export * from "./structure/ports";
 export * from "./structure/value-objects";
+export * from "./audit/audit";
 export * from "./attachment/attachment";
 export * from "./attachment/errors";
 export * from "./attachment/magic-bytes";

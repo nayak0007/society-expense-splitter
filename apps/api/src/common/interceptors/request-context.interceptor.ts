@@ -13,7 +13,9 @@ import {
   readRequestActor,
   readRequestId,
   readRequestHeader,
+  readRequestIp,
   readRequestMembership,
+  readRequestUserAgent,
 } from "../http/http-access";
 
 /**
@@ -72,6 +74,15 @@ export class RequestContextInterceptor implements NestInterceptor {
                 role: membership.role,
                 status: membership.status,
               },
+        // Captured here, once, for the audit trail (T050): the interceptor is the
+        // only layer that holds both the raw request and the context the audit
+        // builder reads from, so reading the address and the user agent anywhere
+        // else would mean holding the request object past its lifetime.
+        ip: readRequestIp(request),
+        userAgent: readRequestUserAgent(request),
+        // Empty until `AuditInterceptor` (registered after this one) fills it from
+        // the route's `@Audited()` metadata.
+        audited: [],
       },
       () => next.handle(),
     );

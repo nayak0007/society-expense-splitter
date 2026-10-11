@@ -376,12 +376,14 @@ describe("migrations #33 to #35 and their security posture", () => {
     // anchor is advanced rather than relaxed to `toHaveLength(greaterThanOrEqual(…))`:
     // "the ledger ends exactly at HEAD's files, in order" is the sentence that has to
     // stay true after every migration, and the names are what asserts it.
-    expect(names).toHaveLength(36);
+    // T050 appends the 37th file (the audit log), so the anchor moves again rather
+    // than the assertion being relaxed.
+    expect(names).toHaveLength(37);
     expect(names.slice(-4)).toEqual([
-      "20261011120000_attachments.sql",
       "20261012120000_attachments_insert_id_grant.sql",
       "20261013120000_attachments_uploader_fk.sql",
       "20261014120000_expense_comments.sql",
+      "20261015120000_audit_logs.sql",
     ]);
   });
 

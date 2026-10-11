@@ -50,6 +50,7 @@ import {
 } from "../../../common/decorators/ctx.decorator";
 import { NoEnvelope } from "../../../common/decorators/no-envelope.decorator";
 import { RequirePermission } from "../../../common/decorators/require-permission.decorator";
+import { Audited } from "../../audit/audited.decorator";
 import { ZodPipe } from "../../../common/pipes/zod.pipe";
 import { envelopeSchemaOf } from "../../../common/swagger/zod-openapi";
 import { MembersOperations } from "../application/members.operations";
@@ -634,6 +635,7 @@ export class MembersController {
    * returned — so a screen that just changed a role renders the server's answer rather than its own
    * guess, and a trigger that refused or changed something cannot leave the two disagreeing.
    */
+  @Audited("member.role_assigned")
   @Patch(":memberId/role")
   @RequirePermission("member.role_change")
   @ApiOperation({
@@ -671,6 +673,7 @@ export class MembersController {
    * as "assign resident", and the two differ in what the operation means and in what an audit entry
    * (T050) will say about it.
    */
+  @Audited("member.role_revoked")
   @Delete(":memberId/role")
   @RequirePermission("member.role_change")
   @HttpCode(HttpStatus.OK)
@@ -708,6 +711,7 @@ export class MembersController {
    * this route is for the Admin removing somebody else, and it refuses a self-removal so the two
    * paths cannot be confused.
    */
+  @Audited("member.removed")
   @Delete(":memberId")
   @RequirePermission("member.remove")
   @HttpCode(HttpStatus.NO_CONTENT)

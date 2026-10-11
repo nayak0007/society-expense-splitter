@@ -45,6 +45,23 @@ export type RequestContextStore = {
    * including anything a user reaches before they belong to a society.
    */
   readonly member: MemberContext | undefined;
+  /**
+   * The caller's address and user agent, captured for the audit trail (T050).
+   * Metadata for a human to read; never an authorisation input, and never taken
+   * from a request body.
+   */
+  readonly ip: string | undefined;
+  readonly userAgent: string | undefined;
+  /**
+   * The audit actions this route declared with `@Audited()`.
+   *
+   * The **only mutable field**, and deliberately so: `AuditInterceptor` runs
+   * after this store is created and fills it in place, which is what lets a later
+   * layer read "what did this route promise to audit" without threading an extra
+   * argument through every call. In Stage A it is declarative metadata (ADR-0014
+   * D7); Stage B will require a declared action to have been recorded.
+   */
+  audited: readonly string[];
 };
 
 const storage = new AsyncLocalStorage<RequestContextStore>();
@@ -77,5 +94,40 @@ export const RequestContext = {
   /** The tenant scope of this request, when it has one. */
   societyId(): string | undefined {
     return storage.getStore()?.member?.societyId;
+  },
+
+  /** The caller's IP, for the audit trail. Never an authorisation input. */
+  ip(): string | undefined {
+    return storage.getStore()?.ip;
+  },
+
+  /** The caller's user agent, for the audit trail. Never an authorisation input. */
+  userAgent(): string | undefined {
+    return storage.getStore()?.userAgent;
+  },
+
+  /**
+   * The audit actions this route declared with `@Audited()`.
+   *
+   * Empty outside a request, on a route that declared none, and in every unit
+   * test that never mounted the interceptor — which is exactly why the default is
+   * an empty list rather than `undefined`: a caller narrowing it cannot forget a
+   * null check, and "declared nothing" and "not audited" are the same answer here.
+   */
+  audited(): readonly string[] {
+    return storage.getStore()?.audited ?? [];
+  },
+
+  /**
+   * Records the actions a route declared. Called by `AuditInterceptor`, and
+   * nowhere else — it mutates the live store, so it is a one-way write from the
+   * pipeline into the context, never a way to change what a later layer believes
+   * the caller is.
+   */
+  declareAudit(actions: readonly string[]): void {
+    const store = storage.getStore();
+    if (store !== undefined) {
+      store.audited = actions;
+    }
   },
 } as const;

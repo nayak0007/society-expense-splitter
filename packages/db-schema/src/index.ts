@@ -3,7 +3,8 @@
  * the mobile replica (SQLite subset), so a column has one definition rather than
  * two that drift.
  *
- * Table definitions arrive with the modules that own them — the expense domain's
+ * Table definitions arrive with the modules that own them — `audit-logs.ts` with
+ * T050 (the append-only audit log, ADR-0014), the expense domain's
  * six landed with T060 (`src/postgres/{expense-categories,expenses,expense-splits,
  * expense-revisions,expense-gst-details,dues}.ts`) and `member-balances.ts` with
  * T067 — and the package deliberately
@@ -18,6 +19,7 @@
 export * from "./shared/columns";
 
 export * from "./postgres/attachments";
+export * from "./postgres/audit-logs";
 export * from "./postgres/expense-categories";
 export * from "./postgres/expense-comments";
 export * from "./postgres/expense-gst-details";

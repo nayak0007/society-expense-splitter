@@ -49,6 +49,38 @@ export function readRequestHeader(
 }
 
 /**
+ * The caller's IP, for the audit trail (T050 — SAD §13.7).
+ *
+ * Prefers the adapter's own resolution (`request.ip`, which Fastify sets — and
+ * which honours `trustProxy` when the operator has configured it) and falls back
+ * to the first hop of `X-Forwarded-For`. The fallback exists because the header is
+ * what an app behind an untrusting proxy actually has; it is **not** trusted for
+ * anything security-relevant — an audit row records the address for a human to
+ * read, and the row is not an authentication decision.
+ *
+ * Returns `undefined` (never a fabricated value) when neither is available, so a
+ * unit test that drives a handler directly records "not captured" rather than an
+ * address it invented.
+ */
+export function readRequestIp(request: unknown): string | undefined {
+  if (typeof request !== "object" || request === null) {
+    return undefined;
+  }
+  const ip: unknown = (request as { ip?: unknown }).ip;
+  if (typeof ip === "string" && ip !== "") {
+    return ip;
+  }
+  const forwarded = readRequestHeader(request, "x-forwarded-for");
+  const first = forwarded?.split(",")[0]?.trim();
+  return first === undefined || first === "" ? undefined : first;
+}
+
+/** The caller's `User-Agent`, for the audit trail. Metadata only, never authority. */
+export function readRequestUserAgent(request: unknown): string | undefined {
+  return readRequestHeader(request, "user-agent");
+}
+
+/**
  * Extracts the bearer token from the `Authorization` header, or `undefined`.
  *
  * The scheme match is case-insensitive because RFC 7235 makes it so, and real

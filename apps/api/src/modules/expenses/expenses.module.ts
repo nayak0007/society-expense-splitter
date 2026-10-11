@@ -4,6 +4,7 @@ import { systemClock } from "@ses/domain";
 import { DatabaseModule } from "../../infrastructure/database/database.module";
 import { StorageModule } from "../../infrastructure/storage/storage.module";
 import { AttachmentsModule } from "../attachments/attachments.module";
+import { AuditModule } from "../audit/audit.module";
 import { SOCIETY_REPOSITORY } from "../societies/application/society.tokens";
 import { SocietiesModule } from "../societies/societies.module";
 import { ExpenseCategoryOperations } from "./application/expense-category.operations";
@@ -157,7 +158,15 @@ import { ExpensesController } from "./presentation/expenses.controller";
   // (ADR-0012 D6.5). The dependency runs one way — attachments never imports the
   // expenses module, which is why the settlement's repository reads `expenses`
   // through its own documented projection rather than through `EXPENSE_REPOSITORY`.
-  imports: [DatabaseModule, SocietiesModule, StorageModule, AttachmentsModule],
+  imports: [
+    DatabaseModule,
+    SocietiesModule,
+    StorageModule,
+    AttachmentsModule,
+    // T050 — the expense repository records the draft lifecycle through the audit
+    // service (ADR-0014). One import, so the module graph names the dependency.
+    AuditModule,
+  ],
   controllers: [ExpenseCategoriesController, ExpensesController],
   providers: [
     ExpenseCategoryOperations,

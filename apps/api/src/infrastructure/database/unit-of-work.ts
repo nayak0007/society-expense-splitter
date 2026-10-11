@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { sql, type ExtractTablesWithRelations } from "drizzle-orm";
 import type { PgTransaction } from "drizzle-orm/pg-core";
 import type { PostgresJsQueryResultHKT } from "drizzle-orm/postgres-js";
+import { redactAuditEntry, type AuditEntry } from "@ses/domain";
 
 import { DatabaseService } from "./database.service";
 
@@ -56,6 +57,21 @@ export type TransactionContext = PgTransaction<
   Record<string, never>,
   ExtractTablesWithRelations<Record<string, never>>
 >;
+
+/**
+ * The audit entries a transaction wants recorded, or a function that derives them
+ * from the transaction's result — T050, ADR-0014.
+ *
+ * A **function** is the common case and not a convenience: the row an operation
+ * actually persisted only exists once `work` has returned (its id is minted by the
+ * database, its version is bumped by a trigger), and "before/after snapshots
+ * reflect actual persisted state" therefore cannot be satisfied by an array the
+ * caller assembled beforehand.
+ *
+ * An empty array is a no-op: a read path may pass `[]` and pay nothing.
+ */
+export type AuditFlush<T> =
+  readonly AuditEntry[] | ((result: T) => readonly AuditEntry[]);
 
 /**
  * Transaction boundary, and the place the RLS identity bridge lives.
@@ -124,12 +140,76 @@ export class UnitOfWork {
   async transaction<T>(
     actor: TransactionActor,
     work: (tx: TransactionContext) => Promise<T>,
+    audit?: AuditFlush<T>,
   ): Promise<T> {
     return this.database.db.transaction(async (tx) => {
       await applyIdentity(tx, actor);
-      return work(tx);
+      const result = await work(tx);
+      const entries = typeof audit === "function" ? audit(result) : audit;
+      if (entries !== undefined && entries.length > 0) {
+        await flushAudit(tx, entries, actor);
+      }
+      return result;
     });
   }
+}
+
+/**
+ * Writes the transaction's audit entries through the privileged writer, in the
+ * same transaction as the business change — T050, ADR-0014 D1.
+ *
+ * ## The role switch, and why it is not forgeable
+ *
+ * The transaction has been running as `authenticated` (RLS applies, the caller's
+ * policies decide every row). Audit rows must not be writable by that role —
+ * `authenticated` holds no `INSERT` on `audit_logs` and no `EXECUTE` on
+ * `write_audit_logs` — so the flush resets to the session user and switches to
+ * `ses_api`, the capability group whose *only* privilege is `EXECUTE` on the
+ * writer. `SET LOCAL` throughout: a session-level setting under a transaction-mode
+ * pooler would leak to whichever request next borrows the backend.
+ *
+ * The control is the **privilege**, not a GUC: any role can call `set_config`, so a
+ * transaction-local setting is defence in depth at best, which is why the writer is
+ * unreachable without the grant. `RESET ROLE` first is for clarity — `SET ROLE`
+ * authorises against the *session* user, so it would work without it — and it makes
+ * the sequence readable as "stop being the caller, then be the writer".
+ *
+ * ## Fail-closed, and no silent de-duplication
+ *
+ * Any error the writer raises — a duplicate `operation_id`, an actor that does not
+ * match the transaction's identity, a malformed batch — propagates and rolls the
+ * whole transaction back, business writes included. There is deliberately no
+ * `ON CONFLICT DO NOTHING` anywhere: an audit entry that was dropped to make a
+ * write succeed is not an audit trail (ADR-0014 D4).
+ *
+ * ## The actor is stamped from the transaction, not from the entry
+ *
+ * Every entry's `actorUserId` is overwritten with the identity this transaction runs
+ * as. That is what makes the writer's actor check a *structural* guarantee rather
+ * than a convention: the row's actor and the `request.jwt.claim.sub` the writer
+ * compares it against are then two readings of one value, so they cannot disagree.
+ * It also makes a repository call outside a request (an integration test, a job)
+ * record the correct actor instead of `null`, without the caller having to seed a
+ * request context it does not have.
+ */
+async function flushAudit(
+  tx: TransactionContext,
+  entries: readonly AuditEntry[],
+  actor: TransactionActor,
+): Promise<void> {
+  const actorUserId =
+    actor !== null && actor.kind === "user" ? actor.userId : null;
+  // Redaction is re-applied here, at the persistence boundary, not only in the
+  // builder: `redactAuditEntry` is idempotent, and running it again is what makes
+  // "no secret reaches `audit_logs`" a property of this function rather than a
+  // property of every call site's discipline.
+  const payload = JSON.stringify(
+    entries.map((entry) => redactAuditEntry({ ...entry, actorUserId })),
+  );
+
+  await tx.execute(sql`reset role`);
+  await tx.execute(sql`set local role ses_api`);
+  await tx.execute(sql`select public.write_audit_logs(${payload}::jsonb)`);
 }
 
 async function applyIdentity(

@@ -1,7 +1,7 @@
 /**
  * Conventional Commits, enforced per SAD §18.9.
  * Types: feat fix refactor perf test docs chore ci build revert
- * Scopes: expenses payments sync auth db ui api mobile split-engine ci
+ * Scopes: expenses payments sync auth audit invitations db ui api mobile split-engine ci
  */
 module.exports = {
   extends: ["@commitlint/config-conventional"],
@@ -30,6 +30,8 @@ module.exports = {
         "payments",
         "sync",
         "auth",
+        "audit",
+        "invitations",
         "db",
         "ui",
         "api",

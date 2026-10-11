@@ -24,9 +24,11 @@ import {
 } from "../../../common/authorization/membership-invalidation";
 import {
   UnitOfWork,
+  type AuditFlush,
   type TransactionActor,
   type TransactionContext,
 } from "../../../infrastructure/database/unit-of-work";
+import { AuditService } from "../../audit/audit.service";
 import {
   joinRequestFromRow,
   joinRequestRowListSchema,
@@ -78,6 +80,12 @@ export class MemberRepositoryPostgres implements MemberRepository {
      * behind a pending approval — so every write in this file names a cache scope.
      */
     private readonly invalidation: MembershipInvalidation,
+    /**
+     * T050's audit builder. The entry is handed to `UnitOfWork`'s seam rather than
+     * written here, so it commits or rolls back with the membership change itself
+     * (ADR-0014 D1).
+     */
+    private readonly audit: AuditService,
   ) {}
 
   // ── read ────────────────────────────────────────────────────────────────────
@@ -546,10 +554,14 @@ export class MemberRepositoryPostgres implements MemberRepository {
     role: MemberRole,
     actor: UserId,
   ): Promise<Member> {
+    // The pre-write state, read inside the same transaction as the write (T050).
+    let before: Record<string, unknown> | null = null;
+
     return this.run(
       actor,
       "write",
       async (tx) => {
+        before = await readAuditState(tx, id, societyId);
         const rows = await query_(
           tx,
           sql`
@@ -571,6 +583,23 @@ export class MemberRepositoryPostgres implements MemberRepository {
         return memberFromRow(row);
       },
       { societyId },
+      // The action names the *effect*, using the domain's own revoke target
+      // (`REVOKE_TARGET_ROLE === "resident"`) rather than inventing a second notion
+      // of "revoked": an assignment of `resident` is what revoking means.
+      (member) => [
+        this.audit.entry({
+          societyId: member.societyId,
+          category: "other",
+          action:
+            role === "resident"
+              ? "member.role_revoked"
+              : "member.role_assigned",
+          entityType: "member",
+          entityId: member.id,
+          before,
+          after: { role: roleToDatabase(role), status: member.status },
+        }),
+      ],
     );
   }
 
@@ -814,10 +843,13 @@ export class MemberRepositoryPostgres implements MemberRepository {
     societyId: SocietyId,
     actor: UserId,
   ): Promise<void> {
+    let before: Record<string, unknown> | null = null;
+
     await this.run(
       actor,
       "write",
       async (tx) => {
+        before = await readAuditState(tx, id, societyId);
         const rows = await query_(
           tx,
           sql`
@@ -837,6 +869,17 @@ export class MemberRepositoryPostgres implements MemberRepository {
         }
       },
       { societyId },
+      () => [
+        this.audit.entry({
+          societyId,
+          category: "other",
+          action: "member.removed",
+          entityType: "member",
+          entityId: id,
+          before,
+          after: { status: "removed" },
+        }),
+      ],
     );
   }
 
@@ -858,12 +901,13 @@ export class MemberRepositoryPostgres implements MemberRepository {
     context: "read" | "write",
     work: (tx: TransactionContext) => Promise<T>,
     cacheScope?: MembershipWriteScope,
+    audit?: AuditFlush<T>,
   ): Promise<T> {
     const identity: TransactionActor = { kind: "user", userId: actor };
 
     const perform = async (): Promise<T> => {
       try {
-        return await this.unitOfWork.transaction(identity, work);
+        return await this.unitOfWork.transaction(identity, work, audit);
       } catch (error: unknown) {
         // A `MemberError` thrown inside — the not-found and empty-patch branches — passes
         // through untouched: re-classifying it would replace a precise answer with a generic
@@ -897,6 +941,36 @@ export class MemberRepositoryPostgres implements MemberRepository {
  * column list, the same flat join, the same schema and the same `not_found` for a row RLS
  * hides — so a field added to one path cannot appear on the other.
  */
+/**
+ * The membership facts an audit entry's `before` snapshot records — role, status
+ * and occupancy, read inside the caller's transaction (T050).
+ *
+ * Deliberately not the whole row: an audit snapshot is the *decision-relevant*
+ * state, and copying every column would put a member's phone number and email into
+ * the log — which the redaction rule would then have to strip back out, leaving a
+ * snapshot that is neither complete nor minimal.
+ */
+async function readAuditState(
+  tx: TransactionContext,
+  id: MemberId,
+  societyId: SocietyId,
+): Promise<Record<string, unknown> | null> {
+  const rows = await query_(
+    tx,
+    sql`
+      select role::text as role,
+             status::text as status,
+             occupancy::text as occupancy,
+             is_primary
+        from public.members
+       where id = ${id}::uuid
+         and society_id = ${societyId}::uuid
+       limit 1
+    `,
+  );
+  return rows[0] ?? null;
+}
+
 async function readMember(
   tx: TransactionContext,
   id: MemberId,

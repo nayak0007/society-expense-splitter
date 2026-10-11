@@ -23,9 +23,11 @@ import type {
 
 import {
   UnitOfWork,
+  type AuditFlush,
   type TransactionActor,
   type TransactionContext,
 } from "../../../infrastructure/database/unit-of-work";
+import { AuditService } from "../../audit/audit.service";
 import {
   NO_WORKFLOW_STAMPS,
   enrichVersionMismatch,
@@ -83,7 +85,15 @@ import type { ExpenseWorkflowStamps } from "./expense.rows";
  */
 @Injectable()
 export class ExpenseRepositoryPostgres implements ExpenseRepository {
-  constructor(private readonly unitOfWork: UnitOfWork) {}
+  constructor(
+    private readonly unitOfWork: UnitOfWork,
+    /**
+     * T050's audit builder. The row is not written here — it is handed to
+     * `UnitOfWork`'s audit seam, so it commits or rolls back with the expense
+     * itself (ADR-0014 D1).
+     */
+    private readonly audit: AuditService,
+  ) {}
 
   /**
    * Insert one row — a draft, or a pending-approval expense the threshold promoted.
@@ -98,11 +108,14 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
     input: CreateExpenseRecordInput,
     actor: UserId,
   ): Promise<ExpenseRecord> {
-    return this.run(actor, "write", async (tx) => {
-      const { expense, fields } = input;
-      const rows = await runQuery(
-        tx,
-        sql`
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const { expense, fields } = input;
+        const rows = await runQuery(
+          tx,
+          sql`
           insert into public.expenses (
             society_id, category_id, title, description, amount_paise,
             expense_date, vendor_name, payment_source, paid_by_member_id,
@@ -128,9 +141,24 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
           )
           returning ${EXPENSE_DETAIL_COLUMNS}
         `,
-      );
-      return expenseFromDetailRow(parseSingleRow(rows, "created expense"));
-    });
+        );
+        return expenseFromDetailRow(parseSingleRow(rows, "created expense"));
+      },
+      // T050: one `expense.created` entry, from the row the database actually
+      // persisted — its database-minted id and trigger-bumped version, not what the
+      // caller hoped it wrote. `before` is null because the entity did not exist.
+      (record) => [
+        this.audit.entry({
+          societyId: record.societyId,
+          category: "financial",
+          action: "expense.created",
+          entityType: "expense",
+          entityId: record.id,
+          before: null,
+          after: expenseAuditSnapshot(record),
+        }),
+      ],
+    );
   }
 
   /** One expense of one society, `null` when the actor may not see it. */
@@ -169,11 +197,20 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
     input: Omit<UpdateExpenseRecordInput, "expectedVersion">,
     actor: UserId,
   ): Promise<ExpenseRecord> {
-    return this.run(actor, "write", async (tx) => {
-      const { expense, fields } = input;
-      const rows = await runQuery(
-        tx,
-        sql`
+    // The audit entry's `before` snapshot, captured inside the transaction. A
+    // closure variable rather than a second return value, because `update`'s port
+    // contract is the record itself.
+    let before: ExpenseRecord | null = null;
+
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        before = await this.readForAudit(tx, id, societyId);
+        const { expense, fields } = input;
+        const rows = await runQuery(
+          tx,
+          sql`
           update public.expenses
              set category_id = ${expense.categoryId}::uuid,
                  title = ${expense.title}::varchar,
@@ -194,12 +231,60 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
              and status in ('draft', 'pending_approval')
           returning ${EXPENSE_DETAIL_COLUMNS}
         `,
-      );
+        );
 
-      const [row] = parseRows(rows);
-      if (row !== undefined) return expenseFromDetailRow(row);
-      throw await this.classifyFailedUpdate(tx, id, societyId, expectedVersion);
-    });
+        const [row] = parseRows(rows);
+        if (row !== undefined) return expenseFromDetailRow(row);
+        throw await this.classifyFailedUpdate(
+          tx,
+          id,
+          societyId,
+          expectedVersion,
+        );
+      },
+      (record) => [
+        this.audit.entry({
+          societyId,
+          category: "financial",
+          action: "expense.updated",
+          entityType: "expense",
+          entityId: record.id,
+          before: before === null ? null : expenseAuditSnapshot(before),
+          after: expenseAuditSnapshot(record),
+        }),
+      ],
+    );
+  }
+
+  /**
+   * The row's state **inside the caller's transaction**, for an audit `before`
+   * snapshot (T050).
+   *
+   * A plain read, not a lock: the write itself carries
+   * `WHERE version = expectedVersion`, which is the concurrency control, so a row
+   * that changed between this read and the write makes the write match zero rows
+   * and answer `version_mismatch` — and then there is no audit entry at all,
+   * because the transaction has failed. Locking here would add a requirement
+   * `authenticated` cannot satisfy (`SELECT … FOR UPDATE` needs table-level
+   * `UPDATE`, which the expense grants deliberately withhold) for no correctness.
+   */
+  private async readForAudit(
+    tx: TransactionContext,
+    id: ExpenseId,
+    societyId: SocietyId,
+  ): Promise<ExpenseRecord | null> {
+    const rows = await runQuery(
+      tx,
+      sql`
+        select ${EXPENSE_DETAIL_COLUMNS}
+          from public.expenses
+         where id = ${id}::uuid
+           and society_id = ${societyId}::uuid
+         limit 1
+      `,
+    );
+    const [row] = parseRows(rows);
+    return row === undefined ? null : expenseFromDetailRow(row);
   }
 
   /** One page of the filtered list, newest first, with the next cursor. */
@@ -293,12 +378,35 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
     societyId: SocietyId,
     actor: UserId,
   ): Promise<void> {
-    await this.run(actor, "write", async (tx) => {
-      await runQuery(
-        tx,
-        sql`select public.expense_draft_delete(${id}::uuid, ${societyId}::uuid)`,
-      );
-    });
+    let before: ExpenseRecord | null = null;
+
+    await this.run(
+      actor,
+      "write",
+      async (tx) => {
+        // Read first, **inside the same transaction** as the definer call, so the
+        // `before` snapshot is the row the definer is about to remove. T050's
+        // "SQL definer operations are correctly represented": the definer owns every
+        // rule, and the audit entry describes its effect from the outside rather
+        // than re-implementing a decision.
+        before = await this.readForAudit(tx, id, societyId);
+        await runQuery(
+          tx,
+          sql`select public.expense_draft_delete(${id}::uuid, ${societyId}::uuid)`,
+        );
+      },
+      () => [
+        this.audit.entry({
+          societyId,
+          category: "financial",
+          action: "expense.deleted",
+          entityType: "expense",
+          entityId: id,
+          before: before === null ? null : expenseAuditSnapshot(before),
+          after: null,
+        }),
+      ],
+    );
   }
 
   /**
@@ -449,16 +557,46 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
     actor: UserId,
     context: "read" | "write",
     work: (tx: TransactionContext) => Promise<T>,
+    audit?: AuditFlush<T>,
   ): Promise<T> {
     const identity: TransactionActor = { kind: "user", userId: actor };
     try {
-      return await this.unitOfWork.transaction(identity, work);
+      return await this.unitOfWork.transaction(identity, work, audit);
     } catch (error: unknown) {
       throw isExpenseError(error)
         ? error
         : expenseErrorFromPostgres(error, context);
     }
   }
+}
+
+/**
+ * An expense's audit snapshot (T050) — the persisted facts an auditor reads, in a
+ * shape that survives redaction and a JSON round trip.
+ *
+ * Spelled out rather than passing the `ExpenseRecord`: `amount` is a `Money`
+ * whose `paise` lives on the prototype and would vanish into an empty object, and
+ * a snapshot is a *record of what was stored*, so it names the columns on purpose
+ * — adding a field to the record does not silently change what the audit trail
+ * claims happened. Sensitive keys are redacted centrally by
+ * `buildAuditEntry`; a vendor name or a description is deliberately kept, because
+ * an audit row that cannot say what changed is not evidence.
+ */
+function expenseAuditSnapshot(record: ExpenseRecord): Record<string, unknown> {
+  return {
+    title: record.title,
+    amountPaise: record.amount.paise.toString(),
+    status: record.status,
+    expenseDate: record.expenseDate,
+    categoryId: record.categoryId,
+    createdBy: record.createdBy,
+    vendorName: record.vendorName,
+    description: record.description,
+    splitStrategy: record.splitStrategy,
+    apartmentBasis: record.apartmentBasis,
+    version: record.version,
+    updatedAt: record.updatedAt,
+  };
 }
 
 /**
