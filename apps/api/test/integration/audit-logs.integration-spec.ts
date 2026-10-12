@@ -14,14 +14,23 @@ import {
   asUserId,
   paise,
   systemClock,
+  weight,
 } from "@ses/domain";
 import type {
+  ApartmentId,
+  ApartmentRepository,
   AuditEntry,
+  BuildingRepository,
   ExpenseCategoryId,
   ExpenseCategoryRepository,
   ExpenseDraftFields,
+  ExpenseId,
   ExpenseRepository,
+  ExpenseSplitRepository,
+  InvitationRepository,
+  MemberId,
   MemberRepository,
+  PublishExpenseAllocation,
   SocietyId,
   UserId,
 } from "@ses/domain";
@@ -32,11 +41,21 @@ import { buildAuditEntry } from "../../src/common/audit/audit-context";
 import { resolveMigrationsDir } from "../../src/infrastructure/database/migrations/runner";
 import type { TransactionContext } from "../../src/infrastructure/database/unit-of-work";
 import { EXPENSE_CATEGORY_REPOSITORY } from "../../src/modules/expenses/application/expense-category.tokens";
-import { EXPENSE_REPOSITORY } from "../../src/modules/expenses/application/expense.tokens";
+import {
+  EXPENSE_REPOSITORY,
+  EXPENSE_SPLIT_REPOSITORY,
+} from "../../src/modules/expenses/application/expense.tokens";
+import { INVITATION_REPOSITORY } from "../../src/modules/invitations/application/invitation.tokens";
 import { MEMBER_REPOSITORY } from "../../src/modules/members/application/member.tokens";
+import {
+  APARTMENT_REPOSITORY,
+  BUILDING_REPOSITORY,
+} from "../../src/modules/structure/application/structure.tokens";
 
 import { createLocalUser, resetData } from "../utils/integration-db";
 import {
+  insertApartment,
+  insertBuilding,
   insertMember,
   seedSociety,
   type SocietyFixture,
@@ -926,4 +945,539 @@ describe("the audit trail of the representative mutations", () => {
       ...overrides,
     };
   }
+});
+
+describe("the audit trail of the financial lifecycle", () => {
+  let fixture: SocietyFixture & { readonly categoryId: ExpenseCategoryId };
+  let splits: ExpenseSplitRepository;
+  let expenses: ExpenseRepository;
+
+  beforeAll(() => {
+    splits = harness.app.get<ExpenseSplitRepository>(EXPENSE_SPLIT_REPOSITORY);
+    expenses = harness.app.get<ExpenseRepository>(EXPENSE_REPOSITORY);
+  });
+
+  beforeEach(async () => {
+    const society = await seedSociety(
+      harness,
+      "Ledger Court",
+      "admin@ledger-audit.ses.test",
+    );
+    const categories = harness.app.get<ExpenseCategoryRepository>(
+      EXPENSE_CATEGORY_REPOSITORY,
+    );
+    const listed = await categories.listCategories(
+      society.societyId,
+      society.adminUserId,
+    );
+    const category = listed.find((entry) => entry.name === "Lift");
+    if (category === undefined) {
+      throw new Error('The seeded category "Lift" is missing.');
+    }
+    fixture = { ...society, categoryId: category.id };
+  });
+
+  /** A billable flat plus its owner, inserted as the owner. */
+  async function insertFlat(): Promise<{
+    readonly apartmentId: ApartmentId;
+    readonly memberId: MemberId;
+  }> {
+    const buildingId = await insertBuilding(
+      owner,
+      fixture.societyId,
+      "Block A",
+    );
+    const apartmentId = await insertApartment(
+      owner,
+      fixture.societyId,
+      buildingId,
+      "A-101",
+    );
+    const memberId = asMemberId(
+      await insertMember(owner, fixture.societyId, {
+        apartmentId,
+        occupancy: "owner_occupied",
+        isPrimary: true,
+        displayName: "Owner A-101",
+      }),
+    );
+    return { apartmentId, memberId };
+  }
+
+  /** An expense row in the requested lifecycle state, inserted as the owner. */
+  async function insertExpense(
+    status: "draft" | "pending_approval",
+    amountPaise: bigint,
+  ): Promise<ExpenseId> {
+    const [row] = await owner<{ id: string }[]>`
+      insert into public.expenses (
+        society_id, category_id, title, amount_paise, expense_date,
+        split_strategy, apartment_basis, status, created_by, version
+      )
+      values (
+        ${fixture.societyId}::uuid,
+        ${fixture.categoryId}::uuid,
+        'Ledger Bill',
+        ${amountPaise.toString()}::bigint,
+        '2026-09-30'::date,
+        'equal'::public.split_strategy,
+        null,
+        ${status}::public.expense_status,
+        ${fixture.adminMemberId}::uuid,
+        1
+      )
+      returning id
+    `;
+    return asExpenseId(row!.id);
+  }
+
+  function allocationFor(
+    flat: { readonly apartmentId: ApartmentId; readonly memberId: MemberId },
+    amountPaise: bigint,
+  ): PublishExpenseAllocation {
+    return {
+      memberId: flat.memberId,
+      apartmentId: flat.apartmentId,
+      amount: Money.fromPaise(paise(amountPaise)),
+      weight: weight(1),
+      percent: null,
+      assignedReason: null,
+      snapshot: { memberName: "Owner A-101", apartmentNumber: "A-101" },
+    };
+  }
+
+  let keyCounter = 0;
+  function nextKey(): string {
+    keyCounter += 1;
+    return `ledger-audit-key-${String(keyCounter)}`;
+  }
+
+  async function actions(): Promise<readonly string[]> {
+    const rows = await owner<{ action: string }[]>`
+      select action from public.audit_logs order by id
+    `;
+    return rows.map((row) => row.action);
+  }
+
+  async function rowFor(
+    action: string,
+  ): Promise<{ before: unknown; after: unknown }> {
+    const [row] = await owner<{ before: unknown; after: unknown }[]>`
+      select "before", "after" from public.audit_logs
+       where action = ${action} order by id limit 1
+    `;
+    if (row === undefined) throw new Error(`No audit row for ${action}.`);
+    return row;
+  }
+
+  it("records a publication with its pre- and post-publication state", async () => {
+    const flat = await insertFlat();
+    const expenseId = await insertExpense("draft", 450_000n);
+
+    await splits.publish(
+      expenseId,
+      fixture.societyId,
+      {
+        expectedVersion: 1,
+        idempotencyKey: nextKey(),
+        requestHash: "ledger-hash",
+        allocations: [allocationFor(flat, 450_000n)],
+      },
+      fixture.adminUserId,
+    );
+
+    expect(await actions()).toEqual(["expense.published"]);
+    const row = await rowFor("expense.published");
+    expect(row.before).toMatchObject({ status: "draft" });
+    expect(row.after).toMatchObject({ status: "published" });
+  });
+
+  it("writes no second row when the same publication key is replayed", async () => {
+    const flat = await insertFlat();
+    const expenseId = await insertExpense("draft", 450_000n);
+    const input = {
+      expectedVersion: 1,
+      idempotencyKey: nextKey(),
+      requestHash: "ledger-hash",
+      allocations: [allocationFor(flat, 450_000n)],
+    };
+
+    const first = await splits.publish(
+      expenseId,
+      fixture.societyId,
+      input,
+      fixture.adminUserId,
+    );
+    const replay = await splits.publish(
+      expenseId,
+      fixture.societyId,
+      input,
+      fixture.adminUserId,
+    );
+
+    expect(first.replayed).toBe(false);
+    expect(replay.replayed).toBe(true);
+    expect(await actions()).toEqual(["expense.published"]);
+  });
+
+  it("records a recalculation and a void as their own actions", async () => {
+    const flat = await insertFlat();
+    const expenseId = await insertExpense("draft", 450_000n);
+
+    const published = await splits.publish(
+      expenseId,
+      fixture.societyId,
+      {
+        expectedVersion: 1,
+        idempotencyKey: nextKey(),
+        requestHash: "ledger-hash",
+        allocations: [allocationFor(flat, 450_000n)],
+      },
+      fixture.adminUserId,
+    );
+
+    await splits.recalculate(
+      expenseId,
+      fixture.societyId,
+      {
+        expectedVersion: published.expense.version,
+        fields: { title: "Ledger Bill (revised)" },
+        allocations: [allocationFor(flat, 450_000n)],
+      },
+      fixture.adminUserId,
+    );
+
+    const [recalculated] = await owner<{ version: number }[]>`
+      select version from public.expenses where id = ${expenseId}::uuid
+    `;
+    await splits.voidExpense(
+      expenseId,
+      fixture.societyId,
+      {
+        expectedVersion: recalculated!.version,
+        reason: "Duplicate charge raised by mistake.",
+      },
+      fixture.adminUserId,
+    );
+
+    expect(await actions()).toEqual([
+      "expense.published",
+      "expense.recalculated",
+      "expense.voided",
+    ]);
+  });
+
+  it("records an approval and a rejection through the decision RPCs", async () => {
+    const approveId = await insertExpense("pending_approval", 1_500_000n);
+    await expenses.approve(
+      approveId,
+      fixture.societyId,
+      { expectedVersion: 1 },
+      fixture.adminUserId,
+    );
+
+    const rejectId = await insertExpense("pending_approval", 1_500_000n);
+    await expenses.reject(
+      rejectId,
+      fixture.societyId,
+      { expectedVersion: 1, reason: "Not approved in this cycle." },
+      fixture.adminUserId,
+    );
+
+    expect(await actions()).toEqual(["expense.approved", "expense.rejected"]);
+    expect((await rowFor("expense.rejected")).after).toMatchObject({
+      status: "draft",
+    });
+  });
+
+  it("records nothing when the business change is refused", async () => {
+    const flat = await insertFlat();
+    const expenseId = await insertExpense("draft", 450_000n);
+    await splits.publish(
+      expenseId,
+      fixture.societyId,
+      {
+        expectedVersion: 1,
+        idempotencyKey: nextKey(),
+        requestHash: "ledger-hash",
+        allocations: [allocationFor(flat, 450_000n)],
+      },
+      fixture.adminUserId,
+    );
+
+    // A second publish with a fresh key meets a terminal published row: a refusal
+    // that must leave no audit row behind.
+    await expect(
+      splits.publish(
+        expenseId,
+        fixture.societyId,
+        {
+          expectedVersion: 2,
+          idempotencyKey: nextKey(),
+          requestHash: "ledger-hash-2",
+          allocations: [allocationFor(flat, 450_000n)],
+        },
+        fixture.adminUserId,
+      ),
+    ).rejects.toThrow();
+    expect(await actions()).toEqual(["expense.published"]);
+  });
+});
+
+// ── Stage B: the remaining mandated mutations ───────────────────────────────
+
+describe("the audit trail of memberships, invitations and structure", () => {
+  let fixture: SocietyFixture;
+  let members: MemberRepository;
+  let invitations: InvitationRepository;
+  let buildings: BuildingRepository;
+  let apartments: ApartmentRepository;
+
+  beforeAll(() => {
+    members = harness.app.get<MemberRepository>(MEMBER_REPOSITORY);
+    invitations = harness.app.get<InvitationRepository>(INVITATION_REPOSITORY);
+    buildings = harness.app.get<BuildingRepository>(BUILDING_REPOSITORY);
+    apartments = harness.app.get<ApartmentRepository>(APARTMENT_REPOSITORY);
+  });
+
+  beforeEach(async () => {
+    fixture = await seedSociety(
+      harness,
+      "Stage B Court",
+      "admin@stage-b-audit.ses.test",
+    );
+  });
+
+  /**
+   * The admin's request context, for the same reason the block above needs one:
+   * the role and `requestId` on the row come from the server-side context.
+   */
+  function asAdminRequest<T>(work: () => Promise<T>): Promise<T> {
+    return RequestContext.run(
+      {
+        requestId: "req-stage-b-audit",
+        userId: fixture.adminUserId,
+        member: {
+          membershipId: fixture.adminMemberId,
+          societyId: fixture.societyId,
+          role: "admin",
+          status: "active",
+        },
+        ip: undefined,
+        userAgent: undefined,
+        audited: [],
+      },
+      work,
+    );
+  }
+
+  /** Every persisted action, in insertion order — the log's own order. */
+  async function actions(): Promise<readonly string[]> {
+    const rows = await owner<{ action: string }[]>`
+      select action from public.audit_logs order by id
+    `;
+    return rows.map((row) => row.action);
+  }
+
+  async function beforeOf(action: string): Promise<unknown> {
+    const [row] = await owner<{ before: unknown }[]>`
+      select "before" from public.audit_logs where action = ${action} order by id
+    `;
+    if (row === undefined) throw new Error(`No audit row for ${action}.`);
+    return row.before;
+  }
+
+  it("records a creation, an edit, a suspension and a reactivation as four actions", async () => {
+    const created = await asAdminRequest(() =>
+      members.create(
+        fixture.societyId,
+        { displayName: "Audited Resident", phone: "+919000000101" },
+        fixture.adminUserId,
+      ),
+    );
+
+    await asAdminRequest(() =>
+      members.update(
+        created.id,
+        fixture.societyId,
+        { displayName: "Audited Resident (renamed)" },
+        fixture.adminUserId,
+      ),
+    );
+
+    await asAdminRequest(() =>
+      members.setStatus(
+        created.id,
+        fixture.societyId,
+        "inactive",
+        fixture.adminUserId,
+      ),
+    );
+
+    await asAdminRequest(() =>
+      members.setStatus(
+        created.id,
+        fixture.societyId,
+        "active",
+        fixture.adminUserId,
+      ),
+    );
+
+    expect(await actions()).toEqual([
+      "member.created",
+      "member.updated",
+      "member.suspended",
+      "member.reactivated",
+    ]);
+    // The edit's `before` is the pre-edit state, read inside the same transaction.
+    expect(await beforeOf("member.updated")).toMatchObject({
+      status: "active",
+      role: "resident",
+    });
+  });
+
+  it("records a building and each of its flats as its own row", async () => {
+    const building = await asAdminRequest(() =>
+      buildings.create(
+        fixture.societyId,
+        { name: "Block Z" },
+        fixture.adminUserId,
+      ),
+    );
+
+    const apartment = await asAdminRequest(() =>
+      apartments.create(
+        building.id,
+        fixture.societyId,
+        { apartmentNumber: "Z-101" },
+        fixture.adminUserId,
+      ),
+    );
+
+    await asAdminRequest(() =>
+      apartments.update(
+        apartment.id,
+        fixture.societyId,
+        { floor: 3 },
+        fixture.adminUserId,
+      ),
+    );
+
+    await asAdminRequest(() =>
+      apartments.remove(apartment.id, fixture.societyId, fixture.adminUserId),
+    );
+
+    expect(await actions()).toEqual([
+      "building.created",
+      "apartment.created",
+      "apartment.updated",
+      "apartment.deleted",
+    ]);
+    expect(await beforeOf("apartment.updated")).toMatchObject({
+      apartmentNumber: "Z-101",
+      floor: null,
+    });
+  });
+
+  it("records each flat of a bulk create individually, and the batch shares one request id", async () => {
+    const building = await asAdminRequest(() =>
+      buildings.create(
+        fixture.societyId,
+        { name: "Block Y" },
+        fixture.adminUserId,
+      ),
+    );
+
+    await asAdminRequest(() =>
+      apartments.createMany(
+        building.id,
+        fixture.societyId,
+        [{ apartmentNumber: "Y-101" }, { apartmentNumber: "Y-102" }],
+        fixture.adminUserId,
+      ),
+    );
+
+    expect(await actions()).toEqual([
+      "building.created",
+      "apartment.created",
+      "apartment.created",
+    ]);
+
+    // `requestId` lives in `metadata` (T050 put the trusted request facts there
+    // rather than in three columns), so the batch identifier is that key.
+    const rows = await owner<
+      { request_id: string | null; entity_id: string }[]
+    >`
+      select metadata ->> 'requestId' as request_id,
+             entity_id::text as entity_id
+        from public.audit_logs
+       where action = 'apartment.created'
+       order by id
+    `;
+    expect(rows).toHaveLength(2);
+    // Distinct entities, one shared request id: that pair *is* the batch.
+    expect(new Set(rows.map((row) => row.entity_id)).size).toBe(2);
+    expect(rows.every((row) => row.request_id === "req-stage-b-audit")).toBe(
+      true,
+    );
+  });
+
+  it("records an invitation's creation and revocation, never its token digest", async () => {
+    const digest = "deadbeef".repeat(8);
+
+    const created = await asAdminRequest(() =>
+      invitations.create(
+        fixture.societyId,
+        {
+          channel: "email",
+          role: "resident",
+          email: "invitee@stage-b-audit.ses.test",
+          phone: null,
+          apartmentId: null,
+          tokenHash: digest,
+          expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+        },
+        fixture.adminUserId,
+      ),
+    );
+
+    await asAdminRequest(() =>
+      invitations.revoke(created.id, fixture.societyId, fixture.adminUserId),
+    );
+
+    expect(await actions()).toEqual([
+      "invitation.created",
+      "invitation.revoked",
+    ]);
+    expect(await beforeOf("invitation.revoked")).toMatchObject({
+      status: "sent",
+    });
+
+    // The credential is not in the log, in any field: the adapter never reads the
+    // digest back and the redaction rule would strip it if it did.
+    const payloads = await owner<{ payload: string }[]>`
+      select coalesce("before", 'null'::jsonb)::text
+             || coalesce("after", 'null'::jsonb)::text
+             || coalesce(metadata, 'null'::jsonb)::text as payload
+        from public.audit_logs
+    `;
+    expect(payloads.every((row) => !row.payload.includes(digest))).toBe(true);
+  });
+
+  it("records nothing when the mutation itself is refused", async () => {
+    // A member id nothing addresses: the update matches no row, answers
+    // `not_found`, and the transaction carries no audit entry with it.
+    await expect(
+      asAdminRequest(() =>
+        members.update(
+          asMemberId(randomUUID()),
+          fixture.societyId,
+          { displayName: "Ghost" },
+          fixture.adminUserId,
+        ),
+      ),
+    ).rejects.toThrow();
+
+    expect(await actions()).toEqual([]);
+  });
 });

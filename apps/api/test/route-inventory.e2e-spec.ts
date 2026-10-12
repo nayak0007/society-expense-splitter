@@ -2,11 +2,12 @@ import { METHOD_METADATA, PATH_METADATA } from "@nestjs/common/constants";
 import { DiscoveryService, MetadataScanner } from "@nestjs/core";
 import { RequestMethod } from "@nestjs/common";
 import type { NestFastifyApplication } from "@nestjs/platform-fastify";
-import { isAction, SCOPED_ACTIONS } from "@ses/domain";
+import { AUDIT_ACTIONS, isAction, SCOPED_ACTIONS } from "@ses/domain";
 import type { Action } from "@ses/domain";
 
 import { IS_PUBLIC_KEY } from "../src/common/decorators/public.decorator";
 import { REQUIRE_PERMISSION_KEY } from "../src/common/decorators/require-permission.decorator";
+import { AUDITED_ACTIONS } from "../src/modules/audit/audited.decorator";
 import { createTestApp } from "./utils/test-app";
 
 /**
@@ -55,7 +56,204 @@ type RouteEntry = {
   readonly path: string;
   readonly permission: string | undefined;
   readonly isPublic: boolean;
+  /** The actions this route declared with `@Audited()`, in declaration order. */
+  readonly audited: readonly string[];
 };
+
+/** The verbs that change state — the ones an audit declaration is judged on. */
+const WRITE_VERBS: ReadonlySet<string> = new Set([
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+]);
+
+/**
+ * Write-verb routes that must declare the audit actions they record — T050 Stage B.
+ *
+ * ## Why this shape, and not "the interceptor writes the row"
+ *
+ * An interceptor taps **after** the handler, so a write there could only be
+ * best-effort — the business transaction has already committed (ADR-0014 D7). The
+ * row is therefore written by the operation itself, through `UnitOfWork`'s audit
+ * seam. What a static test *can* pin is that no mutation route ships without
+ * saying which actions it records, and that the actions it names are the ones the
+ * manifest expects — so a new route, or a route whose integration is dropped,
+ * fails here rather than silently producing an empty log.
+ *
+ * The durable-row half of the claim is the integration suite's
+ * (`test/integration/audit-logs.integration-spec.ts`), which asserts the persisted
+ * rows in real SQL. This file asserts the *declaration*, which is the half a unit
+ * test can see.
+ */
+const MANDATED_AUDIT: ReadonlyMap<string, readonly string[]> = new Map([
+  // ── expenses: the financial lifecycle (Stage B group 1) ──────────────────
+  ["ExpensesController POST /expenses", ["expense.created"]],
+  // One route, two actions: a PATCH of a draft is an edit, and of a published
+  // row is a recalculation (T068).
+  [
+    "ExpensesController PATCH /expenses/:expenseId",
+    ["expense.updated", "expense.recalculated"],
+  ],
+  ["ExpensesController DELETE /expenses/:expenseId", ["expense.deleted"]],
+  [
+    "ExpensesController POST /expenses/:expenseId/publish",
+    ["expense.published"],
+  ],
+  ["ExpensesController POST /expenses/:expenseId/void", ["expense.voided"]],
+  [
+    "ExpensesController POST /expenses/:expenseId/approve",
+    ["expense.approved"],
+  ],
+  ["ExpensesController POST /expenses/:expenseId/reject", ["expense.rejected"]],
+
+  // ── members (Stage B group 2) ───────────────────────────────────────────
+  ["MembersController POST /members", ["member.created"]],
+  ["MembersController POST /members/import", ["member.created"]],
+  [
+    "MembersController POST /members/join-requests/:memberId/approve",
+    ["member.join_approved"],
+  ],
+  [
+    "MembersController POST /members/join-requests/:memberId/reject",
+    ["member.join_rejected"],
+  ],
+  ["MembersController PATCH /members/:memberId", ["member.updated"]],
+  ["MembersController POST /members/:memberId/suspend", ["member.suspended"]],
+  [
+    "MembersController POST /members/:memberId/reactivate",
+    ["member.reactivated"],
+  ],
+  ["MembersController PATCH /members/:memberId/role", ["member.role_assigned"]],
+  ["MembersController DELETE /members/:memberId/role", ["member.role_revoked"]],
+  ["MembersController DELETE /members/:memberId", ["member.removed"]],
+
+  // ── invitations (Stage B group 3) ───────────────────────────────────────
+  ["InvitationsController POST /invitations", ["invitation.created"]],
+  [
+    "InvitationsController POST /invitations/:invitationId/revoke",
+    ["invitation.revoked"],
+  ],
+  // The acceptance RPC clears the transaction's identity; `UnitOfWork` re-establishes
+  // the actor for the audit phase, so the row is written as the accepting user and
+  // keyed to the membership the function produced (ADR-0014 D5/D10).
+  [
+    "InvitationsController POST /invitations/accept/:token",
+    ["invitation.accepted"],
+  ],
+
+  // ── structure (Stage B group 4a) ────────────────────────────────────────
+  ["BuildingsController POST /buildings", ["building.created"]],
+  ["BuildingsController PATCH /buildings/:buildingId", ["building.updated"]],
+  ["BuildingsController DELETE /buildings/:buildingId", ["building.deleted"]],
+  [
+    "BuildingApartmentsController POST /buildings/:buildingId/apartments",
+    ["apartment.created"],
+  ],
+  [
+    "BuildingApartmentsController POST /buildings/:buildingId/apartments/generate",
+    ["apartment.created"],
+  ],
+  [
+    "BuildingApartmentsController POST /buildings/:buildingId/apartments/bulk",
+    ["apartment.created"],
+  ],
+  [
+    "ApartmentsController PATCH /apartments/:apartmentId",
+    ["apartment.updated"],
+  ],
+  [
+    "ApartmentsController DELETE /apartments/:apartmentId",
+    ["apartment.deleted"],
+  ],
+]);
+
+/**
+ * Write-verb routes that record no audit row **yet**, each with the reason.
+ *
+ * Two different reasons live here, and keeping them distinguishable is the point:
+ *
+ *  - **not a mutation** — the route only computes or validates (`preview-split`,
+ *    `import/preview`), so there is no business change for an audit row to sit
+ *    beside;
+ *  - **Stage B coverage still outstanding** — the module's adapters have not been
+ *    integrated yet. These are the remaining groups named by T050's own status
+ *    block, and this list is the machine-readable form of that gap: the entry
+ *    disappears in the same change that wires the module up.
+ */
+const AUDIT_DEFERRED: ReadonlyMap<string, string> = new Map([
+  // ── not mutations ───────────────────────────────────────────────────────
+  [
+    "ExpensesController POST /expenses/preview-split",
+    "Computes a preview from the persisted row and writes nothing (T064).",
+  ],
+  [
+    "MembersController POST /members/import/preview",
+    "Validates a CSV and reports per row; membership state is untouched (T048).",
+  ],
+
+  // ── Stage B coverage outstanding ────────────────────────────────────────
+  [
+    "ExpensesController POST /expenses/:expenseId/comments",
+    "remaining Stage B group 5 (expense sub-resources)",
+  ],
+  [
+    "ExpensesController DELETE /expenses/:expenseId/comments/:commentId",
+    "remaining Stage B group 5 (expense sub-resources)",
+  ],
+  [
+    "ExpensesController PUT /expenses/:expenseId/gst",
+    "remaining Stage B group 5 (expense sub-resources)",
+  ],
+  [
+    "ExpenseCategoriesController POST /expense-categories",
+    "remaining Stage B group 5 (expense sub-resources)",
+  ],
+  [
+    "ExpenseCategoriesController PATCH /expense-categories/:categoryId",
+    "remaining Stage B group 5 (expense sub-resources)",
+  ],
+  [
+    "ExpenseCategoriesController DELETE /expense-categories/:categoryId",
+    "remaining Stage B group 5 (expense sub-resources)",
+  ],
+  [
+    "AttachmentsController POST /expenses/:expenseId/attachments",
+    "remaining Stage B group 5 (attachments)",
+  ],
+  [
+    "AttachmentsController POST /attachments/:attachmentId/complete",
+    "remaining Stage B group 5 (attachments)",
+  ],
+  [
+    "AttachmentsController DELETE /attachments/:attachmentId",
+    "remaining Stage B group 5 (attachments)",
+  ],
+  [
+    "SocietiesController POST /societies",
+    "remaining Stage B group 4b (society lifecycle)",
+  ],
+  [
+    "SocietiesController POST /societies/join",
+    "remaining Stage B group 4b (society lifecycle)",
+  ],
+  [
+    "SocietiesController PATCH /societies/:societyId",
+    "remaining Stage B group 4b (society lifecycle)",
+  ],
+  [
+    "SocietiesController POST /societies/:societyId/join-code",
+    "remaining Stage B group 4b (society lifecycle)",
+  ],
+  [
+    "SocietiesController POST /societies/:societyId/leave",
+    "remaining Stage B group 4b (society lifecycle)",
+  ],
+  [
+    "SocietiesController DELETE /societies/:societyId",
+    "remaining Stage B group 4b (society lifecycle)",
+  ],
+]);
 
 /**
  * Routes that are deliberately **not** governed by a declared permission.
@@ -241,11 +439,19 @@ async function collectRoutes(
         permission,
         isPublic:
           controllerIsPublic || Reflect.getMetadata(IS_PUBLIC_KEY, fn) === true,
+        audited: auditedActions(Reflect.getMetadata(AUDITED_ACTIONS, target)),
       });
     }
   }
 
   return entries;
+}
+
+/** `@Audited()`'s metadata, narrowed — a non-array or a non-string is not a value. */
+function auditedActions(raw: unknown): readonly string[] {
+  return Array.isArray(raw)
+    ? raw.filter((action): action is string => typeof action === "string")
+    : [];
 }
 
 describe("route inventory", () => {
@@ -317,6 +523,64 @@ describe("route inventory", () => {
       .map((route) => `${keyOf(route)} → ${String(route.permission)}`);
 
     expect(unnarrowed).toEqual([]);
+  });
+
+  it("declares an audit action on every mutation route it has integrated", () => {
+    // The Stage B enforcement T050 asks for: a write route that records nothing
+    // and is not a documented deferral fails here. A route that declares actions
+    // but is missing from the manifest also fails, so the manifest cannot silently
+    // fall behind the controllers.
+    const undeclared = routes
+      .filter((route) => WRITE_VERBS.has(route.method))
+      .filter((route) => !AUDIT_DEFERRED.has(keyOf(route)))
+      .filter(
+        (route) =>
+          route.audited.length === 0 || !MANDATED_AUDIT.has(keyOf(route)),
+      )
+      .map(keyOf);
+
+    expect(undeclared).toEqual([]);
+  });
+
+  it("declares exactly the actions the manifest expects", () => {
+    const mismatched = [...MANDATED_AUDIT].flatMap(([key, expected]) => {
+      const route = routes.find((candidate) => keyOf(candidate) === key);
+      if (route === undefined) {
+        return [`${key} → no such route`];
+      }
+      const declared = [...route.audited].sort().join(", ");
+      const wanted = [...expected].sort().join(", ");
+      return declared === wanted
+        ? []
+        : [`${key} → declares ${declared || "nothing"}, expected ${wanted}`];
+    });
+
+    expect(mismatched).toEqual([]);
+  });
+
+  it("declares no audit action the domain vocabulary does not define", () => {
+    // The union in `@ses/domain` is the developer-facing contract and the database
+    // only checks the shape, so a name outside the union would persist happily and
+    // be unfindable.
+    const known = new Set<string>(AUDIT_ACTIONS);
+    const unknown = routes.flatMap((route) =>
+      route.audited
+        .filter((action) => !known.has(action))
+        .map((action) => `${keyOf(route)} → ${action}`),
+    );
+
+    expect(unknown).toEqual([]);
+  });
+
+  it("keeps the deferred list free of stale entries", () => {
+    // Same reasoning as the permission exemption list: an entry for a route that
+    // no longer exists would mask the next route that reuses its address.
+    const present = new Set(
+      routes.filter((route) => WRITE_VERBS.has(route.method)).map(keyOf),
+    );
+    expect(
+      [...AUDIT_DEFERRED.keys()].filter((key) => !present.has(key)),
+    ).toEqual([]);
   });
 
   it("mounts no participant-resolution route — T063's resolver is internal", () => {

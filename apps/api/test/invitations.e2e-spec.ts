@@ -567,6 +567,37 @@ describe("POST /v1/invitations/accept/:token", () => {
     expect(accepted.body.data.societyId).toBe(SOCIETY_A);
   });
 
+  it("takes the actor from the verified token, ignoring an actor named in the body", async () => {
+    const bodyToken = "canary-token-5-xxxxxxxxxxxxxxxxxxxxxxxx";
+    invitations.seedAcceptance(digest(bodyToken), {
+      societyId: SOCIETY_A,
+      memberId: asMemberId(randomUUID()),
+      role: "resident",
+      apartmentId: null,
+      linkedShadow: false,
+    });
+
+    // The route has no `@Body()` and its actor is `requireActor(context)`. A body
+    // that names an actor must not authorise an unverified caller...
+    const anonymous = await call(
+      "post",
+      `/v1/invitations/accept/${bodyToken}`,
+      {
+        societyId: null,
+        body: { actorUserId: INVITEE, userId: INVITEE, sub: INVITEE },
+      },
+    );
+    expect(anonymous.status).toBe(401);
+
+    // ...and a verified caller is accepted as themselves, body or no body.
+    const accepted = await call("post", `/v1/invitations/accept/${bodyToken}`, {
+      userId: INVITEE,
+      societyId: null,
+      body: { actorUserId: ADMIN, userId: ADMIN, sub: ADMIN },
+    });
+    expect(accepted.status).toBe(200);
+  });
+
   it("passes the database's refusal through with its own code", async () => {
     const expired = "canary-token-3-xxxxxxxxxxxxxxxxxxxxxxxx";
     invitations.seedAcceptance(

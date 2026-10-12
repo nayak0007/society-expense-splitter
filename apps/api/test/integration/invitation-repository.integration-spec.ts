@@ -1,6 +1,9 @@
+import { sql } from "drizzle-orm";
 import type { ApartmentId, InvitationRepository, UserId } from "@ses/domain";
 import type postgres from "postgres";
 
+import { buildAuditEntry } from "../../src/common/audit/audit-context";
+import type { TransactionContext } from "../../src/infrastructure/database/unit-of-work";
 import { INVITATION_REPOSITORY } from "../../src/modules/invitations/application/invitation.tokens";
 
 import { createLocalUser, resetData } from "../utils/integration-db";
@@ -31,10 +34,12 @@ import {
 let harness: IntegrationHarness;
 let owner: postgres.Sql;
 let invitations: InvitationRepository;
+let unitOfWork: IntegrationHarness["unitOfWork"];
 
 beforeAll(async () => {
   harness = await startIntegrationHarness();
   owner = harness.owner;
+  unitOfWork = harness.unitOfWork;
   invitations = harness.app.get<InvitationRepository>(INVITATION_REPOSITORY);
 }, 60_000);
 
@@ -91,6 +96,27 @@ async function rejection(
     return error as { code?: unknown; details?: unknown };
   }
   throw new Error("Expected the call to reject, but it resolved.");
+}
+
+/** The identity a transaction is running as, read from inside it. */
+interface Identity {
+  readonly uid: string | null;
+  readonly sub: string | null;
+  readonly claims: string | null;
+}
+
+async function identity(tx: TransactionContext): Promise<Identity> {
+  const rows = (await tx.execute(sql`
+    select (select auth.uid())::text as uid,
+           nullif(current_setting('request.jwt.claim.sub', true), '') as sub,
+           nullif(current_setting('request.jwt.claims', true), '') as claims
+  `)) as unknown as readonly Record<string, string | null>[];
+  const row = rows[0] ?? {};
+  return {
+    uid: row["uid"] ?? null,
+    sub: row["sub"] ?? null,
+    claims: row["claims"] ?? null,
+  };
 }
 
 describe("InvitationRepositoryPostgres", () => {
@@ -712,6 +738,263 @@ describe("InvitationRepositoryPostgres", () => {
         invitations.accept(tokenHash(21), removedUserId),
       );
       expect(error.code).toBe("invitation_membership_removed");
+    });
+
+    /**
+     * The identity the acceptance transaction runs as — T050 Stage B, ADR-0014.
+     *
+     * `public.invitation_accept()` blanks `request.jwt.claim.sub` and
+     * `request.jwt.claims` (transaction-locally) so that its own membership write is
+     * not read as a self-service change by `chk_member_self_change()`. The clear is
+     * deliberate and is *not* undone inside the function; what the seam guarantees is
+     * that the actor is re-established **before the audit flush**, so the writer's
+     * actor check is satisfied rather than refused (ADR-0014 D5).
+     */
+    it("clears the transaction's identity while it writes the membership", async () => {
+      const inviteeUserId = (await createLocalUser(
+        owner,
+        "identity@invite.ses.test",
+        "Identity",
+      )) as UserId;
+      await invitations.create(
+        fixture.societyId,
+        {
+          channel: "link",
+          role: "resident",
+          email: null,
+          phone: null,
+          apartmentId: null,
+          tokenHash: tokenHash(22),
+          expiresAt: inDays(7),
+        },
+        fixture.adminUserId,
+      );
+
+      const timeline = await unitOfWork.transaction(
+        { kind: "user", userId: inviteeUserId },
+        async (tx) => {
+          const before = await identity(tx);
+          await tx.execute(
+            sql`select public.invitation_accept(${tokenHash(22)}, ${inviteeUserId}::uuid) as accepted`,
+          );
+          const after = await identity(tx);
+          return { before, after };
+        },
+      );
+
+      expect(timeline.before.uid).toBe(inviteeUserId);
+      expect(timeline.before.sub).toBe(inviteeUserId);
+      expect(JSON.parse(timeline.before.claims ?? "null")).toEqual({
+        sub: inviteeUserId,
+        role: "authenticated",
+      });
+      // The RPC's clear is real and transaction-local: inside `work`, after it
+      // returns, the transaction is nobody. That is exactly why the seam — not the
+      // call site — has to put the actor back (asserted below, and end to end in
+      // "records the acceptance as an audit row, keyed to the membership …").
+      expect(timeline.after).toEqual({ uid: null, sub: null, claims: null });
+    });
+
+    /**
+     * The seam that closes the blocker, at its narrowest: a transaction whose `work`
+     * clears the identity exactly as `invitation_accept()` does still records its
+     * audit batch, because `UnitOfWork` re-establishes the actor before the flush.
+     * Without that re-application the writer would compare the entry's actor against
+     * a blank `request.jwt.claim.sub` and raise `AUDIT_ACTOR_MISMATCH`.
+     */
+    it("re-establishes the actor before the audit flush, so a cleared transaction still records", async () => {
+      const actor = (await createLocalUser(
+        owner,
+        "seam@invite.ses.test",
+        "Seam",
+      )) as UserId;
+      const entry = buildAuditEntry({
+        societyId: fixture.societyId,
+        category: "other",
+        action: "society.updated",
+        entityType: "society",
+        entityId: fixture.societyId,
+        before: null,
+        after: { name: "Seam Court" },
+      });
+
+      await unitOfWork.transaction(
+        { kind: "user", userId: actor },
+        async (tx) => {
+          await tx.execute(
+            sql`select set_config('request.jwt.claim.sub', '', true)`,
+          );
+          await tx.execute(
+            sql`select set_config('request.jwt.claims', '', true)`,
+          );
+        },
+        () => [entry],
+      );
+
+      const rows = await owner<{ actor_user_id: string | null }[]>`
+        select actor_user_id from public.audit_logs order by id
+      `;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.actor_user_id).toBe(actor);
+    });
+
+    /**
+     * A nested transaction cannot change what the flush records. The ordering is
+     * pinned by the unit suite; this proves the property against real PostgreSQL
+     * savepoints. A savepoint that clears the identity — the shape a nested
+     * transaction or an RPC takes — is still overridden by the outer transaction's
+     * restoration, and the row carries the outer actor.
+     */
+    it("records the outer actor even when a nested savepoint clears the identity", async () => {
+      const actor = (await createLocalUser(
+        owner,
+        "nested@invite.ses.test",
+        "Nested",
+      )) as UserId;
+      const entry = buildAuditEntry({
+        societyId: fixture.societyId,
+        category: "other",
+        action: "society.updated",
+        entityType: "society",
+        entityId: fixture.societyId,
+        before: null,
+        after: { name: "Nested Court" },
+      });
+
+      await unitOfWork.transaction(
+        { kind: "user", userId: actor },
+        async (tx) => {
+          await tx.transaction(async (inner) => {
+            await inner.execute(
+              sql`select set_config('request.jwt.claim.sub', '', true)`,
+            );
+            await inner.execute(
+              sql`select set_config('request.jwt.claims', '', true)`,
+            );
+          });
+        },
+        () => [entry],
+      );
+
+      const rows = await owner<{ actor_user_id: string | null }[]>`
+        select actor_user_id from public.audit_logs order by id
+      `;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.actor_user_id).toBe(actor);
+    });
+
+    it("records the acceptance as an audit row, keyed to the membership it produced", async () => {
+      const inviteeUserId = (await createLocalUser(
+        owner,
+        "audited@invite.ses.test",
+        "Audited",
+      )) as UserId;
+      await invitations.create(
+        fixture.societyId,
+        {
+          channel: "link",
+          role: "resident",
+          email: null,
+          phone: null,
+          apartmentId: fixture.flat101,
+          tokenHash: tokenHash(23),
+          expiresAt: inDays(7),
+        },
+        fixture.adminUserId,
+      );
+
+      const accepted = await invitations.accept(tokenHash(23), inviteeUserId);
+
+      const rows = await owner<
+        {
+          action: string;
+          actor_user_id: string | null;
+          category: string;
+          entity_type: string;
+          entity_id: string | null;
+          before: unknown;
+          after: Record<string, unknown> | null;
+          metadata: Record<string, unknown> | null;
+        }[]
+      >`
+        select action, actor_user_id, category, entity_type, entity_id,
+               "before", "after", metadata
+          from public.audit_logs
+         where action = 'invitation.accepted'
+         order by id
+      `;
+
+      // Exactly one acceptance row, in the same transaction as the membership it
+      // describes. (The `create` above wrote its own `invitation.created` row in its
+      // own transaction; the filter is what makes this assertion about acceptance.)
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        action: "invitation.accepted",
+        actor_user_id: inviteeUserId,
+        category: "other",
+        entity_type: "member",
+        entity_id: accepted.memberId,
+        before: null,
+        after: {
+          role: "resident",
+          apartmentId: fixture.flat101,
+          linkedShadow: false,
+        },
+      });
+      // The digest is the credential's fingerprint, and the invitation itself is
+      // unaddressable from this call site: neither may appear in any payload.
+      expect(JSON.stringify(rows[0])).not.toContain(tokenHash(23));
+      expect(rows[0]?.metadata).not.toHaveProperty("tokenHash");
+    });
+
+    it("commits the acceptance and its audit row together, or neither", async () => {
+      const inviteeUserId = (await createLocalUser(
+        owner,
+        "locked@invite.ses.test",
+        "Locked",
+      )) as UserId;
+      await invitations.create(
+        fixture.societyId,
+        {
+          channel: "link",
+          role: "resident",
+          email: null,
+          phone: null,
+          apartmentId: null,
+          tokenHash: tokenHash(24),
+          expiresAt: inDays(7),
+        },
+        fixture.adminUserId,
+      );
+
+      // Make the *audit* write the statement that cannot happen: without the writer's
+      // EXECUTE grant the flush fails, and the acceptance must go with it (ADR-0014
+      // D1's fail-closed direction). Restored in `finally` so no later test inherits
+      // the lockout.
+      await owner`revoke execute on function public.write_audit_logs(jsonb) from ses_api`;
+      try {
+        // `rejection` throws if the promise resolves, which is the other half of
+        // the assertion: an acceptance that survived a failed audit write would be
+        // exactly the inversion ADR-0014 D1 forbids.
+        await rejection(invitations.accept(tokenHash(24), inviteeUserId));
+      } finally {
+        await owner`grant execute on function public.write_audit_logs(jsonb) to ses_api`;
+      }
+
+      // Rolled back together: no membership, no audit row, and the invitation is
+      // still exactly where it was.
+      const members = await owner<
+        { id: string }[]
+      >`select id from public.members where user_id = ${inviteeUserId}::uuid`;
+      expect(members).toHaveLength(0);
+      const audits = await owner<{ id: string }[]>`
+        select id from public.audit_logs where action = 'invitation.accepted'
+      `;
+      expect(audits).toHaveLength(0);
+      const [invitation] = await owner<{ status: string }[]>`
+        select status from public.invitations where token_hash = ${tokenHash(24)}
+      `;
+      expect(invitation?.status).toBe("sent");
     });
   });
 });
