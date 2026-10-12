@@ -15,9 +15,11 @@ import { z } from "zod";
 
 import {
   UnitOfWork,
+  type AuditFlush,
   type TransactionActor,
   type TransactionContext,
 } from "../../../infrastructure/database/unit-of-work";
+import { AuditService } from "../../audit/audit.service";
 import {
   apartmentErrorFromPostgres,
   apartmentFromRow,
@@ -62,7 +64,13 @@ import { unexpectedShapeError } from "./building.rows";
  */
 @Injectable()
 export class ApartmentRepositoryPostgres implements ApartmentRepository {
-  constructor(private readonly unitOfWork: UnitOfWork) {}
+  constructor(
+    private readonly unitOfWork: UnitOfWork,
+    // T050: builds the audit rows the writer persists (ADR-0014). The rows are not
+    // written here — they are handed to `UnitOfWork`'s audit seam, so they commit
+    // or roll back with the structure change they describe.
+    private readonly audit: AuditService,
+  ) {}
 
   // ── read ────────────────────────────────────────────────────────────────────
 
@@ -170,19 +178,35 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
     input: CreateApartmentInput,
     actor: UserId,
   ): Promise<Apartment> {
-    return this.run(actor, "write", async (tx) => {
-      const { columns, values } = insertParts(input, societyId, buildingId);
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const { columns, values } = insertParts(input, societyId, buildingId);
 
-      const rows = await query(
-        tx,
-        sql`
+        const rows = await query(
+          tx,
+          sql`
           insert into public.apartments (${sql.join(columns, sql`, `)})
           values (${sql.join(values, sql`, `)})
           returning ${APARTMENT_COLUMNS}
         `,
-      );
-      return apartmentFromRow(parseSingleRow(rows, "created flat"));
-    });
+        );
+        return apartmentFromRow(parseSingleRow(rows, "created flat"));
+      },
+      // T050: a birth has no `before` — the flat did not exist.
+      (apartment) => [
+        this.audit.entry({
+          societyId: apartment.societyId,
+          category: "other",
+          action: "apartment.created",
+          entityType: "apartment",
+          entityId: apartment.id,
+          before: null,
+          after: apartmentAuditSnapshot(apartment),
+        }),
+      ],
+    );
   }
 
   /**
@@ -201,86 +225,95 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
     input: UpdateApartmentInput,
     actor: UserId,
   ): Promise<Apartment> {
-    return this.run(actor, "write", async (tx) => {
-      const assignments: SQL[] = [];
+    // The pre-write state, read inside the transaction that changes it (T050).
+    let before: Record<string, unknown> | null = null;
 
-      const set = (column: string, value: SQL): void => {
-        assignments.push(sql`${sql.raw(column)} = ${value}`);
-      };
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        before = await readApartmentAuditState(tx, id, societyId);
+        const assignments: SQL[] = [];
 
-      if (input.apartmentNumber !== undefined) {
-        set("apartment_number", sql`${input.apartmentNumber}::varchar`);
-      }
-      if (input.wingId !== undefined) {
-        set(
-          "wing_id",
-          input.wingId === null ? sql`null::uuid` : sql`${input.wingId}::uuid`,
-        );
-      }
-      if (input.floor !== undefined) {
-        set(
-          "floor",
-          input.floor === null
-            ? sql`null::smallint`
-            : sql`${input.floor}::smallint`,
-        );
-      }
-      if (input.bhk !== undefined) {
-        set(
-          "bhk",
-          input.bhk === null
-            ? sql`null::numeric(3,1)`
-            : sql`${input.bhk}::numeric(3,1)`,
-        );
-      }
-      if (input.carpetAreaSqft !== undefined) {
-        set(
-          "carpet_area_sqft",
-          input.carpetAreaSqft === null
-            ? sql`null::numeric(8,2)`
-            : sql`${input.carpetAreaSqft}::numeric(8,2)`,
-        );
-      }
-      if (input.builtupAreaSqft !== undefined) {
-        set(
-          "builtup_area_sqft",
-          input.builtupAreaSqft === null
-            ? sql`null::numeric(8,2)`
-            : sql`${input.builtupAreaSqft}::numeric(8,2)`,
-        );
-      }
-      if (input.parkingSlots !== undefined) {
-        set("parking_slots", sql`${input.parkingSlots}::smallint`);
-      }
-      if (input.shareUnits !== undefined) {
-        set("share_units", sql`${input.shareUnits}::numeric(8,3)`);
-      }
-      if (input.occupancyStatus !== undefined) {
-        set(
-          "occupancy_status",
-          sql`${input.occupancyStatus}::public.occupancy_status`,
-        );
-      }
-      if (input.isCommercial !== undefined) {
-        set("is_commercial", sql`${input.isCommercial}::boolean`);
-      }
-      if (input.isBillable !== undefined) {
-        set("is_billable", sql`${input.isBillable}::boolean`);
-      }
+        const set = (column: string, value: SQL): void => {
+          assignments.push(sql`${sql.raw(column)} = ${value}`);
+        };
 
-      // The use case rejects an empty patch, and so does the contract at the edge.
-      // Reaching here with nothing would mean an `UPDATE` with an empty `SET`,
-      // which is not valid SQL — so it is reported as the caller mistake it is
-      // rather than surfacing as a syntax error the classifier calls `unknown`.
-      if (assignments.length === 0) {
-        throw new StructureError("validation", "Nothing to update.", {
-          field: "apartmentNumber",
-        });
-      }
+        if (input.apartmentNumber !== undefined) {
+          set("apartment_number", sql`${input.apartmentNumber}::varchar`);
+        }
+        if (input.wingId !== undefined) {
+          set(
+            "wing_id",
+            input.wingId === null
+              ? sql`null::uuid`
+              : sql`${input.wingId}::uuid`,
+          );
+        }
+        if (input.floor !== undefined) {
+          set(
+            "floor",
+            input.floor === null
+              ? sql`null::smallint`
+              : sql`${input.floor}::smallint`,
+          );
+        }
+        if (input.bhk !== undefined) {
+          set(
+            "bhk",
+            input.bhk === null
+              ? sql`null::numeric(3,1)`
+              : sql`${input.bhk}::numeric(3,1)`,
+          );
+        }
+        if (input.carpetAreaSqft !== undefined) {
+          set(
+            "carpet_area_sqft",
+            input.carpetAreaSqft === null
+              ? sql`null::numeric(8,2)`
+              : sql`${input.carpetAreaSqft}::numeric(8,2)`,
+          );
+        }
+        if (input.builtupAreaSqft !== undefined) {
+          set(
+            "builtup_area_sqft",
+            input.builtupAreaSqft === null
+              ? sql`null::numeric(8,2)`
+              : sql`${input.builtupAreaSqft}::numeric(8,2)`,
+          );
+        }
+        if (input.parkingSlots !== undefined) {
+          set("parking_slots", sql`${input.parkingSlots}::smallint`);
+        }
+        if (input.shareUnits !== undefined) {
+          set("share_units", sql`${input.shareUnits}::numeric(8,3)`);
+        }
+        if (input.occupancyStatus !== undefined) {
+          set(
+            "occupancy_status",
+            sql`${input.occupancyStatus}::public.occupancy_status`,
+          );
+        }
+        if (input.isCommercial !== undefined) {
+          set("is_commercial", sql`${input.isCommercial}::boolean`);
+        }
+        if (input.isBillable !== undefined) {
+          set("is_billable", sql`${input.isBillable}::boolean`);
+        }
 
-      const rows = await query(
-        tx,
-        sql`
+        // The use case rejects an empty patch, and so does the contract at the edge.
+        // Reaching here with nothing would mean an `UPDATE` with an empty `SET`,
+        // which is not valid SQL — so it is reported as the caller mistake it is
+        // rather than surfacing as a syntax error the classifier calls `unknown`.
+        if (assignments.length === 0) {
+          throw new StructureError("validation", "Nothing to update.", {
+            field: "apartmentNumber",
+          });
+        }
+
+        const rows = await query(
+          tx,
+          sql`
           update public.apartments
              set ${sql.join(assignments, sql`, `)}
            where id = ${id}::uuid
@@ -288,22 +321,34 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
              and deleted_at is null
           returning ${APARTMENT_COLUMNS}
         `,
-      );
-
-      const [row] = parseRows(rows);
-      if (row === undefined) {
-        // The caller is an active member of this society — `SocietyGuard` ran
-        // before the handler — so zero rows means the flat is not in it, is
-        // already removed, or never existed. All three are one answer, because
-        // distinguishing them would let an Admin of one society enumerate
-        // another's flats.
-        throw new StructureError(
-          "not_found",
-          "That flat is not available to you.",
         );
-      }
-      return apartmentFromRow(row);
-    });
+
+        const [row] = parseRows(rows);
+        if (row === undefined) {
+          // The caller is an active member of this society — `SocietyGuard` ran
+          // before the handler — so zero rows means the flat is not in it, is
+          // already removed, or never existed. All three are one answer, because
+          // distinguishing them would let an Admin of one society enumerate
+          // another's flats.
+          throw new StructureError(
+            "not_found",
+            "That flat is not available to you.",
+          );
+        }
+        return apartmentFromRow(row);
+      },
+      (apartment) => [
+        this.audit.entry({
+          societyId: apartment.societyId,
+          category: "other",
+          action: "apartment.updated",
+          entityType: "apartment",
+          entityId: apartment.id,
+          before,
+          after: apartmentAuditSnapshot(apartment),
+        }),
+      ],
+    );
   }
 
   /**
@@ -323,12 +368,31 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
     societyId: SocietyId,
     actor: UserId,
   ): Promise<void> {
-    await this.run(actor, "write", async (tx) => {
-      await query(
-        tx,
-        sql`select public.apartment_soft_delete(${id}::uuid, ${societyId}::uuid)`,
-      );
-    });
+    // The pre-removal state, read inside the transaction that removes (T050).
+    let before: Record<string, unknown> | null = null;
+
+    await this.run(
+      actor,
+      "write",
+      async (tx) => {
+        before = await readApartmentAuditState(tx, id, societyId);
+        await query(
+          tx,
+          sql`select public.apartment_soft_delete(${id}::uuid, ${societyId}::uuid)`,
+        );
+      },
+      () => [
+        this.audit.entry({
+          societyId,
+          category: "other",
+          action: "apartment.deleted",
+          entityType: "apartment",
+          entityId: id,
+          before,
+          after: { deletedAt: true },
+        }),
+      ],
+    );
   }
 
   /**
@@ -376,47 +440,71 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
     readonly created: readonly Apartment[];
     readonly duplicateLabelsSkipped: readonly string[];
   }> {
-    return this.run(actor, "write", async (tx) => {
-      const created: Apartment[] = [];
-      const duplicateLabelsSkipped: string[] = [];
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const created: Apartment[] = [];
+        const duplicateLabelsSkipped: string[] = [];
 
-      for (const input of inputs) {
-        const { columns, values } = insertParts(input, societyId, buildingId);
-        try {
-          // The savepoint: see "Why each row is its own nested transaction" above.
-          // One row per nested transaction, so a refusal costs one row rather than
-          // the batch, and the statement after a refusal still runs.
-          const rows = await tx.transaction(async (inner) =>
-            query(
-              inner,
-              sql`
+        for (const input of inputs) {
+          const { columns, values } = insertParts(input, societyId, buildingId);
+          try {
+            // The savepoint: see "Why each row is its own nested transaction" above.
+            // One row per nested transaction, so a refusal costs one row rather than
+            // the batch, and the statement after a refusal still runs.
+            const rows = await tx.transaction(async (inner) =>
+              query(
+                inner,
+                sql`
                 insert into public.apartments (${sql.join(columns, sql`, `)})
                 values (${sql.join(values, sql`, `)})
                 returning ${APARTMENT_COLUMNS}
               `,
-            ),
-          );
-          created.push(apartmentFromRow(parseSingleRow(rows, "created flat")));
-        } catch (error: unknown) {
-          // A unique violation naming this table's number index is the *rule*,
-          // not a failure: the row is skipped and reported. At this point the
-          // error is still the driver's raw one — `run`'s classifier sits outside
-          // the transaction body — so the row is classified with the same function
-          // `run` would use, and the same predicate decides. Anything else
-          // re-throws *raw* and takes the batch (the transaction) with it.
-          // The predicate lives in `apartment.rows.ts` with the classifier it is the
-          // counterpart of, and it is unit-tested there: this is the rule that was
-          // silently inert in production while the file stayed green.
-          if (isApartmentNumberCollision(error)) {
-            duplicateLabelsSkipped.push(input.apartmentNumber);
-            continue;
+              ),
+            );
+            created.push(
+              apartmentFromRow(parseSingleRow(rows, "created flat")),
+            );
+          } catch (error: unknown) {
+            // A unique violation naming this table's number index is the *rule*,
+            // not a failure: the row is skipped and reported. At this point the
+            // error is still the driver's raw one — `run`'s classifier sits outside
+            // the transaction body — so the row is classified with the same function
+            // `run` would use, and the same predicate decides. Anything else
+            // re-throws *raw* and takes the batch (the transaction) with it.
+            // The predicate lives in `apartment.rows.ts` with the classifier it is the
+            // counterpart of, and it is unit-tested there: this is the rule that was
+            // silently inert in production while the file stayed green.
+            if (isApartmentNumberCollision(error)) {
+              duplicateLabelsSkipped.push(input.apartmentNumber);
+              continue;
+            }
+            throw error;
           }
-          throw error;
         }
-      }
 
-      return { created, duplicateLabelsSkipped };
-    });
+        return { created, duplicateLabelsSkipped };
+      },
+      // T050: one row per created flat, not one summary row for the batch. A batch
+      // record would name entities the log could not individually defend, and the
+      // rows that share this request's `requestId` already identify the batch — the
+      // same convention the CSV import uses. A batch that created nothing writes
+      // nothing, which is why the mapping filters on `created`.
+      (result) =>
+        result.created.map((apartment) =>
+          this.audit.entry({
+            societyId: apartment.societyId,
+            category: "other",
+            action: "apartment.created",
+            entityType: "apartment",
+            entityId: apartment.id,
+            before: null,
+            after: apartmentAuditSnapshot(apartment),
+            metadata: { duplicateLabelsSkipped: result.duplicateLabelsSkipped },
+          }),
+        ),
+    );
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
@@ -426,11 +514,13 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
     actor: UserId,
     context: "read" | "write",
     work: (tx: TransactionContext) => Promise<T>,
+    /** Present on every audited write, absent on reads (T050). */
+    audit?: AuditFlush<T>,
   ): Promise<T> {
     const identity: TransactionActor = { kind: "user", userId: actor };
 
     try {
-      return await this.unitOfWork.transaction(identity, work);
+      return await this.unitOfWork.transaction(identity, work, audit);
     } catch (error: unknown) {
       // A `StructureError` thrown inside — the not-found and empty-patch branches —
       // passes through untouched: re-classifying it would replace a precise answer
@@ -450,6 +540,53 @@ export class ApartmentRepositoryPostgres implements ApartmentRepository {
  * an `Apartment` whose new field is `undefined` from one path and set from
  * another — the kind of difference that only shows up on one screen.
  */
+/**
+ * The flat facts an audit entry records (T050) — the patchable state plus the two
+ * identity columns a dispute needs to match a flat to its building and label.
+ */
+function apartmentAuditSnapshot(apartment: Apartment): Record<string, unknown> {
+  return {
+    buildingId: apartment.buildingId,
+    apartmentNumber: apartment.apartmentNumber,
+    wingId: apartment.wingId,
+    floor: apartment.floor,
+    bhk: apartment.bhk,
+    carpetAreaSqft: apartment.carpetAreaSqft,
+    builtupAreaSqft: apartment.builtupAreaSqft,
+    parkingSlots: apartment.parkingSlots,
+    shareUnits: apartment.shareUnits,
+    occupancyStatus: apartment.occupancyStatus,
+    isCommercial: apartment.isCommercial,
+    isBillable: apartment.isBillable,
+  };
+}
+
+/**
+ * The flat's pre-write state, read inside the caller's transaction (T050) —
+ * including a removed row, because a removal is exactly the change worth recording
+ * and the caller's own read filters removed rows out.
+ */
+async function readApartmentAuditState(
+  tx: TransactionContext,
+  id: ApartmentId,
+  societyId: SocietyId,
+): Promise<Record<string, unknown> | null> {
+  const rows = await query(
+    tx,
+    sql`
+      select ${APARTMENT_COLUMNS}
+        from public.apartments
+       where id = ${id}::uuid
+         and society_id = ${societyId}::uuid
+       limit 1
+    `,
+  );
+  const [row] = parseRows(rows);
+  return row === undefined
+    ? null
+    : apartmentAuditSnapshot(apartmentFromRow(row));
+}
+
 const APARTMENT_COLUMNS = sql.raw(
   [
     "id",

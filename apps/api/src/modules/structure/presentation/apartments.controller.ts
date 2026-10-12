@@ -40,6 +40,7 @@ import {
 } from "../../../common/decorators/ctx.decorator";
 import { NoEnvelope } from "../../../common/decorators/no-envelope.decorator";
 import { RequirePermission } from "../../../common/decorators/require-permission.decorator";
+import { Audited } from "../../audit/audited.decorator";
 import { ZodPipe } from "../../../common/pipes/zod.pipe";
 import { envelopeSchemaOf } from "../../../common/swagger/zod-openapi";
 import { StructureOperations } from "../application/structure.operations";
@@ -149,6 +150,7 @@ export class BuildingApartmentsController {
    * as a `409` carrying `field: 'apartmentNumber'`, which is what lets the form
    * highlight the input rather than show a banner.
    */
+  @Audited("apartment.created")
   @Post()
   @RequirePermission("structure.edit")
   @HttpCode(HttpStatus.CREATED)
@@ -189,6 +191,7 @@ export class BuildingApartmentsController {
    * are skipped and reported rather than refusing the batch, so re-running after
    * a partial generation completes it.
    */
+  @Audited("apartment.created")
   @Post("generate")
   @RequirePermission("structure.edit")
   @HttpCode(HttpStatus.CREATED)
@@ -239,6 +242,7 @@ export class BuildingApartmentsController {
    * reported** per row, never silently dropped, and an invalid row is reported
    * with its field and reason while the rest of the batch proceeds.
    */
+  @Audited("apartment.created")
   @Post("bulk")
   @RequirePermission("structure.edit")
   @HttpCode(HttpStatus.CREATED)
@@ -313,6 +317,7 @@ export class ApartmentsController {
    * reason a society can retract a recorded area without deleting the flat and
    * taking its members and history with it.
    */
+  @Audited("apartment.updated")
   @Patch(":apartmentId")
   @RequirePermission("structure.edit")
   @ApiOperation({
@@ -342,6 +347,7 @@ export class ApartmentsController {
     return apartmentResponseToDto(apartment);
   }
 
+  @Audited("apartment.deleted")
   @Delete(":apartmentId")
   @RequirePermission("structure.edit")
   @HttpCode(HttpStatus.NO_CONTENT)

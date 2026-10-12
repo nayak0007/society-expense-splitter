@@ -5,6 +5,7 @@ import type {
   ExpenseId,
   ExpensePublication,
   ExpensePublicationLookup,
+  ExpenseRecord,
   ExpenseRecalculation,
   ExpenseSplitRepository,
   ExpenseVoid,
@@ -17,13 +18,16 @@ import type {
 } from "@ses/domain";
 import { z } from "zod";
 
+import { AuditService } from "../../audit/audit.service";
 import {
   UnitOfWork,
+  type AuditFlush,
   type TransactionActor,
   type TransactionContext,
 } from "../../../infrastructure/database/unit-of-work";
 import {
   EXPENSE_COLUMN_EXPRESSIONS,
+  expenseAuditSnapshot,
   readExpenseWorkflowStamps,
   runQuery,
   type Row,
@@ -32,6 +36,7 @@ import {
   enrichVersionMismatch,
   expenseErrorFromPostgres,
   expenseFromRow,
+  expenseRowSchema,
   unexpectedShapeError,
 } from "./expense.rows";
 import {
@@ -105,7 +110,13 @@ import {
  */
 @Injectable()
 export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
-  constructor(private readonly unitOfWork: UnitOfWork) {}
+  constructor(
+    private readonly unitOfWork: UnitOfWork,
+    // T050: builds the audit rows the writer persists (ADR-0014). The row is not
+    // written here — it is handed to `UnitOfWork`'s audit seam, so it commits or
+    // rolls back with the publication it describes.
+    private readonly audit: AuditService,
+  ) {}
 
   /**
    * T068's published-edit transaction — one call to `expense_recalculate()`.
@@ -126,11 +137,17 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
     input: RecalculateExpenseRecordInput,
     actor: UserId,
   ): Promise<ExpenseRecalculation> {
+    // T050: the `before` snapshot, read inside the transaction ahead of the
+    // definer call.
+    let before: ExpenseRecord | null = null;
     try {
-      return await this.run(actor, async (tx) => {
-        const rows = await runQuery(
-          tx,
-          sql`
+      return await this.run(
+        actor,
+        async (tx) => {
+          before = await this.readExpenseForAudit(tx, id, societyId);
+          const rows = await runQuery(
+            tx,
+            sql`
             select ${RECALCULATE_COLUMNS}
               from public.expense_recalculate(
                 ${id}::uuid,
@@ -141,26 +158,38 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
                 ${input.changeNote ?? null}::text
               )
           `,
-        );
+          );
 
-        const [first] = rows;
-        if (first === undefined) {
-          throw unexpectedShapeError("recalculated expense");
-        }
-        const parsed = recalculatedExpenseRowSchema.safeParse(first);
-        if (!parsed.success) {
-          throw unexpectedShapeError("recalculated expense");
-        }
-        const row = parsed.data;
+          const [first] = rows;
+          if (first === undefined) {
+            throw unexpectedShapeError("recalculated expense");
+          }
+          const parsed = recalculatedExpenseRowSchema.safeParse(first);
+          if (!parsed.success) {
+            throw unexpectedShapeError("recalculated expense");
+          }
+          const row = parsed.data;
 
-        return {
-          expense: expenseFromRow(
-            row,
-            await readExpenseWorkflowStamps(tx, id, societyId),
-          ),
-          summary: recalculationSummaryFromRow(row.recalculation),
-        };
-      });
+          return {
+            expense: expenseFromRow(
+              row,
+              await readExpenseWorkflowStamps(tx, id, societyId),
+            ),
+            summary: recalculationSummaryFromRow(row.recalculation),
+          };
+        },
+        (result) => [
+          this.audit.entry({
+            societyId,
+            category: "financial",
+            action: "expense.recalculated",
+            entityType: "expense",
+            entityId: result.expense.id,
+            before: before === null ? null : expenseAuditSnapshot(before),
+            after: expenseAuditSnapshot(result.expense),
+          }),
+        ],
+      );
     } catch (error: unknown) {
       throw enrichVersionMismatch(error, input.expectedVersion);
     }
@@ -183,11 +212,17 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
     input: VoidExpenseRecordInput,
     actor: UserId,
   ): Promise<ExpenseVoid> {
+    // T050: the `before` snapshot, read inside the transaction ahead of the
+    // definer call.
+    let before: ExpenseRecord | null = null;
     try {
-      return await this.run(actor, async (tx) => {
-        const rows = await runQuery(
-          tx,
-          sql`
+      return await this.run(
+        actor,
+        async (tx) => {
+          before = await this.readExpenseForAudit(tx, id, societyId);
+          const rows = await runQuery(
+            tx,
+            sql`
             select ${VOID_COLUMNS}
               from public.expense_void(
                 ${id}::uuid,
@@ -196,26 +231,39 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
                 ${input.reason}::text
               )
           `,
-        );
+          );
 
-        const [first] = rows;
-        if (first === undefined) {
-          throw unexpectedShapeError("voided expense");
-        }
-        const parsed = voidedExpenseRowSchema.safeParse(first);
-        if (!parsed.success) {
-          throw unexpectedShapeError("voided expense");
-        }
-        const row = parsed.data;
+          const [first] = rows;
+          if (first === undefined) {
+            throw unexpectedShapeError("voided expense");
+          }
+          const parsed = voidedExpenseRowSchema.safeParse(first);
+          if (!parsed.success) {
+            throw unexpectedShapeError("voided expense");
+          }
+          const row = parsed.data;
 
-        return {
-          expense: expenseFromRow(
-            row,
-            await readExpenseWorkflowStamps(tx, id, societyId),
-          ),
-          summary: voidSummaryFromRow(row.void_summary),
-        };
-      });
+          return {
+            expense: expenseFromRow(
+              row,
+              await readExpenseWorkflowStamps(tx, id, societyId),
+            ),
+            summary: voidSummaryFromRow(row.void_summary),
+          };
+        },
+        (result) => [
+          this.audit.entry({
+            societyId,
+            category: "financial",
+            action: "expense.voided",
+            entityType: "expense",
+            entityId: result.expense.id,
+            before: before === null ? null : expenseAuditSnapshot(before),
+            after: expenseAuditSnapshot(result.expense),
+            metadata: { reason: input.reason, summary: result.summary },
+          }),
+        ],
+      );
     } catch (error: unknown) {
       throw enrichVersionMismatch(error, input.expectedVersion);
     }
@@ -247,9 +295,38 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
     input: PublishExpenseRecordInput,
     actor: UserId,
   ): Promise<ExpensePublication> {
+    // T050: the `before` snapshot (the `draft`/`pending_approval` row the definer
+    // is about to publish), captured inside the transaction. It stays `null` on a
+    // replay, which writes no audit row at all.
+    let before: ExpenseRecord | null = null;
     try {
-      return await this.run(actor, (tx) =>
-        this.publishInTransaction(tx, id, societyId, input, actor),
+      return await this.run(
+        actor,
+        async (tx) => {
+          const outcome = await this.publishInTransaction(
+            tx,
+            id,
+            societyId,
+            input,
+            actor,
+          );
+          before = outcome.before;
+          return outcome.publication;
+        },
+        (publication) =>
+          publication.replayed
+            ? []
+            : [
+                this.audit.entry({
+                  societyId,
+                  category: "financial",
+                  action: "expense.published",
+                  entityType: "expense",
+                  entityId: publication.expense.id,
+                  before: before === null ? null : expenseAuditSnapshot(before),
+                  after: expenseAuditSnapshot(publication.expense),
+                }),
+              ],
       );
     } catch (error: unknown) {
       // A concurrent duplicate with the same key may have committed while this
@@ -271,11 +348,18 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
     societyId: SocietyId,
     input: PublishExpenseRecordInput,
     actor: UserId,
-  ): Promise<ExpensePublication> {
+  ): Promise<{
+    publication: ExpensePublication;
+    before: ExpenseRecord | null;
+  }> {
     const existing = await this.readRecord(tx, actor, input.idempotencyKey);
     if (existing !== undefined) {
-      return replayOf(existing, input);
+      return { publication: replayOf(existing, input), before: null };
     }
+
+    // The pre-publication row, for the audit `before` snapshot — read before the
+    // definer call, inside the same transaction (T050).
+    const before = await this.readExpenseForAudit(tx, id, societyId);
 
     const rows = await runQuery(
       tx,
@@ -327,7 +411,7 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
       `,
     );
 
-    return publicationFromRow(row, false, workflow);
+    return { publication: publicationFromRow(row, false, workflow), before };
   }
 
   /** The stored record for one key, or `undefined` when the key is unseen. */
@@ -391,15 +475,44 @@ export class ExpenseSplitRepositoryPostgres implements ExpenseSplitRepository {
   private async run<T>(
     actor: UserId,
     work: (tx: TransactionContext) => Promise<T>,
+    audit?: AuditFlush<T>,
   ): Promise<T> {
     const identity: TransactionActor = { kind: "user", userId: actor };
     try {
-      return await this.unitOfWork.transaction(identity, work);
+      return await this.unitOfWork.transaction(identity, work, audit);
     } catch (error: unknown) {
       throw isExpenseError(error)
         ? error
         : expenseErrorFromPostgres(error, "write");
     }
+  }
+
+  /**
+   * The expense row **inside the caller's transaction**, for an audit `before`
+   * snapshot (T050). A plain read, never a lock: the concurrency control is the
+   * definer's own `expectedVersion`/row lock, so a row that moved between this read
+   * and the call makes the call refuse and the transaction roll back with no audit
+   * row at all.
+   */
+  private async readExpenseForAudit(
+    tx: TransactionContext,
+    id: ExpenseId,
+    societyId: SocietyId,
+  ): Promise<ExpenseRecord | null> {
+    const rows = await runQuery(
+      tx,
+      sql`
+        select ${sql.raw(EXPENSE_COLUMN_EXPRESSIONS.join(", "))}
+          from public.expenses
+         where id = ${id}::uuid
+           and society_id = ${societyId}::uuid
+         limit 1
+      `,
+    );
+    const [first] = rows;
+    if (first === undefined) return null;
+    const parsed = expenseRowSchema.safeParse(first);
+    return parsed.success ? expenseFromRow(parsed.data) : null;
   }
 }
 

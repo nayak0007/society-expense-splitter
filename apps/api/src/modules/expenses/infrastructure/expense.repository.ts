@@ -429,21 +429,41 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
     input: ApproveExpenseRecordInput,
     actor: UserId,
   ): Promise<ExpenseRecord> {
+    // T050: the `before` snapshot, read **inside the transaction** ahead of the
+    // definer call. A closure variable rather than a second return value, because
+    // `approve`'s port contract is the row itself.
+    let before: ExpenseRecord | null = null;
     try {
-      return await this.run(actor, "write", async (tx) => {
-        const rows = await runQuery(
-          tx,
-          sql`
-            select ${EXPENSE_DECISION_COLUMNS}
-              from public.expense_approve(
-                ${id}::uuid,
-                ${societyId}::uuid,
-                ${input.expectedVersion}::int
-              )
-          `,
-        );
-        return approvedOrRejectedRow(rows, "approved expense");
-      });
+      return await this.run(
+        actor,
+        "write",
+        async (tx) => {
+          before = await this.readForAudit(tx, id, societyId);
+          const rows = await runQuery(
+            tx,
+            sql`
+              select ${EXPENSE_DECISION_COLUMNS}
+                from public.expense_approve(
+                  ${id}::uuid,
+                  ${societyId}::uuid,
+                  ${input.expectedVersion}::int
+                )
+            `,
+          );
+          return approvedOrRejectedRow(rows, "approved expense");
+        },
+        (record) => [
+          this.audit.entry({
+            societyId,
+            category: "financial",
+            action: "expense.approved",
+            entityType: "expense",
+            entityId: record.id,
+            before: before === null ? null : expenseAuditSnapshot(before),
+            after: expenseAuditSnapshot(record),
+          }),
+        ],
+      );
     } catch (error: unknown) {
       throw enrichVersionMismatch(error, input.expectedVersion);
     }
@@ -465,22 +485,43 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
     input: RejectExpenseRecordInput,
     actor: UserId,
   ): Promise<ExpenseRecord> {
+    // T050: `before` read inside the transaction, as in `approve`. The reason is
+    // recorded in `metadata` (it is the write's own justification) and is not a
+    // redaction target — a rejection reason is not a secret.
+    let before: ExpenseRecord | null = null;
     try {
-      return await this.run(actor, "write", async (tx) => {
-        const rows = await runQuery(
-          tx,
-          sql`
-            select ${EXPENSE_DECISION_COLUMNS}
-              from public.expense_reject(
-                ${id}::uuid,
-                ${societyId}::uuid,
-                ${input.expectedVersion}::int,
-                ${input.reason}::text
-              )
-          `,
-        );
-        return approvedOrRejectedRow(rows, "rejected expense");
-      });
+      return await this.run(
+        actor,
+        "write",
+        async (tx) => {
+          before = await this.readForAudit(tx, id, societyId);
+          const rows = await runQuery(
+            tx,
+            sql`
+              select ${EXPENSE_DECISION_COLUMNS}
+                from public.expense_reject(
+                  ${id}::uuid,
+                  ${societyId}::uuid,
+                  ${input.expectedVersion}::int,
+                  ${input.reason}::text
+                )
+            `,
+          );
+          return approvedOrRejectedRow(rows, "rejected expense");
+        },
+        (record) => [
+          this.audit.entry({
+            societyId,
+            category: "financial",
+            action: "expense.rejected",
+            entityType: "expense",
+            entityId: record.id,
+            before: before === null ? null : expenseAuditSnapshot(before),
+            after: expenseAuditSnapshot(record),
+            metadata: { reason: input.reason },
+          }),
+        ],
+      );
     } catch (error: unknown) {
       throw enrichVersionMismatch(error, input.expectedVersion);
     }
@@ -582,7 +623,9 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
  * `buildAuditEntry`; a vendor name or a description is deliberately kept, because
  * an audit row that cannot say what changed is not evidence.
  */
-function expenseAuditSnapshot(record: ExpenseRecord): Record<string, unknown> {
+export function expenseAuditSnapshot(
+  record: ExpenseRecord,
+): Record<string, unknown> {
   return {
     title: record.title,
     amountPaise: record.amount.paise.toString(),

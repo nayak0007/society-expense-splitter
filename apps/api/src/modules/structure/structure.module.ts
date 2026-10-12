@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 
 import { DatabaseModule } from "../../infrastructure/database/database.module";
+import { AuditModule } from "../audit/audit.module";
 import { SocietiesModule } from "../societies/societies.module";
 import { StructureOperations } from "./application/structure.operations";
 import {
@@ -59,7 +60,9 @@ import { BuildingsController } from "./presentation/buildings.controller";
  * writes to Postgres.
  */
 @Module({
-  imports: [DatabaseModule, SocietiesModule],
+  // `AuditModule` because both repositories build the rows the audit writer persists
+  // (T050).
+  imports: [DatabaseModule, SocietiesModule, AuditModule],
   controllers: [
     BuildingsController,
     BuildingApartmentsController,

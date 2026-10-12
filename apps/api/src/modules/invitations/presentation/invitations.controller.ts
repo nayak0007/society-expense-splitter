@@ -38,6 +38,7 @@ import {
 } from "../../../common/decorators/ctx.decorator";
 import { Public } from "../../../common/decorators/public.decorator";
 import { RequirePermission } from "../../../common/decorators/require-permission.decorator";
+import { Audited } from "../../audit/audited.decorator";
 import { ZodPipe } from "../../../common/pipes/zod.pipe";
 import { envelopeSchemaOf } from "../../../common/swagger/zod-openapi";
 import { InvitationsOperations } from "../application/invitations.operations";
@@ -108,6 +109,7 @@ export class InvitationsController {
    * the database (a partial unique index), and somebody who already has an account here is refused by
    * the recipient trigger: both are 409s with the offending `field`.
    */
+  @Audited("invitation.created")
   @Post()
   @RequirePermission("member.invite")
   @HttpCode(HttpStatus.CREATED)
@@ -216,6 +218,11 @@ export class InvitationsController {
    * create two memberships, and a live shadow member matched on the invitation's number is **linked**
    * rather than duplicated (PRD §3.3).
    */
+  // `invitation_accept()` clears the transaction's identity before it writes the
+  // membership; `UnitOfWork` re-establishes the actor for the audit phase, so the
+  // acceptance row commits (or rolls back) with the membership it describes
+  // (ADR-0014 D5, D10).
+  @Audited("invitation.accepted")
   @Post("accept/:token")
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -276,6 +283,7 @@ export class InvitationsController {
    * invitation that has already been accepted cannot be revoked (409), because the membership it
    * created is a separate thing with its own removal path.
    */
+  @Audited("invitation.revoked")
   @Post(":invitationId/revoke")
   @RequirePermission("member.invite")
   @HttpCode(HttpStatus.OK)

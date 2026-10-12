@@ -213,6 +213,7 @@ export class MembersController {
    * and `active`, which is what "must still be billed" requires. Assigning a role is T046's
    * operation and runs through a guarded, audited path.
    */
+  @Audited("member.created")
   @Post()
   @RequirePermission("member.invite")
   @HttpCode(HttpStatus.CREATED)
@@ -298,6 +299,10 @@ export class MembersController {
    * not a client key: a retried import refuses its already-imported rows with
    * `ALREADY_MEMBER` and imports only the rest, which is deterministic.
    */
+  // One action for the whole import: every imported row is its own committed
+  // `member.created` audit row (each row is its own transaction), and the batch is
+  // the set of rows sharing this request's `requestId`.
+  @Audited("member.created")
   @Post("import")
   @RequirePermission("member.invite")
   @HttpCode(HttpStatus.CREATED)
@@ -384,6 +389,7 @@ export class MembersController {
    * is answered `409` with `JOIN_REQUEST_NOT_PENDING` — the code that says the request has
    * already been decided.
    */
+  @Audited("member.join_approved")
   @Post("join-requests/:memberId/approve")
   @RequirePermission("member.approve")
   @HttpCode(HttpStatus.OK)
@@ -425,6 +431,7 @@ export class MembersController {
    * generic patch cannot express. A `status` field would also let a client spell "reject" as
    * "set rejected" while skipping the reason, which is the one thing a rejection must carry.
    */
+  @Audited("member.join_rejected")
   @Post("join-requests/:memberId/reject")
   @RequirePermission("member.approve")
   @HttpCode(HttpStatus.OK)
@@ -527,6 +534,7 @@ export class MembersController {
    * address, a flat or a lease date — the distinction a shadow member's record depends on, since
    * their number is the only identifier they have.
    */
+  @Audited("member.updated")
   @Patch(":memberId")
   @RequirePermission("member.invite")
   @ApiOperation({
@@ -564,6 +572,7 @@ export class MembersController {
    * grow a reason and an audit entry when T050 lands. A `status` field on the patch would let a
    * client name a status the lifecycle does not have — `pending`, or `rejected`.
    */
+  @Audited("member.suspended")
   @Post(":memberId/suspend")
   @RequirePermission("member.remove")
   @HttpCode(HttpStatus.OK)
@@ -592,6 +601,7 @@ export class MembersController {
   }
 
   /** Reactivate a suspended member: `inactive → active`. */
+  @Audited("member.reactivated")
   @Post(":memberId/reactivate")
   @RequirePermission("member.remove")
   @HttpCode(HttpStatus.OK)

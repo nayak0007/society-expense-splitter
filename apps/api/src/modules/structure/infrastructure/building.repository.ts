@@ -13,9 +13,11 @@ import type {
 
 import {
   UnitOfWork,
+  type AuditFlush,
   type TransactionActor,
   type TransactionContext,
 } from "../../../infrastructure/database/unit-of-work";
+import { AuditService } from "../../audit/audit.service";
 import {
   buildingFromRow,
   buildingRowListSchema,
@@ -63,7 +65,13 @@ import {
  */
 @Injectable()
 export class BuildingRepositoryPostgres implements BuildingRepository {
-  constructor(private readonly unitOfWork: UnitOfWork) {}
+  constructor(
+    private readonly unitOfWork: UnitOfWork,
+    // T050: builds the audit rows the writer persists (ADR-0014). The row is not
+    // written here — it is handed to `UnitOfWork`'s audit seam, so it commits or
+    // rolls back with the structure change it describes.
+    private readonly audit: AuditService,
+  ) {}
 
   // ── read ────────────────────────────────────────────────────────────────────
 
@@ -125,10 +133,13 @@ export class BuildingRepositoryPostgres implements BuildingRepository {
     input: CreateBuildingInput,
     actor: UserId,
   ): Promise<Building> {
-    return this.run(actor, "write", async (tx) => {
-      const rows = await query(
-        tx,
-        sql`
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const rows = await query(
+          tx,
+          sql`
           insert into public.buildings (society_id, name, total_floors, display_order)
           values (
             ${societyId}::uuid,
@@ -138,9 +149,22 @@ export class BuildingRepositoryPostgres implements BuildingRepository {
           )
           returning ${BUILDING_COLUMNS}
         `,
-      );
-      return buildingFromRow(parseSingleRow(rows, "created building"));
-    });
+        );
+        return buildingFromRow(parseSingleRow(rows, "created building"));
+      },
+      // T050: a birth has no `before` — the building did not exist.
+      (building) => [
+        this.audit.entry({
+          societyId: building.societyId,
+          category: "other",
+          action: "building.created",
+          entityType: "building",
+          entityId: building.id,
+          before: null,
+          after: buildingAuditSnapshot(building),
+        }),
+      ],
+    );
   }
 
   /**
@@ -164,10 +188,17 @@ export class BuildingRepositoryPostgres implements BuildingRepository {
     input: UpdateBuildingInput,
     actor: UserId,
   ): Promise<Building> {
-    return this.run(actor, "write", async (tx) => {
-      const rows = await query(
-        tx,
-        sql`
+    // The pre-write state, read inside the transaction that changes it (T050).
+    let before: Record<string, unknown> | null = null;
+
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        before = await readBuildingAuditState(tx, id, societyId);
+        const rows = await query(
+          tx,
+          sql`
           update public.buildings
              set name = coalesce(${input.name ?? null}::varchar, name),
                  total_floors = coalesce(${input.totalFloors ?? null}::smallint, total_floors),
@@ -177,22 +208,34 @@ export class BuildingRepositoryPostgres implements BuildingRepository {
              and deleted_at is null
           returning ${BUILDING_COLUMNS}
         `,
-      );
-
-      const [row] = parseRows(rows);
-      if (row === undefined) {
-        // The caller is an active member of this society — `SocietyGuard` ran
-        // before the handler — so zero rows means the building is not in it, is
-        // already removed, or never existed. All three are one answer, because
-        // distinguishing them would let an Admin of one society enumerate
-        // another's building ids.
-        throw new StructureError(
-          "not_found",
-          "That building is not available to you.",
         );
-      }
-      return buildingFromRow(row);
-    });
+
+        const [row] = parseRows(rows);
+        if (row === undefined) {
+          // The caller is an active member of this society — `SocietyGuard` ran
+          // before the handler — so zero rows means the building is not in it, is
+          // already removed, or never existed. All three are one answer, because
+          // distinguishing them would let an Admin of one society enumerate
+          // another's building ids.
+          throw new StructureError(
+            "not_found",
+            "That building is not available to you.",
+          );
+        }
+        return buildingFromRow(row);
+      },
+      (building) => [
+        this.audit.entry({
+          societyId: building.societyId,
+          category: "other",
+          action: "building.updated",
+          entityType: "building",
+          entityId: building.id,
+          before,
+          after: buildingAuditSnapshot(building),
+        }),
+      ],
+    );
   }
 
   /**
@@ -208,12 +251,33 @@ export class BuildingRepositoryPostgres implements BuildingRepository {
     societyId: SocietyId,
     actor: UserId,
   ): Promise<void> {
-    await this.run(actor, "write", async (tx) => {
-      await query(
-        tx,
-        sql`select public.building_soft_delete(${id}::uuid, ${societyId}::uuid)`,
-      );
-    });
+    // The pre-removal state, read inside the transaction that removes (T050). Read
+    // before the call: after it, the row's `deleted_at` is set and the reader's own
+    // `deleted_at is null` filter would hide exactly the state worth recording.
+    let before: Record<string, unknown> | null = null;
+
+    await this.run(
+      actor,
+      "write",
+      async (tx) => {
+        before = await readBuildingAuditState(tx, id, societyId);
+        await query(
+          tx,
+          sql`select public.building_soft_delete(${id}::uuid, ${societyId}::uuid)`,
+        );
+      },
+      () => [
+        this.audit.entry({
+          societyId,
+          category: "other",
+          action: "building.deleted",
+          entityType: "building",
+          entityId: id,
+          before,
+          after: { deletedAt: true },
+        }),
+      ],
+    );
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
@@ -232,6 +296,8 @@ export class BuildingRepositoryPostgres implements BuildingRepository {
     actor: UserId,
     context: "read" | "write",
     work: (tx: TransactionContext) => Promise<T>,
+    /** Present on every audited write, absent on reads (T050). */
+    audit?: AuditFlush<T>,
   ): Promise<T> {
     // One place translates the port's `UserId` into the transaction's identity
     // union, so no call site can build an actor shape of its own — a second
@@ -239,13 +305,49 @@ export class BuildingRepositoryPostgres implements BuildingRepository {
     const identity: TransactionActor = { kind: "user", userId: actor };
 
     try {
-      return await this.unitOfWork.transaction(identity, work);
+      return await this.unitOfWork.transaction(identity, work, audit);
     } catch (error: unknown) {
       throw isStructureError(error)
         ? error
         : structureErrorFromPostgres(error, context);
     }
   }
+}
+
+/**
+ * The building facts an audit entry records (T050) — the updatable state, and no
+ * more.
+ */
+function buildingAuditSnapshot(building: Building): Record<string, unknown> {
+  return {
+    name: building.name,
+    totalFloors: building.totalFloors,
+    displayOrder: building.displayOrder,
+  };
+}
+
+/**
+ * The building's pre-write state, read inside the caller's transaction (T050) —
+ * live or already removed, because a removal is exactly the change worth recording
+ * and the caller's own read filters removed rows out.
+ */
+async function readBuildingAuditState(
+  tx: TransactionContext,
+  id: BuildingId,
+  societyId: SocietyId,
+): Promise<Record<string, unknown> | null> {
+  const rows = await query(
+    tx,
+    sql`
+      select ${BUILDING_COLUMNS}
+        from public.buildings
+       where id = ${id}::uuid
+         and society_id = ${societyId}::uuid
+       limit 1
+    `,
+  );
+  const [row] = parseRows(rows);
+  return row === undefined ? null : buildingAuditSnapshot(buildingFromRow(row));
 }
 
 /**

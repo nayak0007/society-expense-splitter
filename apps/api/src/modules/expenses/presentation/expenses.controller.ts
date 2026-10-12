@@ -566,6 +566,7 @@ export class ExpensesController {
    * silently omits it. See `PublishExpenseUseCase` for why that is the only
    * implementable option today.
    */
+  @Audited("expense.published")
   @Post(":expenseId/publish")
   @RequirePermission("expense.publish")
   @HttpCode(HttpStatus.OK)
@@ -650,6 +651,7 @@ export class ExpensesController {
    * `summary` reports the reversal: how many dues were superseded, how much paid
    * money became advance credit, and how many members' balances moved.
    */
+  @Audited("expense.voided")
   @Post(":expenseId/void")
   @RequirePermission("expense.void")
   @HttpCode(HttpStatus.OK)
@@ -703,6 +705,7 @@ export class ExpensesController {
    * and it re-evaluates the amount against the *current* threshold before writing
    * anything (ADR-0011 D4).
    */
+  @Audited("expense.approved")
   @Post(":expenseId/approve")
   @RequirePermission("expense.approve")
   @HttpCode(HttpStatus.OK)
@@ -751,6 +754,7 @@ export class ExpensesController {
    * balance, no event — and the publisher's one path through `expense_publish()` is
    * untouched.
    */
+  @Audited("expense.rejected")
   @Post(":expenseId/reject")
   @RequirePermission("expense.approve")
   @HttpCode(HttpStatus.OK)

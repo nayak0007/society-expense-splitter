@@ -36,6 +36,7 @@ import {
 } from "../../../common/decorators/ctx.decorator";
 import { NoEnvelope } from "../../../common/decorators/no-envelope.decorator";
 import { RequirePermission } from "../../../common/decorators/require-permission.decorator";
+import { Audited } from "../../audit/audited.decorator";
 import { ZodPipe } from "../../../common/pipes/zod.pipe";
 import { envelopeSchemaOf } from "../../../common/swagger/zod-openapi";
 import { StructureOperations } from "../application/structure.operations";
@@ -133,6 +134,7 @@ export class BuildingsController {
     return buildingListToDto(list.buildings, list.capabilities);
   }
 
+  @Audited("building.created")
   @Post()
   @RequirePermission("structure.edit")
   @HttpCode(HttpStatus.CREATED)
@@ -186,6 +188,7 @@ export class BuildingsController {
     return buildingDetailToDto(view.building, view.capabilities);
   }
 
+  @Audited("building.updated")
   @Patch(":buildingId")
   @RequirePermission("structure.edit")
   @ApiOperation({
@@ -215,6 +218,7 @@ export class BuildingsController {
     return buildingResponseToDto(building);
   }
 
+  @Audited("building.deleted")
   @Delete(":buildingId")
   @RequirePermission("structure.edit")
   @HttpCode(HttpStatus.NO_CONTENT)

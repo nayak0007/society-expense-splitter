@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 
 import { CacheModule } from "../../infrastructure/cache/cache.module";
 import { DatabaseModule } from "../../infrastructure/database/database.module";
+import { AuditModule } from "../audit/audit.module";
 import { MembersModule } from "../members/members.module";
 import { InvitationsOperations } from "./application/invitations.operations";
 import {
@@ -41,7 +42,8 @@ import { InvitationsController } from "./presentation/invitations.controller";
 @Module({
   // `CacheModule` because acceptance grants authority (it creates the membership and
   // assigns the role), so its one write is ordered against the guard's cache read.
-  imports: [DatabaseModule, MembersModule, CacheModule],
+  // `AuditModule` because the repository builds the rows the writer persists (T050).
+  imports: [DatabaseModule, MembersModule, CacheModule, AuditModule],
   controllers: [InvitationsController],
   providers: [
     InvitationsOperations,

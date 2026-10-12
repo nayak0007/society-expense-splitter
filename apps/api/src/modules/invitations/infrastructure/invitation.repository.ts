@@ -18,9 +18,11 @@ import type { MembershipWriteScope } from "../../../common/authorization/members
 import { MembershipInvalidation } from "../../../common/authorization/membership-invalidation";
 import {
   UnitOfWork,
+  type AuditFlush,
   type TransactionActor,
   type TransactionContext,
 } from "../../../infrastructure/database/unit-of-work";
+import { AuditService } from "../../audit/audit.service";
 import { roleToDatabase } from "../../members/infrastructure/member.rows";
 import {
   invitationAcceptanceFromRow,
@@ -73,6 +75,12 @@ export class InvitationRepositoryPostgres implements InvitationRepository {
      * which is exactly why the scope may be a function of the result.
      */
     private readonly invalidation: MembershipInvalidation,
+    /**
+     * T050's audit builder. The entry is handed to `UnitOfWork`'s seam rather than
+     * written here, so it commits or rolls back with the invitation change itself
+     * (ADR-0014 D1).
+     */
+    private readonly audit: AuditService,
   ) {}
 
   /** Insert one invitation. `status` is the column's default (`sent`), and `invited_by` is the trigger's. */
@@ -81,10 +89,13 @@ export class InvitationRepositoryPostgres implements InvitationRepository {
     input: CreateInvitationInput,
     actor: UserId,
   ): Promise<Invitation> {
-    return this.run(actor, "write", async (tx) => {
-      const rows = await query_(
-        tx,
-        sql`
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const rows = await query_(
+          tx,
+          sql`
           insert into public.invitations (
             society_id, apartment_id, channel, phone, email, role, token_hash, expires_at
           )
@@ -110,10 +121,24 @@ export class InvitationRepositoryPostgres implements InvitationRepository {
                     null::text as apartment_number,
                     null::text as invited_by_name
         `,
-      );
-      const row = parseSingleRow(rows, "created invitation");
-      return invitationFromRow(row);
-    });
+        );
+        const row = parseSingleRow(rows, "created invitation");
+        return invitationFromRow(row);
+      },
+      undefined,
+      // T050: a birth has no `before` — the minted row did not exist a moment ago.
+      (invitation) => [
+        this.audit.entry({
+          societyId: invitation.societyId,
+          category: "other",
+          action: "invitation.created",
+          entityType: "invitation",
+          entityId: invitation.id,
+          before: null,
+          after: invitationAuditSnapshot(invitation),
+        }),
+      ],
+    );
   }
 
   /**
@@ -210,10 +235,17 @@ export class InvitationRepositoryPostgres implements InvitationRepository {
     societyId: SocietyId,
     actor: UserId,
   ): Promise<Invitation> {
-    return this.run(actor, "write", async (tx) => {
-      const rows = await query_(
-        tx,
-        sql`
+    // The pre-revocation status, read inside the transaction that revokes (T050).
+    let before: Record<string, unknown> | null = null;
+
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        before = await readInvitationAuditState(tx, id, societyId);
+        const rows = await query_(
+          tx,
+          sql`
           update public.invitations
              set status = 'revoked'
            where id = ${id}::uuid
@@ -222,16 +254,31 @@ export class InvitationRepositoryPostgres implements InvitationRepository {
                     null::text as apartment_number,
                     null::text as invited_by_name
         `,
-      );
-      const [row] = parseRows(rows);
-      if (row === undefined) {
-        throw new InvitationError(
-          "not_found",
-          "That invitation is not available to you.",
         );
-      }
-      return invitationFromRow(row);
-    });
+        const [row] = parseRows(rows);
+        if (row === undefined) {
+          throw new InvitationError(
+            "not_found",
+            "That invitation is not available to you.",
+          );
+        }
+        return invitationFromRow(row);
+      },
+      // No cache scope: a revocation changes no membership, so it must not bump the
+      // society's membership version the way the acceptance above does.
+      undefined,
+      (invitation) => [
+        this.audit.entry({
+          societyId: invitation.societyId,
+          category: "other",
+          action: "invitation.revoked",
+          entityType: "invitation",
+          entityId: invitation.id,
+          before,
+          after: invitationAuditSnapshot(invitation),
+        }),
+      ],
+    );
   }
 
   /**
@@ -296,6 +343,27 @@ export class InvitationRepositoryPostgres implements InvitationRepository {
         return invitationAcceptanceFromRow(parsed.data);
       },
       (accepted) => ({ societyId: accepted.societyId, userIds: [actor] }),
+      //
+      // T050: keyed to the **membership** the function produced, because the
+      // invitation row itself is unaddressable from this call site — the caller holds
+      // only the token digest, and `token_hash` is in no SELECT grant. `before` is
+      // `null`: the row did not exist a moment ago, so this is a birth, and its
+      // `after` is the facts `invitation_accept()` reported it created.
+      //
+      // The RPC clears the transaction's identity before it writes that membership;
+      // `UnitOfWork` re-establishes the actor for this audit phase, so the writer's
+      // actor check is satisfied rather than refused (ADR-0014 D5, D10).
+      (accepted) => [
+        this.audit.entry({
+          societyId: accepted.societyId,
+          category: "other",
+          action: "invitation.accepted",
+          entityType: "member",
+          entityId: accepted.memberId,
+          before: null,
+          after: invitationAcceptanceAuditSnapshot(accepted),
+        }),
+      ],
     );
   }
 
@@ -307,11 +375,13 @@ export class InvitationRepositoryPostgres implements InvitationRepository {
     work: (tx: TransactionContext) => Promise<T>,
     /** Present on the one write that changes a membership, absent on every other call. */
     cacheScope?: (result: T) => MembershipWriteScope,
+    /** Present on every audited write, absent on reads (T050). */
+    audit?: AuditFlush<T>,
   ): Promise<T> {
     const identity: TransactionActor = { kind: "user", userId: actor };
     const perform = async (): Promise<T> => {
       try {
-        return await this.unitOfWork.transaction(identity, work);
+        return await this.unitOfWork.transaction(identity, work, audit);
       } catch (error: unknown) {
         throw isInvitationError(error)
           ? error
@@ -323,6 +393,76 @@ export class InvitationRepositoryPostgres implements InvitationRepository {
       ? perform()
       : this.invalidation.around(cacheScope, perform);
   }
+}
+
+/**
+ * The invitation facts an audit entry records (T050).
+ *
+ * The contact columns are deliberately absent: `phone` and `email` are in the
+ * redaction rule's deny-list, so persisting them would store `[redacted]` under two
+ * keys and tell a reader nothing while implying it might have said something. The
+ * `token_hash` is not readable by this role at all.
+ */
+function invitationAuditSnapshot(
+  invitation: Invitation,
+): Record<string, unknown> {
+  return {
+    channel: invitation.channel,
+    role: roleToDatabase(invitation.role),
+    status: invitation.status,
+    apartmentId: invitation.apartmentId,
+    expiresAt: invitation.expiresAt,
+  };
+}
+
+/**
+ * The membership an acceptance produced (T050).
+ *
+ * Composed from `invitation_accept()`'s own return rather than re-read: that
+ * function is the authority on what it wrote, and it reports the persisted role,
+ * flat and whether a live shadow was linked. The audit callback runs after `work`
+ * has returned and is deliberately synchronous, so deriving the snapshot from the
+ * result is the shape the seam is built for (ADR-0014 D7). `linkedShadow` travels
+ * because it is the difference between an Admin's recorded occupant gaining an
+ * account and a duplicate being created — the fact most worth a durable record.
+ */
+function invitationAcceptanceAuditSnapshot(
+  acceptance: InvitationAcceptance,
+): Record<string, unknown> {
+  return {
+    role: roleToDatabase(acceptance.role),
+    apartmentId: acceptance.apartmentId,
+    linkedShadow: acceptance.linkedShadow,
+  };
+}
+
+/**
+ * The invitation's pre-write state, read inside the caller's transaction (T050).
+ *
+ * A plain read and never a lock: the transition's legality is the trigger's, so a
+ * row that moved between this read and the `UPDATE` is refused by the trigger and
+ * the transaction — audit row included — rolls back.
+ */
+async function readInvitationAuditState(
+  tx: TransactionContext,
+  id: InvitationId,
+  societyId: SocietyId,
+): Promise<Record<string, unknown> | null> {
+  const rows = await query_(
+    tx,
+    sql`
+      select channel::text as channel,
+             role::text as role,
+             status::text as status,
+             apartment_id,
+             expires_at
+        from public.invitations
+       where id = ${id}::uuid
+         and society_id = ${societyId}::uuid
+       limit 1
+    `,
+  );
+  return rows[0] ?? null;
 }
 
 /** The preview row, parsed where the function's `jsonb` arrives untyped. */

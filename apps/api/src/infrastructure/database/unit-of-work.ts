@@ -147,6 +147,16 @@ export class UnitOfWork {
       const result = await work(tx);
       const entries = typeof audit === "function" ? audit(result) : audit;
       if (entries !== undefined && entries.length > 0) {
+        // `work` may have dropped the transaction's identity on purpose, and one
+        // function does: `public.invitation_accept()` blanks `request.jwt.claim.sub`
+        // and `request.jwt.claims` (transaction-locally) before it writes the
+        // membership, so the invitee's own row is not read as a self-service change
+        // by `chk_member_self_change()`. The audit phase is still the actor's, so the
+        // identity is re-established here, from the one authoritative value (the
+        // transaction's actor), before the writer compares its entries against it
+        // (ADR-0014 D5). Idempotent, and in effect a no-op for a transaction that
+        // never cleared it.
+        await applyIdentity(tx, actor);
         await flushAudit(tx, entries, actor);
       }
       return result;

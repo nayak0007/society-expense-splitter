@@ -370,6 +370,22 @@ export class MemberRepositoryPostgres implements MemberRepository {
         return memberFromRow(parseSingleRow(rows, "created member"));
       },
       { societyId },
+      // T050: a birth has no `before` — the row did not exist — so the snapshot is
+      // the created membership itself. One row per created member, which is also how
+      // a CSV import is accounted for: every imported row commits in its own
+      // transaction and carries the request's own `requestId`, so the batch is the
+      // set of rows sharing that id rather than a fabricated summary record.
+      (member) => [
+        this.audit.entry({
+          societyId: member.societyId,
+          category: "other",
+          action: "member.created",
+          entityType: "member",
+          entityId: member.id,
+          before: null,
+          after: memberAuditSnapshot(member),
+        }),
+      ],
     );
   }
 
@@ -389,10 +405,14 @@ export class MemberRepositoryPostgres implements MemberRepository {
     input: UpdateMemberInput,
     actor: UserId,
   ): Promise<Member> {
+    // The pre-write state, read inside the same transaction as the write (T050).
+    let before: Record<string, unknown> | null = null;
+
     return this.run(
       actor,
       "write",
       async (tx) => {
+        before = await readAuditState(tx, id, societyId);
         const assignments: SQL[] = [];
 
         const set = (column: string, value: SQL): void => {
@@ -488,6 +508,17 @@ export class MemberRepositoryPostgres implements MemberRepository {
         return memberFromRow(row);
       },
       { societyId },
+      (member) => [
+        this.audit.entry({
+          societyId: member.societyId,
+          category: "other",
+          action: "member.updated",
+          entityType: "member",
+          entityId: member.id,
+          before,
+          after: memberAuditSnapshot(member),
+        }),
+      ],
     );
   }
 
@@ -506,10 +537,14 @@ export class MemberRepositoryPostgres implements MemberRepository {
     status: MemberActivation,
     actor: UserId,
   ): Promise<Member> {
+    // The pre-write state, read inside the same transaction as the write (T050).
+    let before: Record<string, unknown> | null = null;
+
     return this.run(
       actor,
       "write",
       async (tx) => {
+        before = await readAuditState(tx, id, societyId);
         const rows = await query_(
           tx,
           sql`
@@ -531,6 +566,20 @@ export class MemberRepositoryPostgres implements MemberRepository {
         return memberFromRow(row);
       },
       { societyId },
+      // The action names the direction, because "status changed" would make a
+      // suspension and a reactivation indistinguishable in the log a dispute reads.
+      (member) => [
+        this.audit.entry({
+          societyId: member.societyId,
+          category: "other",
+          action:
+            status === "inactive" ? "member.suspended" : "member.reactivated",
+          entityType: "member",
+          entityId: member.id,
+          before,
+          after: memberAuditSnapshot(member),
+        }),
+      ],
     );
   }
 
@@ -774,10 +823,14 @@ export class MemberRepositoryPostgres implements MemberRepository {
     input: JoinApprovalInput,
     actor: UserId,
   ): Promise<Member> {
+    // The pending request's own state, read inside the transaction that decides it.
+    let before: Record<string, unknown> | null = null;
+
     return this.run(
       actor,
       "write",
       async (tx) => {
+        before = await readAuditState(tx, id, societyId);
         const payload: Record<string, unknown> = {};
         if (input.role !== undefined) {
           payload.role = roleToDatabase(input.role);
@@ -801,6 +854,17 @@ export class MemberRepositoryPostgres implements MemberRepository {
         return readMember(tx, id, societyId);
       },
       { societyId },
+      (member) => [
+        this.audit.entry({
+          societyId: member.societyId,
+          category: "other",
+          action: "member.join_approved",
+          entityType: "member",
+          entityId: member.id,
+          before,
+          after: memberAuditSnapshot(member),
+        }),
+      ],
     );
   }
 
@@ -818,10 +882,14 @@ export class MemberRepositoryPostgres implements MemberRepository {
     reason: string,
     actor: UserId,
   ): Promise<Member> {
+    // The pending request's own state, read inside the transaction that decides it.
+    let before: Record<string, unknown> | null = null;
+
     return this.run(
       actor,
       "write",
       async (tx) => {
+        before = await readAuditState(tx, id, societyId);
         await query_(
           tx,
           sql`select public.member_reject_join(
@@ -835,6 +903,20 @@ export class MemberRepositoryPostgres implements MemberRepository {
         return readMember(tx, id, societyId);
       },
       { societyId },
+      // The reason is the decision's own justification and is not a redaction target; a
+      // rejection reason is not a secret.
+      (member) => [
+        this.audit.entry({
+          societyId: member.societyId,
+          category: "other",
+          action: "member.join_rejected",
+          entityType: "member",
+          entityId: member.id,
+          before,
+          after: memberAuditSnapshot(member),
+          metadata: { reason },
+        }),
+      ],
     );
   }
 
@@ -969,6 +1051,25 @@ async function readAuditState(
     `,
   );
   return rows[0] ?? null;
+}
+
+/**
+ * The membership facts an audit entry's `after` snapshot records (T050).
+ *
+ * The same fields `readAuditState` reads, so a `before` and an `after` written by
+ * two different methods are still comparable — and deliberately not the contact
+ * columns, for the reason that helper's own docstring gives.
+ */
+function memberAuditSnapshot(member: Member): Record<string, unknown> {
+  return {
+    displayName: member.displayName,
+    role: roleToDatabase(member.role),
+    status: member.status,
+    occupancy: member.occupancy,
+    isPrimary: member.isPrimary,
+    apartmentId: member.apartmentId,
+    userId: member.userId,
+  };
 }
 
 async function readMember(
