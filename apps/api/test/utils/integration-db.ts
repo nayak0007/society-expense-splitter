@@ -19,12 +19,37 @@ import postgres from "postgres";
  * whose existence is the precondition.
  */
 
-/** A connection as the database owner: DDL-capable, RLS-exempt. */
+/**
+ * A connection as the database owner: DDL-capable, RLS-exempt.
+ *
+ * ## Why the waits are bounded (2026-10-12)
+ *
+ * `resetData` truncates every table, which needs an `ACCESS EXCLUSIVE` lock on all
+ * of them; PostgreSQL waits for a conflicting lock **forever** by default
+ * (`lock_timeout` and `statement_timeout` are both 0). In the merged coverage run
+ * the integration specs are slow enough that a `beforeEach` can be abandoned at its
+ * 30 s timeout with the truncate still in flight — and because the statement is
+ * never cancelled it keeps waiting, the *next* reset queues behind it, and the whole
+ * gate hangs (~30 min) instead of failing. That was measured, not guessed: with the
+ * run hung, `pg_stat_activity` showed the truncate in `wait_event_type: Lock` and an
+ * `idle in transaction` holder that had been open for the whole run.
+ *
+ * Bounding the wait turns a lock that cannot be taken into a fast, *cancelled* error
+ * (so nothing is left running to block the next reset) that names the problem. Both
+ * values are far above any healthy reset (<1 s) and below the 30 s hook budget, so a
+ * real reset never hits them; this is test-only and mirrors the SAD §14.4 timeouts
+ * the API's own connections carry, which the owner connection otherwise lacked.
+ */
 export function ownerClient(url: string): postgres.Sql {
   return postgres(url, {
     max: 2,
     prepare: false,
     onnotice: () => {},
+    connection: {
+      application_name: "ses-integration-owner",
+      lock_timeout: 20_000,
+      statement_timeout: 60_000,
+    },
   });
 }
 
