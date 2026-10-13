@@ -64,6 +64,17 @@ export async function seedSociety(
     },
     adminUserId,
   );
+
+  // Creating through the repository means the real write path records
+  // `society.created` (Stage C), exactly as it would for a user. That row is the
+  // fixture's own footprint, not the behaviour of the spec that asked for the
+  // society, so it is cleared here rather than in each of the specs that assert an
+  // exact action list — the owner connection is the same one those specs inspect
+  // the log with. The creation itself is covered by its own case.
+  await harness.owner`
+    delete from public.audit_logs where society_id = ${society.id}::uuid
+  `;
+
   return {
     societyId: society.id,
     adminUserId,

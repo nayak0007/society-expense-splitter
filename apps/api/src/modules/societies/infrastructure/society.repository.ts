@@ -30,9 +30,11 @@ import type {
 } from "../../../common/authorization/society-authorization";
 import {
   UnitOfWork,
+  type AuditFlush,
   type TransactionActor,
   type TransactionContext,
 } from "../../../infrastructure/database/unit-of-work";
+import { AuditService } from "../../audit/audit.service";
 import {
   createPayload,
   isJoinCodeCollision,
@@ -104,6 +106,10 @@ export class SocietyRepositoryPostgres
      * ordering can only be expressed as a wrapper.
      */
     private readonly invalidation: MembershipInvalidation,
+    // T050 Stage C: builds the audit rows the writer persists (ADR-0014). The row
+    // is not written here — it is handed to `UnitOfWork`'s audit seam so it commits
+    // or rolls back with the society change it describes.
+    private readonly audit: AuditService,
   ) {}
 
   // ── read ────────────────────────────────────────────────────────────────────
@@ -430,6 +436,20 @@ export class SocietyRepositoryPostgres
         };
       },
       (created) => ({ societyId: created.society.id, userIds: [actor] }),
+      // T050: the society and its founding Admin membership are one birth. The row
+      // is keyed to the newly minted society, so the audit row's `society_id`
+      // foreign key is satisfied by the same transaction that created it.
+      (created) => [
+        this.audit.entry({
+          societyId: created.society.id,
+          category: "other",
+          action: "society.created",
+          entityType: "society",
+          entityId: created.society.id,
+          before: null,
+          after: societyAuditSnapshot(created.society),
+        }),
+      ],
     );
   }
 
@@ -439,6 +459,9 @@ export class SocietyRepositoryPostgres
     input: UpdateSocietyInput,
     actor: UserId,
   ): Promise<Society> {
+    // The pre-write state, read inside the transaction that changes it (T050).
+    let before: Record<string, unknown> | null = null;
+
     // The society row is half of what the guard's read returns, so a rename is an
     // invalidation too — not because a name is a privilege, but because a cached
     // name that outlives its edit is the kind of wrongness that makes people stop
@@ -447,6 +470,11 @@ export class SocietyRepositoryPostgres
       actor,
       "write",
       async (tx) => {
+        const current = await this.snapshot(tx, id);
+        before =
+          current === null
+            ? null
+            : societyAuditSnapshot(societyFromSnapshot(current));
         const patch = updatePayload(input);
         const rows = await query(
           tx,
@@ -461,15 +489,35 @@ export class SocietyRepositoryPostgres
         );
       },
       { societyId: id },
+      (society) => [
+        this.audit.entry({
+          societyId: society.id,
+          category: "other",
+          action: "society.updated",
+          entityType: "society",
+          entityId: society.id,
+          before,
+          after: societyAuditSnapshot(society),
+        }),
+      ],
     );
   }
 
   /** Admin-only join-code rotation. The new code is minted server-side. */
   async regenerateJoinCode(id: SocietyId, actor: UserId): Promise<Society> {
+    // The pre-rotation state, read inside the transaction (T050). `societyAuditSnapshot`
+    // deliberately omits the join code, so neither the old nor the new code is persisted.
+    let before: Record<string, unknown> | null = null;
+
     return this.run(
       actor,
       "write",
       async (tx) => {
+        const current = await this.snapshot(tx, id);
+        before =
+          current === null
+            ? null
+            : societyAuditSnapshot(societyFromSnapshot(current));
         const rows = await query(
           tx,
           sql`
@@ -481,6 +529,17 @@ export class SocietyRepositoryPostgres
         );
       },
       { societyId: id },
+      (society) => [
+        this.audit.entry({
+          societyId: society.id,
+          category: "other",
+          action: "society.join_code_rotated",
+          entityType: "society",
+          entityId: society.id,
+          before,
+          after: societyAuditSnapshot(society),
+        }),
+      ],
     );
   }
 
@@ -490,13 +549,36 @@ export class SocietyRepositoryPostgres
    * code stops resolving. Admin-only, checked inside the function.
    */
   async remove(id: SocietyId, actor: UserId): Promise<void> {
+    // The pre-deletion state, read inside the transaction that deletes (T050) — read
+    // before the RPC, because afterwards `deleted_at` is set and the snapshot read
+    // would hide exactly the state worth recording.
+    let before: Record<string, unknown> | null = null;
+
     await this.run(
       actor,
       "write",
       async (tx) => {
+        const current = await this.snapshot(tx, id);
+        before =
+          current === null
+            ? null
+            : societyAuditSnapshot(societyFromSnapshot(current));
         await query(tx, sql`select public.society_soft_delete(${id}::uuid)`);
       },
       { societyId: id },
+      // A soft delete: the row survives (it is the owner of financial history), so
+      // the `after` is the flag that changed rather than a missing entity.
+      () => [
+        this.audit.entry({
+          societyId: id,
+          category: "other",
+          action: "society.deleted",
+          entityType: "society",
+          entityId: id,
+          before,
+          after: { deletedAt: true },
+        }),
+      ],
     );
   }
 
@@ -543,6 +625,11 @@ export class SocietyRepositoryPostgres
     input: JoinSocietyInput,
     actor: UserId,
   ): Promise<SocietyMembership> {
+    // The caller's prior membership state, if any, captured inside the transaction
+    // (T050): a fresh request has no `before`, a re-ask moves a `rejected`/`removed`
+    // row back to `pending` and records what it moved from.
+    let before: Record<string, unknown> | null = null;
+
     return this.run(
       actor,
       "write",
@@ -615,6 +702,10 @@ export class SocietyRepositoryPostgres
         `,
         );
         const [existing] = parseMemberRows(existingRows);
+        before =
+          existing === undefined
+            ? null
+            : membershipAuditSnapshot(membershipFromRow(existing));
 
         if (existing !== undefined) {
           if (existing.status === "active" || existing.status === "inactive") {
@@ -670,6 +761,20 @@ export class SocietyRepositoryPostgres
         // this transaction (from the join code), so it is not in scope at the call.
       },
       (joined) => ({ societyId: joined.societyId, userIds: [actor] }),
+      (joined) => [
+        this.audit.entry({
+          societyId: joined.societyId,
+          category: "other",
+          action: "society.joined",
+          // The entity is the membership the request created or re-asked; the action
+          // names the lifecycle event. The `after` snapshot carries `status: "pending"`,
+          // so the row is honest about the request not being an admission.
+          entityType: "member",
+          entityId: joined.id,
+          before,
+          after: membershipAuditSnapshot(joined),
+        }),
+      ],
     );
   }
 
@@ -684,10 +789,29 @@ export class SocietyRepositoryPostgres
    * question first; this is what happens when a stale client skips it).
    */
   async leave(societyId: SocietyId, actor: UserId): Promise<void> {
-    await this.run(
+    // The membership state before leaving, read inside the transaction (T050).
+    let before: Record<string, unknown> | null = null;
+
+    await this.run<string>(
       actor,
       "write",
       async (tx) => {
+        const existingRows = await query(
+          tx,
+          sql`
+          select id, society_id, user_id, role, status, occupancy, joined_at
+            from public.members
+           where society_id = ${societyId}::uuid
+             and user_id = ${actor}::uuid
+           limit 1
+        `,
+        );
+        const [existing] = parseMemberRows(existingRows);
+        before =
+          existing === undefined || existing.user_id === null
+            ? null
+            : membershipAuditSnapshot(membershipFromRow(existing));
+
         const rows = await query(
           tx,
           sql`
@@ -699,15 +823,28 @@ export class SocietyRepositoryPostgres
           returning id
         `,
         );
-        if (rows.length === 0) {
+        const memberId = firstValue(rows, "id");
+        if (typeof memberId !== "string") {
           // Nothing to leave: no live membership for this caller.
           throw new SocietyError(
             "not_found",
             "That society is not available to you.",
           );
         }
+        return memberId;
       },
       { societyId, userIds: [actor] },
+      (memberId) => [
+        this.audit.entry({
+          societyId,
+          category: "other",
+          action: "society.left",
+          entityType: "member",
+          entityId: memberId,
+          before,
+          after: { status: "removed" },
+        }),
+      ],
     );
   }
 
@@ -744,6 +881,8 @@ export class SocietyRepositoryPostgres
      */
     cacheScope?:
       MembershipWriteScope | ((result: T) => MembershipWriteScope | undefined),
+    /** Present on every audited write, absent on reads (T050). */
+    audit?: AuditFlush<T>,
   ): Promise<T> {
     // One place translates the port's `UserId` into the transaction's identity
     // union, so no call site can build an actor shape of its own — a second
@@ -755,7 +894,7 @@ export class SocietyRepositoryPostgres
 
     const perform = async (): Promise<T> => {
       try {
-        return await this.unitOfWork.transaction(identity, work);
+        return await this.unitOfWork.transaction(identity, work, audit);
       } catch (error: unknown) {
         throw isSocietyError(error)
           ? error
@@ -848,4 +987,59 @@ function parseMemberRowList(rows: readonly Row[]): MemberRow {
     throw unexpectedShapeError("membership");
   }
   return first;
+}
+
+/**
+ * The society facts an audit entry records (T050 Stage C) — the decision-relevant
+ * state, and deliberately **not** the join code.
+ *
+ * Excluding `joinCode` is what makes `society.join_code_rotated` safe: the before
+ * and after snapshots both omit it, so neither the superseded nor the new code can
+ * reach `audit_logs`. `memberCount` is omitted too, because it is derived and moves
+ * for reasons that are not this mutation, which would make a `before` and an `after`
+ * look like a change that never happened.
+ */
+function societyAuditSnapshot(society: Society): Record<string, unknown> {
+  return {
+    name: society.name,
+    slug: society.slug,
+    type: society.type,
+    registrationNumber: society.registrationNumber,
+    addressLine1: society.addressLine1,
+    addressLine2: society.addressLine2,
+    city: society.city,
+    state: society.state,
+    pincode: society.pincode,
+    plan: society.plan,
+    timezone: society.timezone,
+    deletedAt: society.deletedAt,
+    settings: {
+      billingDay: society.settings.billingDay,
+      dueDay: society.settings.dueDay,
+      graceDays: society.settings.graceDays,
+      approvalThresholdPaise: society.settings.approvalThresholdPaise,
+      billVacantFlats: society.settings.billVacantFlats,
+      allowPartialPayments: society.settings.allowPartialPayments,
+      defaulterListPublic: society.settings.defaulterListPublic,
+      financialYearStartMonth: society.settings.financialYearStartMonth,
+    },
+  };
+}
+
+/**
+ * The membership facts a `society.joined`/`society.left` audit entry records (T050
+ * Stage C) — role, status, occupancy and the join stamp, read inside the caller's
+ * transaction. Deliberately not the whole row: a snapshot is the decision-relevant
+ * state, and copying every column would carry contact details the redaction rule
+ * would then have to strip back out.
+ */
+function membershipAuditSnapshot(
+  membership: SocietyMembership,
+): Record<string, unknown> {
+  return {
+    role: membership.role,
+    status: membership.status,
+    occupancy: membership.occupancyType,
+    joinedAt: membership.joinedAt,
+  };
 }

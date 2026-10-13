@@ -53,8 +53,17 @@ export const AUDIT_ACTIONS = [
   "invitation.created",
   "invitation.accepted",
   "invitation.revoked",
+  // ── the society lifecycle (Stage C) ──────────────────────────────────────
+  // `society.joined`/`society.left` record a *membership* transition taken by the
+  // actor themselves (a join request starts `pending`, an approval is a separate
+  // `member.join_approved`); the entity on the row is the membership, the action
+  // names the lifecycle event.
+  "society.created",
   "society.updated",
   "society.join_code_rotated",
+  "society.joined",
+  "society.left",
+  "society.deleted",
   "building.created",
   "building.updated",
   "building.deleted",

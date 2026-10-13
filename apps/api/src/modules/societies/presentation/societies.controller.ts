@@ -45,6 +45,7 @@ import {
 import { NoEnvelope } from "../../../common/decorators/no-envelope.decorator";
 import { Public } from "../../../common/decorators/public.decorator";
 import { ZodPipe } from "../../../common/pipes/zod.pipe";
+import { Audited } from "../../audit/audited.decorator";
 import { SocietyOperations } from "../application/society.operations";
 import {
   createdSocietyToDto,
@@ -107,6 +108,7 @@ const societyIdParam = z.uuid();
 export class SocietiesController {
   constructor(private readonly operations: SocietyOperations) {}
 
+  @Audited("society.created")
   @Post()
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
@@ -276,6 +278,7 @@ export class SocietiesController {
     return joinOptionsToDto(options);
   }
 
+  @Audited("society.joined")
   @Post("join")
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
@@ -320,6 +323,7 @@ export class SocietiesController {
     return profileToDto(view.society, view.membership, view.capabilities);
   }
 
+  @Audited("society.updated")
   @Patch(":societyId")
   @ApiOperation({
     summary: "Edit a society",
@@ -377,6 +381,7 @@ export class SocietiesController {
     return { memberships: memberships.map((m) => membershipToDto(m)) };
   }
 
+  @Audited("society.join_code_rotated")
   @Post(":societyId/join-code")
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -401,6 +406,7 @@ export class SocietiesController {
     return { society: societyToDto(society) };
   }
 
+  @Audited("society.left")
   @Post(":societyId/leave")
   @HttpCode(HttpStatus.NO_CONTENT)
   @NoEnvelope()
@@ -424,6 +430,7 @@ export class SocietiesController {
     await this.operations.leave(asUserId(userId), asSocietyId(societyId));
   }
 
+  @Audited("society.deleted")
   @Delete(":societyId")
   @HttpCode(HttpStatus.NO_CONTENT)
   @NoEnvelope()

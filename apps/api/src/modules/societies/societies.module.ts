@@ -14,6 +14,7 @@ import {
 } from "../../common/authorization/society-authorization";
 import { CacheModule } from "../../infrastructure/cache/cache.module";
 import { DatabaseModule } from "../../infrastructure/database/database.module";
+import { AuditModule } from "../audit/audit.module";
 import { SocietyOperations } from "./application/society.operations";
 import {
   SOCIETY_CLOCK,
@@ -51,7 +52,11 @@ import { SocietiesController } from "./presentation/societies.controller";
  * in this module whose outcome depends on "now", and it is otherwise untestable.
  */
 @Module({
-  imports: [DatabaseModule, CacheModule],
+  // `AuditModule` is imported explicitly rather than reached for globally (T050
+  // Stage C): a reader of this file should be able to see that the society writes
+  // record audits, the same convention the member, structure, expense and
+  // invitation modules follow.
+  imports: [DatabaseModule, CacheModule, AuditModule],
   controllers: [SocietiesController],
   providers: [
     SocietyOperations,

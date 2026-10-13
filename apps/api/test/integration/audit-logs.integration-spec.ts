@@ -11,6 +11,7 @@ import {
   asExpenseCategoryId,
   asExpenseId,
   asMemberId,
+  asSocietyId,
   asUserId,
   paise,
   systemClock,
@@ -30,8 +31,10 @@ import type {
   InvitationRepository,
   MemberId,
   MemberRepository,
+  MemberRole,
   PublishExpenseAllocation,
   SocietyId,
+  SocietyRepository,
   UserId,
 } from "@ses/domain";
 import type postgres from "postgres";
@@ -47,6 +50,7 @@ import {
 } from "../../src/modules/expenses/application/expense.tokens";
 import { INVITATION_REPOSITORY } from "../../src/modules/invitations/application/invitation.tokens";
 import { MEMBER_REPOSITORY } from "../../src/modules/members/application/member.tokens";
+import { SOCIETY_REPOSITORY } from "../../src/modules/societies/application/society.tokens";
 import {
   APARTMENT_REPOSITORY,
   BUILDING_REPOSITORY,
@@ -1479,5 +1483,380 @@ describe("the audit trail of memberships, invitations and structure", () => {
     ).rejects.toThrow();
 
     expect(await actions()).toEqual([]);
+  });
+});
+
+// ── Stage C: the society lifecycle ──────────────────────────────────────────
+
+/**
+ * The society lifecycle's audit rows against real PostgreSQL — T050 Stage C.
+ *
+ * ## What this block adds over the generic tests above
+ *
+ * The mechanism (commit-together, rollback-together, redaction, tenant isolation)
+ * is proven generically. What only these cases can prove is that each **society
+ * mutation** is wired to it: the society lifecycle's writes go through
+ * `SECURITY DEFINER` RPCs (`society_create`, `society_update`,
+ * `society_rotate_join_code`, `society_soft_delete`) or direct RLS-governed DML
+ * (join/leave). Each case drives the repository as a real identity and reads the
+ * row the writer persisted.
+ *
+ * The claims, one per acceptance bullet: a creation is keyed to the newly minted
+ * society and never carries the join code; an edit's `before` is the pre-edit state
+ * read inside the same transaction; a rotation records that it happened without the
+ * old or the new code; a soft delete keeps the row (financial history's owner) while
+ * leaving the log intact; a join records the membership transition as the requester,
+ * with `status: "pending"` in its snapshot; a leave records the reverse; and a
+ * refused mutation leaves no row at all.
+ */
+describe("the audit trail of the society lifecycle (Stage C)", () => {
+  let societies: SocietyRepository;
+
+  beforeAll(() => {
+    societies = harness.app.get<SocietyRepository>(SOCIETY_REPOSITORY);
+  });
+
+  /**
+   * Runs `work` inside a request context as `userId`.
+   *
+   * The `actorRole` on the row comes from this context, never from the repository's
+   * arguments (ADR-0014 D5), so a call without one would record `null` and prove
+   * nothing about where the role is read from.
+   */
+  function asRequest<T>(
+    userId: UserId,
+    role: MemberRole,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return RequestContext.run(
+      {
+        requestId: "req-stage-c-audit",
+        userId,
+        member: {
+          membershipId: asMemberId(randomUUID()),
+          societyId: asSocietyId(randomUUID()),
+          role,
+          status: "active",
+        },
+        ip: undefined,
+        userAgent: undefined,
+        audited: [],
+      },
+      work,
+    );
+  }
+
+  /** Every persisted action, in insertion order — the log's own order. */
+  async function actions(): Promise<readonly string[]> {
+    const rows = await owner<{ action: string }[]>`
+      select action from public.audit_logs order by id
+    `;
+    return rows.map((row) => row.action);
+  }
+
+  interface AuditRow {
+    readonly action: string;
+    readonly society_id: string;
+    readonly actor_user_id: string | null;
+    readonly actor_role: string | null;
+    readonly entity_type: string;
+    readonly entity_id: string | null;
+    readonly before: unknown;
+    readonly after: unknown;
+  }
+
+  async function rowFor(action: string): Promise<AuditRow> {
+    const [row] = await owner<AuditRow[]>`
+      select action,
+             society_id::text as society_id,
+             actor_user_id::text as actor_user_id,
+             actor_role::text as actor_role,
+             entity_type,
+             entity_id::text as entity_id,
+             "before",
+             "after"
+        from public.audit_logs
+       where action = ${action}
+       order by id
+    `;
+    if (row === undefined) throw new Error(`No audit row for ${action}.`);
+    return row;
+  }
+
+  const newUser = (email: string): Promise<UserId> =>
+    createLocalUser(owner, email, "Stage C").then((id) => asUserId(id));
+
+  it("records a creation keyed to the new society, with the join code absent", async () => {
+    const creator = await newUser("creator@stage-c-audit.ses.test");
+
+    const created = await asRequest(creator, "admin", () =>
+      societies.create(
+        {
+          name: "Stage C Court",
+          type: "apartment",
+          city: "Pune",
+          state: "MH",
+          billingDay: 1,
+          dueDay: 10,
+          approvalThresholdPaise: paise(1_000_000n),
+        },
+        creator,
+      ),
+    );
+
+    expect(await actions()).toEqual(["society.created"]);
+    const row = await rowFor("society.created");
+    // The audit row belongs to the society the same transaction created — the
+    // `society_id` foreign key is satisfied by the row this operation wrote.
+    expect(row.society_id).toBe(created.society.id);
+    expect(row.actor_user_id).toBe(creator);
+    expect(row.actor_role).toBe("admin");
+    expect(row.entity_type).toBe("society");
+    expect(row.entity_id).toBe(created.society.id);
+    expect(row.before).toBeNull();
+    expect(row.after).toMatchObject({ name: "Stage C Court", city: "Pune" });
+    // The generated join code is a live credential; it is in no part of the row.
+    expect(JSON.stringify(row)).not.toContain(created.society.joinCode);
+  });
+
+  it("rolls back both the society and its audit row when creation is refused", async () => {
+    const creator = await newUser("refused@stage-c-audit.ses.test");
+
+    // `billing_day BETWEEN 1 AND 28`: the settings insert is refused at the database,
+    // which aborts the whole transaction — including the audit entry the flush had
+    // not yet written.
+    await expect(
+      asRequest(creator, "admin", () =>
+        societies.create(
+          {
+            name: "Doomed Court",
+            type: "apartment",
+            city: "Pune",
+            state: "MH",
+            billingDay: 99,
+            dueDay: 10,
+            approvalThresholdPaise: paise(1_000_000n),
+          },
+          creator,
+        ),
+      ),
+    ).rejects.toThrow();
+
+    const [count] = await owner<{ count: string }[]>`
+      select count(*)::text as count from public.societies where name = 'Doomed Court'
+    `;
+    expect(Number(count?.count)).toBe(0);
+    expect(await actions()).toEqual([]);
+  });
+
+  it("records an edit with the pre-edit state as its before snapshot", async () => {
+    const fixture = await seedSociety(
+      harness,
+      "Edit Court",
+      "admin@stage-c-edit.ses.test",
+    );
+
+    await asRequest(fixture.adminUserId, "admin", () =>
+      societies.update(
+        fixture.societyId,
+        { name: "Edit Court (renamed)", graceDays: 7 },
+        fixture.adminUserId,
+      ),
+    );
+
+    expect(await actions()).toEqual(["society.updated"]);
+    const row = await rowFor("society.updated");
+    expect(row.society_id).toBe(fixture.societyId);
+    expect(row.entity_id).toBe(fixture.societyId);
+    expect(row.before).toMatchObject({ name: "Edit Court" });
+    expect(row.after).toMatchObject({ name: "Edit Court (renamed)" });
+    expect(
+      (row.after as { settings: { graceDays: number } }).settings,
+    ).toMatchObject({ graceDays: 7 });
+  });
+
+  it("records a join-code rotation without persisting either code", async () => {
+    const fixture = await seedSociety(
+      harness,
+      "Rotate Court",
+      "admin@stage-c-rotate.ses.test",
+    );
+
+    const rotated = await asRequest(fixture.adminUserId, "admin", () =>
+      societies.regenerateJoinCode(fixture.societyId, fixture.adminUserId),
+    );
+
+    expect(await actions()).toEqual(["society.join_code_rotated"]);
+    expect(rotated.joinCode).not.toBe(fixture.joinCode);
+
+    // The rotation is recorded as a fact; the credential is not. Neither the
+    // superseded code nor the new one appears anywhere in the row.
+    const [payload] = await owner<{ payload: string }[]>`
+      select coalesce("before", 'null'::jsonb)::text
+             || coalesce("after", 'null'::jsonb)::text
+             || coalesce(metadata, 'null'::jsonb)::text as payload
+        from public.audit_logs
+       where action = 'society.join_code_rotated'
+    `;
+    expect(payload?.payload).not.toContain(fixture.joinCode);
+    expect(payload?.payload).not.toContain(rotated.joinCode);
+  });
+
+  it("records a soft delete while keeping the society row and its history", async () => {
+    const fixture = await seedSociety(
+      harness,
+      "Delete Court",
+      "admin@stage-c-delete.ses.test",
+    );
+
+    await asRequest(fixture.adminUserId, "admin", () =>
+      societies.remove(fixture.societyId, fixture.adminUserId),
+    );
+
+    expect(await actions()).toEqual(["society.deleted"]);
+    const row = await rowFor("society.deleted");
+    expect(row.entity_id).toBe(fixture.societyId);
+    expect(row.before).toMatchObject({ name: "Delete Court", deletedAt: null });
+    expect(row.after).toMatchObject({ deletedAt: true });
+
+    // The row survives (financial history keeps its owner) and the log is intact:
+    // a soft delete is not a purge.
+    const [society] = await owner<{ deleted_at: string | null }[]>`
+      select deleted_at from public.societies where id = ${fixture.societyId}::uuid
+    `;
+    expect(society?.deleted_at).not.toBeNull();
+    expect(await actions()).toEqual(["society.deleted"]);
+  });
+
+  it("records a join as the requester, snapshotting the pending membership", async () => {
+    const fixture = await seedSociety(
+      harness,
+      "Join Court",
+      "admin@stage-c-join.ses.test",
+    );
+    const joiner = await newUser("joiner@stage-c-audit.ses.test");
+
+    const membership = await asRequest(joiner, "resident", () =>
+      societies.join(
+        {
+          code: fixture.joinCode,
+          occupancyType: "owner",
+          apartmentId: null,
+          note: null,
+        },
+        joiner,
+      ),
+    );
+
+    expect(await actions()).toEqual(["society.joined"]);
+    const row = await rowFor("society.joined");
+    expect(row.society_id).toBe(fixture.societyId);
+    expect(row.actor_user_id).toBe(joiner);
+    expect(row.entity_type).toBe("member");
+    expect(row.entity_id).toBe(membership.id);
+    expect(row.before).toBeNull();
+    // The row is honest that this is a *request*: approval is a separate action.
+    expect(row.after).toMatchObject({
+      role: "resident",
+      status: "pending",
+      occupancy: "owner",
+    });
+  });
+
+  it("records a re-ask with the previous rejected state as its before", async () => {
+    const fixture = await seedSociety(
+      harness,
+      "Reask Court",
+      "admin@stage-c-reask.ses.test",
+    );
+    const joiner = await newUser("reask@stage-c-audit.ses.test");
+    await insertMember(owner, fixture.societyId, {
+      userId: joiner,
+      status: "rejected",
+      rejectionReason: "No proof of ownership.",
+    });
+
+    await asRequest(joiner, "resident", () =>
+      societies.join(
+        {
+          code: fixture.joinCode,
+          occupancyType: "owner",
+          apartmentId: null,
+          note: "Asked again",
+        },
+        joiner,
+      ),
+    );
+
+    expect(await actions()).toEqual(["society.joined"]);
+    const row = await rowFor("society.joined");
+    expect(row.before).toMatchObject({ status: "removed" });
+    expect(row.after).toMatchObject({ status: "pending" });
+  });
+
+  it("records a leave as the member, snapshotting the removed transition", async () => {
+    const fixture = await seedSociety(
+      harness,
+      "Leave Court",
+      "admin@stage-c-leave.ses.test",
+    );
+    const leaver = await newUser("leaver@stage-c-audit.ses.test");
+    const memberId = await insertMember(owner, fixture.societyId, {
+      userId: leaver,
+      role: "resident",
+      status: "active",
+    });
+
+    await asRequest(leaver, "resident", () =>
+      societies.leave(fixture.societyId, leaver),
+    );
+
+    expect(await actions()).toEqual(["society.left"]);
+    const row = await rowFor("society.left");
+    expect(row.society_id).toBe(fixture.societyId);
+    expect(row.actor_user_id).toBe(leaver);
+    expect(row.entity_type).toBe("member");
+    expect(row.entity_id).toBe(memberId);
+    expect(row.before).toMatchObject({ status: "active", role: "resident" });
+    expect(row.after).toMatchObject({ status: "removed" });
+  });
+
+  it("records nothing when a society mutation is refused", async () => {
+    const fixture = await seedSociety(
+      harness,
+      "Refused Court",
+      "admin@stage-c-refused.ses.test",
+    );
+    const outsider = await newUser("outsider@stage-c-audit.ses.test");
+
+    // A non-member's edit: the RPC's membership check refuses it before any write.
+    await expect(
+      asRequest(outsider, "resident", () =>
+        societies.update(fixture.societyId, { name: "Hijacked" }, outsider),
+      ),
+    ).rejects.toThrow();
+
+    // A join with a code no live society has: refused before storage.
+    await expect(
+      asRequest(outsider, "resident", () =>
+        societies.join(
+          {
+            code: "AAAAAA",
+            occupancyType: "owner",
+            apartmentId: null,
+            note: null,
+          },
+          outsider,
+        ),
+      ),
+    ).rejects.toThrow();
+
+    expect(await actions()).toEqual([]);
+
+    // And the refused edit changed nothing in the row it named.
+    const [society] = await owner<{ name: string }[]>`
+      select name from public.societies where id = ${fixture.societyId}::uuid
+    `;
+    expect(society?.name).toBe("Refused Court");
   });
 });

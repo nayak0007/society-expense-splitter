@@ -349,6 +349,63 @@ the entry is a birth (`before: null`) whose `after` is the persisted facts the
 function reported it created. The route again carries `@Audited("invitation.accepted")`
 and the vocabulary entry, both of which were held back while nothing persisted.
 
+### D11 — Stage C: the society lifecycle, and no blocker behind its RPCs
+
+**Stage C adds the six society lifecycle mutations to the same seam, and the
+investigation that preceded it found no architectural obstacle.** Creating
+(`society.created`), editing (`society.updated`), rotating the join code
+(`society.join_code_rotated`), joining (`society.joined`), leaving (`society.left`)
+and soft-deleting (`society.deleted`) a society were the group Stage B left without
+action names; the union now carries four new members (the other two were reserved in
+Stage A), and every one of the six writes through `UnitOfWork`'s seam with its
+`before` read _inside_ the caller's transaction — the same shape as Stage B's call
+sites, no new mechanism.
+
+**Why the write paths looked like a blocker, and are not.** `society_create(jsonb)`,
+`society_update(uuid, jsonb)`, `society_rotate_join_code(uuid)` and
+`society_soft_delete(uuid)` are `SECURITY DEFINER` functions, and `join`/`leave` are
+direct RLS-governed DML on `public.members`. Both kinds run _inside_ the transaction
+`UnitOfWork` already opened, so the flush is appended to that same transaction: the
+definer call and the audit row commit together or not at all. This is worth stating
+plainly because Stage B's `invitation_accept` _did_ need a seam change — the contrast
+is the point. A definer function is a function call in the transaction it was handed,
+not a second connection and not a commit, so nothing here needed the identity
+re-application; only a function that clears the GUC on purpose (as `invitation_accept`
+does) does.
+
+**A join code is never persisted, and not by relying on redaction.** Rotating it
+records that the rotation happened, with `before` and `after` snapshots built to omit
+the code in both states (`societyAuditSnapshot`), rather than leaving the value in
+place for the redactor to strip: key-based redaction replaces a _sensitive value_ it
+is shown, so a snapshot that carries `joinCode` at all has already placed a live
+credential on the path into the row. Not carrying it is the stronger guarantee, and it
+is directly testable — the suite reads the row's combined `before`/`after`/`metadata`
+text and asserts that neither the superseded nor the new code appears in it.
+
+**A soft delete is recorded as one, and the retention rule is what makes that
+possible.** `society.deleted` carries `after: { deletedAt: true }` against a `before`
+that names the society as it stood; the row itself survives, so D2's `ON DELETE
+RESTRICT` keeps refusing a _hard_ delete while history exists and the log stays
+intact — a soft delete is not a purge. The deletion also has to name an entity that
+still exists for its own `society_id` foreign key to resolve, which a purge would not.
+
+**The membership transitions are keyed to the membership, and say what they are.**
+`join` and `leave` mutate a `members` row, so their entries are `entity_type: "member"`
+with that membership's id (and the society's, since `society_id` is `NOT NULL`
+regardless), rather than a second row keyed to the society. `society.joined`'s `after`
+carries `status: "pending"`: a join by code is a _request_ (T049), and approval is a
+separate action (`member.join_approved`). A re-ask after a rejection records the
+membership's prior state as its `before`. A refused mutation of any of the six writes
+nothing — the creation included, which the suite asserts by reading both tables after a
+refused `society_create`.
+
+**Enforcement moves with the code.** The six society write routes left the
+route-inventory suite's reasoned deferral list and joined `MANDATED_AUDIT`, so the same
+declaration-level check that guards Stage B now fails if one of them ships without its
+action. What remains outstanding is unchanged and still named: the expense
+sub-resources, attachments, and the `GET /societies/:id/audit-logs` read route with its
+reader-audit row (D8/PRD §11.7).
+
 ## Consequences
 
 - **Every later module writes audits through `UnitOfWork`'s seam.** A new mutation
@@ -362,13 +419,13 @@ and the vocabulary entry, both of which were held back while nothing persisted.
   one policy reads `can_view_audit`, and a stranger's read matches no row. The
   integration suite proves the read with an Admin, a Treasurer (financial half only),
   a resident, a stranger and another society's Admin.
-- **Stage B owns the read route and the remaining modules.** Integration into the
-  expense lifecycle, members, buildings/flats and all three invitation mutations
-  (`created`, `revoked`, `accepted`) has landed, together with D10's
-  declaration-level enforcement. Still outstanding, and named as such in the Roadmap:
-  the society lifecycle, the expense sub-resources (categories, comments, GST),
-  attachments, and the `GET /societies/:id/audit-logs` read route with its
-  reader-audit row (D8/PRD §11.7).
+- **Stage C closed the society lifecycle; the read route and two groups remain.**
+  Integration into the expense lifecycle, members, buildings/flats, all three
+  invitation mutations (`created`, `revoked`, `accepted`) and the six society
+  lifecycle mutations has landed, together with D10's declaration-level enforcement.
+  Still outstanding, and named as such in the Roadmap: the expense sub-resources
+  (categories, comments, GST), attachments, and the `GET /societies/:id/audit-logs`
+  read route with its reader-audit row (D8/PRD §11.7).
 - **The unique `operation_id` is an operational fact, not just a constraint.** A
   client that retries an audited mutation with the same id gets a rolled-back
   transaction, not a silent second row; that is the intended failure mode (D4).

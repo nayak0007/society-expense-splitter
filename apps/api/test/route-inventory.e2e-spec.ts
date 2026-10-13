@@ -166,6 +166,22 @@ const MANDATED_AUDIT: ReadonlyMap<string, readonly string[]> = new Map([
     "ApartmentsController DELETE /apartments/:apartmentId",
     ["apartment.deleted"],
   ],
+
+  // ── society lifecycle (Stage C group 4b) ────────────────────────────────
+  // The society and the founding membership are one transaction; `society.joined`
+  // records the requester's own membership transition (a fresh request, or a
+  // re-ask of a `rejected`/`removed` row), keyed to the membership row and carrying
+  // `status: "pending"` in its after snapshot. The route inventory asserts the
+  // declaration; the persisted rows are asserted in real SQL below.
+  ["SocietiesController POST /societies", ["society.created"]],
+  ["SocietiesController PATCH /societies/:societyId", ["society.updated"]],
+  [
+    "SocietiesController POST /societies/:societyId/join-code",
+    ["society.join_code_rotated"],
+  ],
+  ["SocietiesController POST /societies/join", ["society.joined"]],
+  ["SocietiesController POST /societies/:societyId/leave", ["society.left"]],
+  ["SocietiesController DELETE /societies/:societyId", ["society.deleted"]],
 ]);
 
 /**
@@ -228,30 +244,6 @@ const AUDIT_DEFERRED: ReadonlyMap<string, string> = new Map([
   [
     "AttachmentsController DELETE /attachments/:attachmentId",
     "remaining Stage B group 5 (attachments)",
-  ],
-  [
-    "SocietiesController POST /societies",
-    "remaining Stage B group 4b (society lifecycle)",
-  ],
-  [
-    "SocietiesController POST /societies/join",
-    "remaining Stage B group 4b (society lifecycle)",
-  ],
-  [
-    "SocietiesController PATCH /societies/:societyId",
-    "remaining Stage B group 4b (society lifecycle)",
-  ],
-  [
-    "SocietiesController POST /societies/:societyId/join-code",
-    "remaining Stage B group 4b (society lifecycle)",
-  ],
-  [
-    "SocietiesController POST /societies/:societyId/leave",
-    "remaining Stage B group 4b (society lifecycle)",
-  ],
-  [
-    "SocietiesController DELETE /societies/:societyId",
-    "remaining Stage B group 4b (society lifecycle)",
   ],
 ]);
 
