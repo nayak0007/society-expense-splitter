@@ -37,6 +37,7 @@ import { NoEnvelope } from "../../../common/decorators/no-envelope.decorator";
 import { RequirePermission } from "../../../common/decorators/require-permission.decorator";
 import { ZodPipe } from "../../../common/pipes/zod.pipe";
 import { envelopeSchemaOf } from "../../../common/swagger/zod-openapi";
+import { Audited } from "../../audit/audited.decorator";
 import { ExpenseCategoryOperations } from "../application/expense-category.operations";
 import {
   expenseCategoryListToDto,
@@ -151,6 +152,7 @@ export class ExpenseCategoriesController {
     return expenseCategoryListToDto(list.categories, list.capabilities);
   }
 
+  @Audited("expense.category_created")
   @Post()
   @RequirePermission("expense.publish")
   @HttpCode(HttpStatus.CREATED)
@@ -178,6 +180,7 @@ export class ExpenseCategoriesController {
     return expenseCategoryResponseToDto(category);
   }
 
+  @Audited("expense.category_updated")
   @Patch(":categoryId")
   @RequirePermission("expense.publish")
   @ApiOperation({
@@ -207,6 +210,7 @@ export class ExpenseCategoriesController {
     return expenseCategoryResponseToDto(category);
   }
 
+  @Audited("expense.category_deleted")
   @Delete(":categoryId")
   @RequirePermission("expense.publish")
   @HttpCode(HttpStatus.NO_CONTENT)

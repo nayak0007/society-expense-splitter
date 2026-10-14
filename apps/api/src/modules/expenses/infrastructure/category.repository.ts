@@ -14,9 +14,11 @@ import type {
 
 import {
   UnitOfWork,
+  type AuditFlush,
   type TransactionActor,
   type TransactionContext,
 } from "../../../infrastructure/database/unit-of-work";
+import { AuditService } from "../../audit/audit.service";
 import {
   categoryErrorFromPostgres,
   categoryFromRow,
@@ -66,12 +68,28 @@ import {
  * `display_order asc, name asc` — the nineteen are seeded 1..19 in PRD §3.5.3's order,
  * so the picker shows them in the order the product document lists them, and a society's
  * own additions sort among them by whatever order it gives them.
+ *
+ * ## The three writes record audits (T050 Stage D)
+ *
+ * `create`, `update` and `remove` each hand their entry to `UnitOfWork`'s audit seam,
+ * so it commits or rolls back with the category row it describes (ADR-0014 D1). The
+ * `before` is read **inside** the same transaction and ahead of the write — for `update`
+ * that is what makes it the pre-update state, and for `remove` it is what makes the
+ * snapshot reachable at all, since `deleted_at` hides the row from every read path the
+ * moment the function returns. A refused write writes nothing: the policy's `42501`,
+ * the function's `CATEGORY_HAS_EXPENSES` and a zero-row `UPDATE` all raise before the
+ * flush, so no entry survives a mutation that did not happen.
  */
 @Injectable()
 export class ExpenseCategoryRepositoryPostgres
   implements ExpenseCategoryRepository, ExpenseReferenceReader
 {
-  constructor(private readonly unitOfWork: UnitOfWork) {}
+  constructor(
+    private readonly unitOfWork: UnitOfWork,
+    // T050 Stage D: builds the audit rows the writer persists. The row is not written
+    // here — it is handed to `UnitOfWork`'s audit seam.
+    private readonly audit: AuditService,
+  ) {}
 
   // ── read ────────────────────────────────────────────────────────────────────
 
@@ -215,10 +233,13 @@ export class ExpenseCategoryRepositoryPostgres
     input: CreateExpenseCategoryInput,
     actor: UserId,
   ): Promise<ExpenseCategory> {
-    return this.run(actor, "write", async (tx) => {
-      const rows = await query(
-        tx,
-        sql`
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const rows = await query(
+          tx,
+          sql`
           insert into public.expense_categories (
             society_id, name, icon, color, default_split_strategy,
             default_apartment_basis, is_owner_only, is_capital, gst_applicable,
@@ -239,9 +260,23 @@ export class ExpenseCategoryRepositoryPostgres
           )
           returning ${CATEGORY_COLUMNS}
         `,
-      );
-      return categoryFromRow(parseSingleRow(rows, "created category"));
-    });
+        );
+        return categoryFromRow(parseSingleRow(rows, "created category"));
+      },
+      // A birth: `before` is null and the `after` is the persisted row the INSERT
+      // returned, whose id the database minted.
+      (created) => [
+        this.audit.entry({
+          societyId,
+          category: "financial",
+          action: "expense.category_created",
+          entityType: "expense_category",
+          entityId: created.id,
+          before: null,
+          after: categoryAuditSnapshot(created),
+        }),
+      ],
+    );
   }
 
   /**
@@ -273,66 +308,89 @@ export class ExpenseCategoryRepositoryPostgres
     input: UpdateExpenseCategoryInput,
     actor: UserId,
   ): Promise<ExpenseCategory> {
-    return this.run(actor, "write", async (tx) => {
-      const assignments: SQL[] = [];
-      const set = (column: string, value: SQL): void => {
-        assignments.push(sql`${sql.raw(column)} = ${value}`);
-      };
+    // The pre-update state, read inside the transaction that changes it (T050 Stage D).
+    let before: Record<string, unknown> | null = null;
 
-      if (input.name !== undefined) set("name", sql`${input.name}::varchar`);
-      if (input.icon !== undefined) {
-        set(
-          "icon",
-          input.icon === null
-            ? sql`null::varchar`
-            : sql`${input.icon}::varchar`,
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const current = await query(
+          tx,
+          sql`
+          select ${CATEGORY_COLUMNS}
+            from public.expense_categories
+           where id = ${id}::uuid
+             and society_id = ${societyId}::uuid
+             and deleted_at is null
+           limit 1
+        `,
         );
-      }
-      if (input.color !== undefined) {
-        set(
-          "color",
-          input.color === null
-            ? sql`null::varchar`
-            : sql`${input.color}::varchar`,
-        );
-      }
-      if (input.defaultSplitStrategy !== undefined) {
-        set(
-          "default_split_strategy",
-          sql`${input.defaultSplitStrategy}::public.split_strategy`,
-        );
-      }
-      if (input.defaultApartmentBasis !== undefined) {
-        set(
-          "default_apartment_basis",
-          input.defaultApartmentBasis === null
-            ? sql`null::public.apartment_basis`
-            : sql`${input.defaultApartmentBasis}::public.apartment_basis`,
-        );
-      }
-      if (input.isOwnerOnly !== undefined) {
-        set("is_owner_only", sql`${input.isOwnerOnly}::boolean`);
-      }
-      if (input.isCapital !== undefined) {
-        set("is_capital", sql`${input.isCapital}::boolean`);
-      }
-      if (input.gstApplicable !== undefined) {
-        set("gst_applicable", sql`${input.gstApplicable}::boolean`);
-      }
-      if (input.isActive !== undefined) {
-        set("is_active", sql`${input.isActive}::boolean`);
-      }
-      if (input.displayOrder !== undefined) {
-        set("display_order", sql`${input.displayOrder}::smallint`);
-      }
+        const [existing] = parseRows(current);
+        before =
+          existing === undefined
+            ? null
+            : categoryAuditSnapshot(categoryFromRow(existing));
 
-      if (assignments.length === 0) {
-        throw new ExpenseError("validation", "Nothing to update.");
-      }
+        const assignments: SQL[] = [];
+        const set = (column: string, value: SQL): void => {
+          assignments.push(sql`${sql.raw(column)} = ${value}`);
+        };
 
-      const rows = await query(
-        tx,
-        sql`
+        if (input.name !== undefined) set("name", sql`${input.name}::varchar`);
+        if (input.icon !== undefined) {
+          set(
+            "icon",
+            input.icon === null
+              ? sql`null::varchar`
+              : sql`${input.icon}::varchar`,
+          );
+        }
+        if (input.color !== undefined) {
+          set(
+            "color",
+            input.color === null
+              ? sql`null::varchar`
+              : sql`${input.color}::varchar`,
+          );
+        }
+        if (input.defaultSplitStrategy !== undefined) {
+          set(
+            "default_split_strategy",
+            sql`${input.defaultSplitStrategy}::public.split_strategy`,
+          );
+        }
+        if (input.defaultApartmentBasis !== undefined) {
+          set(
+            "default_apartment_basis",
+            input.defaultApartmentBasis === null
+              ? sql`null::public.apartment_basis`
+              : sql`${input.defaultApartmentBasis}::public.apartment_basis`,
+          );
+        }
+        if (input.isOwnerOnly !== undefined) {
+          set("is_owner_only", sql`${input.isOwnerOnly}::boolean`);
+        }
+        if (input.isCapital !== undefined) {
+          set("is_capital", sql`${input.isCapital}::boolean`);
+        }
+        if (input.gstApplicable !== undefined) {
+          set("gst_applicable", sql`${input.gstApplicable}::boolean`);
+        }
+        if (input.isActive !== undefined) {
+          set("is_active", sql`${input.isActive}::boolean`);
+        }
+        if (input.displayOrder !== undefined) {
+          set("display_order", sql`${input.displayOrder}::smallint`);
+        }
+
+        if (assignments.length === 0) {
+          throw new ExpenseError("validation", "Nothing to update.");
+        }
+
+        const rows = await query(
+          tx,
+          sql`
           update public.expense_categories
              set ${sql.join(assignments, sql`, `)}
            where id = ${id}::uuid
@@ -340,21 +398,33 @@ export class ExpenseCategoryRepositoryPostgres
              and deleted_at is null
           returning ${CATEGORY_COLUMNS}
         `,
-      );
-
-      const [row] = parseRows(rows);
-      if (row === undefined) {
-        // The caller is an active member of this society — `SocietyGuard` ran before
-        // the handler — so zero rows means the category is not in it, is already
-        // removed, or never existed. All three are one answer, because distinguishing
-        // them would let a manager of one society enumerate another's category ids.
-        throw new ExpenseError(
-          "not_found",
-          "That category is not available to you.",
         );
-      }
-      return categoryFromRow(row);
-    });
+
+        const [row] = parseRows(rows);
+        if (row === undefined) {
+          // The caller is an active member of this society — `SocietyGuard` ran before
+          // the handler — so zero rows means the category is not in it, is already
+          // removed, or never existed. All three are one answer, because distinguishing
+          // them would let a manager of one society enumerate another's category ids.
+          throw new ExpenseError(
+            "not_found",
+            "That category is not available to you.",
+          );
+        }
+        return categoryFromRow(row);
+      },
+      (updated) => [
+        this.audit.entry({
+          societyId,
+          category: "financial",
+          action: "expense.category_updated",
+          entityType: "expense_category",
+          entityId: updated.id,
+          before,
+          after: categoryAuditSnapshot(updated),
+        }),
+      ],
+    );
   }
 
   /**
@@ -370,12 +440,52 @@ export class ExpenseCategoryRepositoryPostgres
     societyId: SocietyId,
     actor: UserId,
   ): Promise<void> {
-    await this.run(actor, "write", async (tx) => {
-      await query(
-        tx,
-        sql`select public.expense_category_soft_delete(${id}::uuid, ${societyId}::uuid)`,
-      );
-    });
+    // The pre-deletion state, read inside the transaction and before the RPC: after the
+    // call `deleted_at` is set, so the snapshot read would hide exactly the state worth
+    // recording — the same ordering `society_soft_delete`'s call site keeps.
+    let before: Record<string, unknown> | null = null;
+
+    await this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const current = await query(
+          tx,
+          sql`
+          select ${CATEGORY_COLUMNS}
+            from public.expense_categories
+           where id = ${id}::uuid
+             and society_id = ${societyId}::uuid
+             and deleted_at is null
+           limit 1
+        `,
+        );
+        const [existing] = parseRows(current);
+        before =
+          existing === undefined
+            ? null
+            : categoryAuditSnapshot(categoryFromRow(existing));
+
+        await query(
+          tx,
+          sql`select public.expense_category_soft_delete(${id}::uuid, ${societyId}::uuid)`,
+        );
+      },
+      // A soft delete: the row survives as the subject of the expenses filed under it
+      // and as the name a historical expense renders, so the `after` is the flag that
+      // changed rather than a missing entity.
+      () => [
+        this.audit.entry({
+          societyId,
+          category: "financial",
+          action: "expense.category_deleted",
+          entityType: "expense_category",
+          entityId: id,
+          before,
+          after: { deletedAt: true },
+        }),
+      ],
+    );
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
@@ -394,6 +504,13 @@ export class ExpenseCategoryRepositoryPostgres
     actor: UserId,
     context: "read" | "write",
     work: (tx: TransactionContext) => Promise<T>,
+    /**
+     * The audit scope, and the entries to flush — omitted by every read. The society is
+     * what the membership cache keys on in the modules that have one; here it is the
+     * audit seam's fourth argument, and it is a function so the entry can name the id
+     * the database minted for a row that did not exist when the call was assembled.
+     */
+    audit?: AuditFlush<T>,
   ): Promise<T> {
     // One place translates the port's `UserId` into the transaction's identity union,
     // so no call site can build an actor shape of its own — a second spelling of
@@ -401,7 +518,7 @@ export class ExpenseCategoryRepositoryPostgres
     const identity: TransactionActor = { kind: "user", userId: actor };
 
     try {
-      return await this.unitOfWork.transaction(identity, work);
+      return await this.unitOfWork.transaction(identity, work, audit);
     } catch (error: unknown) {
       throw isExpenseError(error)
         ? error
@@ -439,6 +556,33 @@ const CATEGORY_COLUMNS = sql.raw(
     "deleted_at",
   ].join(", "),
 );
+
+/**
+ * The category facts an audit entry records (T050 Stage D) — the decision-relevant
+ * state, not the row.
+ *
+ * `society_id` is omitted because the entry already carries it as its own scope, and the
+ * timestamps because they move for reasons that are not this mutation — which would make
+ * a `before` and an `after` look like a change that never happened. What remains is
+ * exactly what a dispute asks about a category: what it is called, and the flags that
+ * decide how an expense in it is split, taxed and classified.
+ */
+function categoryAuditSnapshot(
+  category: ExpenseCategory,
+): Record<string, unknown> {
+  return {
+    name: category.name,
+    icon: category.icon,
+    color: category.color,
+    defaultSplitStrategy: category.defaultSplitStrategy,
+    defaultApartmentBasis: category.defaultApartmentBasis,
+    isOwnerOnly: category.isOwnerOnly,
+    isCapital: category.isCapital,
+    gstApplicable: category.gstApplicable,
+    isActive: category.isActive,
+    displayOrder: category.displayOrder,
+  };
+}
 
 type Row = Record<string, unknown>;
 

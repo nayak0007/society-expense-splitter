@@ -886,6 +886,7 @@ export class ExpensesController {
    * with no extra rule: a role that cannot see the bill has no voice in its
    * discussion.
    */
+  @Audited("expense.comment_added")
   @Post(":expenseId/comments")
   @RequirePermission("expense.view")
   @HttpCode(HttpStatus.CREATED)
@@ -932,6 +933,7 @@ export class ExpensesController {
    * `expense.view` only so a Guest is kept out; the real decision is the use case's,
    * and the database's `expense_comment_soft_delete()` enforces the same two facts.
    */
+  @Audited("expense.comment_deleted")
   @Delete(":expenseId/comments/:commentId")
   @RequirePermission("expense.view")
   @HttpCode(HttpStatus.NO_CONTENT)
