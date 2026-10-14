@@ -807,6 +807,7 @@ export class ExpensesController {
    * names only `expense_gst_details`, so `approvedBy`/`approvedAt` survive and an
    * approved expense is not silently sent back for a fresh decision.
    */
+  @Audited("expense.gst_updated")
   @Put(":expenseId/gst")
   @RequirePermission("expense.create")
   @HttpCode(HttpStatus.OK)

@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 
 import { DatabaseModule } from "../../infrastructure/database/database.module";
 import { StorageModule } from "../../infrastructure/storage/storage.module";
+import { AuditModule } from "../audit/audit.module";
 import { SocietiesModule } from "../societies/societies.module";
 import { ATTACHMENT_REPOSITORY } from "./application/attachment.tokens";
 import { CompleteUploadUseCase } from "./application/use-cases/complete-upload.use-case";
@@ -74,9 +75,19 @@ import { AttachmentsController } from "./presentation/attachments.controller";
  * cannot leave a second, real adapter in the graph — the same reason every other
  * module's tokens are bound this way. `STORAGE_PROVIDER` is bound in
  * `StorageModule`, not here, so both modules that need it share one `S3Client`.
+ *
+ * ## Why `AuditModule` is imported (T050 Stage D)
+ *
+ * The repository records the three database transitions of the attachment lifecycle
+ * (`reserved`, `completed`, `deleted`) through `UnitOfWork`'s audit seam, so it needs
+ * `AuditService` — and this module imports it explicitly rather than reaching for it
+ * globally, the convention the society, member, structure, invitation and expense modules
+ * already follow: a reader of this file should be able to see that this module writes audit
+ * rows. No provider of this module is exported for it and no cycle is created — the audit
+ * module owns no feature module.
  */
 @Module({
-  imports: [DatabaseModule, SocietiesModule, StorageModule],
+  imports: [DatabaseModule, SocietiesModule, StorageModule, AuditModule],
   controllers: [AttachmentsController],
   providers: [
     AttachmentRepositoryPostgres,

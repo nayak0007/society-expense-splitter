@@ -46,6 +46,7 @@ import {
   envelopeSchemaOf,
   errorEnvelopeJsonSchema,
 } from "../../../common/swagger/zod-openapi";
+import { Audited } from "../../audit/audited.decorator";
 import { CompleteUploadUseCase } from "../application/use-cases/complete-upload.use-case";
 import { CreateAttachmentDownloadUrlUseCase } from "../application/use-cases/create-attachment-download-url.use-case";
 import { DeleteAttachmentUseCase } from "../application/use-cases/delete-attachment.use-case";
@@ -153,6 +154,7 @@ export class AttachmentsController {
    * or `pending_approval` expense is not a draft, which is the stricter reading the
    * matrix's 🟡 cell requires. A `void` expense refuses everybody.
    */
+  @Audited("attachment.created")
   @Post("expenses/:expenseId/attachments")
   @RequirePermission("expense.create")
   @HttpCode(HttpStatus.CREATED)
@@ -211,6 +213,7 @@ export class AttachmentsController {
    * connection dropped after the server committed cannot tell a lost response from a
    * lost request, so refusing it would leave a successful upload unreportable.
    */
+  @Audited("attachment.completed")
   @Post("attachments/:attachmentId/complete")
   @RequirePermission("expense.create")
   @HttpCode(HttpStatus.OK)
@@ -270,6 +273,7 @@ export class AttachmentsController {
    * `expense_revisions` row or approval stamp is touched. Deleting a bill does not
    * invalidate a T070 approval (D6.2).
    */
+  @Audited("attachment.deleted")
   @Delete("attachments/:attachmentId")
   @RequirePermission("expense.void")
   @HttpCode(HttpStatus.NO_CONTENT)

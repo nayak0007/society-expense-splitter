@@ -21,9 +21,11 @@ import { z } from "zod";
 
 import {
   UnitOfWork,
+  type AuditFlush,
   type TransactionActor,
   type TransactionContext,
 } from "../../../infrastructure/database/unit-of-work";
+import { AuditService } from "../../audit/audit.service";
 import {
   ATTACHMENT_COLUMN_EXPRESSIONS,
   attachmentErrorFromPostgres,
@@ -82,10 +84,29 @@ import {
  * the row itself — one updates, the other matches zero rows and re-reads, which is
  * the replay path — and no explicit lock is needed. Adding one would create a
  * second lock edge out of this table for no benefit.
+ *
+ * ## The three database transitions record audits, and the object store does not (T050 Stage D)
+ *
+ * `reserve`, `markComplete` and `deleteById` each hand their entry to `UnitOfWork`'s audit
+ * seam, so the row and its audit entry commit together (ADR-0014 D1). What is **not**
+ * atomic, and is not claimed to be, is the object store: the presigned PUT, the `HEAD`,
+ * the byte read and the object deletion all happen outside any database transaction, and
+ * no distributed transaction is introduced to pretend otherwise. The audit entry therefore
+ * records the **committed database transition** — a reservation written, a reservation
+ * stamped complete, a row removed — and never the storage operation, which has no
+ * transactional presence to share. The three consequences are spelled out at each call
+ * site: a reservation whose URL could not be minted is withdrawn by its own audited
+ * delete; a completion replay is a no-op and flushes nothing; and an object orphaned by a
+ * failed deletion is a *log line* for the abandoned-object sweep, not an audit row, because
+ * no database row changed when it failed.
  */
 @Injectable()
 export class AttachmentRepositoryPostgres implements AttachmentRepository {
-  constructor(private readonly unitOfWork: UnitOfWork) {}
+  constructor(
+    private readonly unitOfWork: UnitOfWork,
+    // T050 Stage D: builds the audit rows the writer persists, via the transaction seam.
+    private readonly audit: AuditService,
+  ) {}
 
   /** The parent expense, or `null` when it is not visible to this caller. */
   async findExpenseForAttachment(
@@ -160,23 +181,30 @@ export class AttachmentRepositoryPostgres implements AttachmentRepository {
     input: ReserveAttachmentInput,
     actor: UserId,
   ): Promise<Result<AttachmentRecord, AttachmentError>> {
-    return this.run(actor, "write", async (tx) => {
-      // 1 · The society row, `FOR UPDATE`. Through a definer function because
-      //     `authenticated` holds only column-level UPDATE on `societies` and so
-      //     cannot take the lock itself — and widening that grant to allow it would
-      //     also hand a caller the derived columns `society_update()` withholds.
-      await runQuery(
-        tx,
-        sql`select public.attachment_presign_lock(${input.societyId}::uuid)`,
-      );
+    // Set only on the insert path, so a quota refusal — which returns before the insert —
+    // flushes nothing at all (T050 Stage D).
+    let reserved: AttachmentRecord | null = null;
 
-      // 2 · What this society is already using. A completed row always counts; an
-      //     incomplete row counts while its presigned URL could still be used, which
-      //     is the presign TTL plus nothing (ADR-0012 D2). `now()` is the database's
-      //     clock, so the window cannot be widened by a skewed API host.
-      const usageRows = await runQuery(
-        tx,
-        sql`
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        // 1 · The society row, `FOR UPDATE`. Through a definer function because
+        //     `authenticated` holds only column-level UPDATE on `societies` and so
+        //     cannot take the lock itself — and widening that grant to allow it would
+        //     also hand a caller the derived columns `society_update()` withholds.
+        await runQuery(
+          tx,
+          sql`select public.attachment_presign_lock(${input.societyId}::uuid)`,
+        );
+
+        // 2 · What this society is already using. A completed row always counts; an
+        //     incomplete row counts while its presigned URL could still be used, which
+        //     is the presign TTL plus nothing (ADR-0012 D2). `now()` is the database's
+        //     clock, so the window cannot be widened by a skewed API host.
+        const usageRows = await runQuery(
+          tx,
+          sql`
           select coalesce(sum(size_bytes), 0)::text as used_bytes
             from public.attachments
            where society_id = ${input.societyId}::uuid
@@ -185,30 +213,30 @@ export class AttachmentRepositoryPostgres implements AttachmentRepository {
                or created_at > now() - interval '15 minutes'
              )
         `,
-      );
+        );
 
-      const usedBytes = parseByteCount(usageRows[0]?.["used_bytes"]);
+        const usedBytes = parseByteCount(usageRows[0]?.["used_bytes"]);
 
-      // 3 · The decision. `quotaVerdict` allows exactly-equal and refuses greater,
-      //     and returns the refusal rather than throwing — running out of space is a
-      //     402, not an exception.
-      const verdict = quotaVerdict(
-        usedBytes,
-        input.sizeBytes,
-        input.planCapBytes,
-      );
-      if (!verdict.ok) return verdict;
+        // 3 · The decision. `quotaVerdict` allows exactly-equal and refuses greater,
+        //     and returns the refusal rather than throwing — running out of space is a
+        //     402, not an exception.
+        const verdict = quotaVerdict(
+          usedBytes,
+          input.sizeBytes,
+          input.planCapBytes,
+        );
+        if (!verdict.ok) return verdict;
 
-      // 4 · The row. The id, the key, the checksum, the size and the scan status are
-      //     all decided by the use case and re-asserted by the insert policy, so this
-      //     statement writes facts the database independently agrees with.
-      //
-      //     The id is written explicitly rather than left to `gen_random_uuid()`: the
-      //     caller already put it in the storage key, and a second uuid here would
-      //     leave every key naming a row that does not exist.
-      const inserted = await runQuery(
-        tx,
-        sql`
+        // 4 · The row. The id, the key, the checksum, the size and the scan status are
+        //     all decided by the use case and re-asserted by the insert policy, so this
+        //     statement writes facts the database independently agrees with.
+        //
+        //     The id is written explicitly rather than left to `gen_random_uuid()`: the
+        //     caller already put it in the storage key, and a second uuid here would
+        //     leave every key naming a row that does not exist.
+        const inserted = await runQuery(
+          tx,
+          sql`
           insert into public.attachments (
             id, society_id, entity_type, entity_id, storage_key, original_filename,
             mime_type, size_bytes, checksum, uploaded_by
@@ -227,13 +255,30 @@ export class AttachmentRepositoryPostgres implements AttachmentRepository {
           )
           returning ${ATTACHMENT_COLUMNS}
         `,
-      );
+        );
 
-      return {
-        ok: true,
-        value: parseSingleRow(inserted, "reserved attachment"),
-      };
-    });
+        const record = parseSingleRow(inserted, "reserved attachment");
+        reserved = record;
+        return { ok: true, value: record };
+      },
+      // `category: "financial"`: the row is a bill — the evidence a T070 approval rests
+      // on — so who created it belongs in the half a Treasurer reads.
+      () =>
+        reserved === null
+          ? []
+          : [
+              this.audit.entry({
+                societyId: input.societyId,
+                category: "financial",
+                action: "attachment.created",
+                entityType: "attachment",
+                entityId: reserved.id,
+                before: null,
+                after: attachmentAuditSnapshot(reserved),
+                metadata: { expenseId: input.entityId },
+              }),
+            ],
+    );
   }
 
   /** One attachment of one society, `null` when the caller may not see it. */
@@ -316,10 +361,20 @@ export class AttachmentRepositoryPostgres implements AttachmentRepository {
     societyId: SocietyId,
     actor: UserId,
   ): Promise<Result<AttachmentRecord, AttachmentError>> {
-    return this.run(actor, "write", async (tx) => {
-      const updated = await runQuery(
-        tx,
-        sql`
+    // The pre-completion state, and the replay test (T050 Stage D). Both are derived from
+    // the statement's own `WHERE completed_at IS NULL`, which is the proof that the row
+    // matched with a null stamp and that no column but `completed_at` moved — so a first
+    // completion flushes an entry and a replay, which matches nothing and re-reads, flushes
+    // none. Staying `null` on every path but the fresh update is what makes it the test.
+    let before: Record<string, unknown> | null = null;
+
+    return this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const updated = await runQuery(
+          tx,
+          sql`
           update public.attachments
              set completed_at = now()
            where id = ${attachmentId}::uuid
@@ -327,48 +382,67 @@ export class AttachmentRepositoryPostgres implements AttachmentRepository {
              and completed_at is null
           returning ${ATTACHMENT_COLUMNS}
         `,
-      );
+        );
 
-      const [row] = updated;
-      if (row !== undefined) {
-        return { ok: true, value: attachmentFromRow(parseRow(row)) };
-      }
+        const [row] = updated;
+        if (row !== undefined) {
+          const completed = attachmentFromRow(parseRow(row));
+          before = attachmentAuditSnapshot({ ...completed, completedAt: null });
+          return { ok: true, value: completed };
+        }
 
-      // Nothing matched. Read the row back and answer from what it actually says.
-      const current = await runQuery(
-        tx,
-        sql`
+        // Nothing matched. Read the row back and answer from what it actually says.
+        const current = await runQuery(
+          tx,
+          sql`
           select ${ATTACHMENT_COLUMNS}
             from public.attachments
            where id = ${attachmentId}::uuid
              and society_id = ${societyId}::uuid
            limit 1
         `,
-      );
+        );
 
-      const [existing] = current;
-      if (existing === undefined) {
+        const [existing] = current;
+        if (existing === undefined) {
+          return {
+            ok: false,
+            error: attachmentErrorFromPostgres(
+              { code: "P0002", message: "EXPENSE_NOT_FOUND" },
+              "read",
+            ),
+          };
+        }
+
+        const parsed = attachmentFromRow(parseRow(existing));
+        // Already complete: the replay path, and a success — with no entry, because no
+        // transition happened (ADR-0012's "completion replay is a 200 no-op").
+        if (parsed.completedAt !== null) return { ok: true, value: parsed };
+
         return {
           ok: false,
           error: attachmentErrorFromPostgres(
-            { code: "P0002", message: "EXPENSE_NOT_FOUND" },
-            "read",
+            { code: "42501", message: "row-level security" },
+            "write",
           ),
         };
-      }
-
-      const parsed = attachmentFromRow(parseRow(existing));
-      // Already complete: the replay path, and a success.
-      if (parsed.completedAt !== null) return { ok: true, value: parsed };
-
-      return {
-        ok: false,
-        error: attachmentErrorFromPostgres(
-          { code: "42501", message: "row-level security" },
-          "write",
-        ),
-      };
-    });
+      },
+      (completed) =>
+        completed.ok && before !== null
+          ? [
+              this.audit.entry({
+                societyId,
+                category: "financial",
+                action: "attachment.completed",
+                entityType: "attachment",
+                entityId: completed.value.id,
+                before,
+                after: attachmentAuditSnapshot(completed.value),
+                metadata: { expenseId: completed.value.entityId },
+              }),
+            ]
+          : [],
+    );
   }
 
   /**
@@ -385,36 +459,70 @@ export class AttachmentRepositoryPostgres implements AttachmentRepository {
     societyId: SocietyId,
     actor: UserId,
   ): Promise<void> {
-    await this.run(actor, "write", async (tx) => {
-      const deleted = await runQuery(
-        tx,
-        sql`
+    // The pre-deletion row, and it comes out of the `DELETE`'s own `RETURNING` (T050
+    // Stage D): `RETURNING` on a `DELETE` yields the row as it was **before** removal, so
+    // the snapshot needs no second statement and cannot race with one. A refusal leaves it
+    // null and flushes nothing.
+    let before: Record<string, unknown> | null = null;
+
+    await this.run(
+      actor,
+      "write",
+      async (tx) => {
+        const deleted = await runQuery(
+          tx,
+          sql`
           delete from public.attachments
            where id = ${attachmentId}::uuid
              and society_id = ${societyId}::uuid
-          returning id
+          returning ${ATTACHMENT_COLUMNS}
         `,
-      );
+        );
 
-      if (deleted.length > 0) return;
+        if (deleted.length > 0) {
+          const [row] = deleted;
+          if (row !== undefined) {
+            before = attachmentAuditSnapshot(attachmentFromRow(parseRow(row)));
+          }
+          return;
+        }
 
-      const current = await runQuery(
-        tx,
-        sql`
+        const current = await runQuery(
+          tx,
+          sql`
           select id from public.attachments
            where id = ${attachmentId}::uuid
              and society_id = ${societyId}::uuid
            limit 1
         `,
-      );
+        );
 
-      throw attachmentErrorFromPostgres(
-        current.length === 0
-          ? { code: "P0002", message: "EXPENSE_NOT_FOUND" }
-          : { code: "42501", message: "row-level security" },
-        current.length === 0 ? "read" : "write",
-      );
-    });
+        throw attachmentErrorFromPostgres(
+          current.length === 0
+            ? { code: "P0002", message: "EXPENSE_NOT_FOUND" }
+            : { code: "42501", message: "row-level security" },
+          current.length === 0 ? "read" : "write",
+        );
+      },
+      // `after: null` — the row is gone, which is what a `NULL` after means in the log
+      // (the migration's own comment). The object's fate is **not** recorded here: it is
+      // removed outside this transaction, best-effort, and its failure is the sweep's log
+      // line rather than an audit row, because this row's removal did not depend on it.
+      () =>
+        before === null
+          ? []
+          : [
+              this.audit.entry({
+                societyId,
+                category: "financial",
+                action: "attachment.deleted",
+                entityType: "attachment",
+                entityId: attachmentId,
+                before,
+                after: null,
+              }),
+            ],
+    );
   }
 
   /**
@@ -458,14 +566,44 @@ export class AttachmentRepositoryPostgres implements AttachmentRepository {
     actor: UserId,
     context: "read" | "write",
     work: (tx: TransactionContext) => Promise<T>,
+    /** The audit scope and entries — omitted by every read (T050 Stage D). */
+    audit?: AuditFlush<T>,
   ): Promise<T> {
     const identity: TransactionActor = { kind: "user", userId: actor };
     try {
-      return await this.unitOfWork.transaction(identity, work);
+      return await this.unitOfWork.transaction(identity, work, audit);
     } catch (error: unknown) {
       throw attachmentErrorFromPostgres(error, context);
     }
   }
+}
+
+/**
+ * The attachment facts an audit entry records (T050 Stage D) — and the storage key is
+ * deliberately not one.
+ *
+ * The key names a private object's address. It is not a credential and not the object's
+ * content, but it is the one field that is only useful to something already holding bucket
+ * access, and the sweep that needs it gets it from the structured log line at the delete
+ * site instead (ADR-0012 D6.3). What remains is the bill's own identity: what it was
+ * called, what it was declared to be, how big it was, the digest it must satisfy, where it
+ * had got to in the lifecycle, who uploaded it and which expense owns it. `checksum` and
+ * `uploadedBy` are the two an auditor actually reaches for — the bytes' identity and the
+ * person who put them there — and neither is on any deny-list.
+ */
+function attachmentAuditSnapshot(
+  attachment: AttachmentRecord,
+): Record<string, unknown> {
+  return {
+    expenseId: attachment.entityId,
+    originalFilename: attachment.originalFilename,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    checksum: attachment.checksum,
+    scanStatus: attachment.scanStatus,
+    uploadedBy: attachment.uploadedBy,
+    completedAt: attachment.completedAt,
+  };
 }
 
 /** The projection over `expenses` this module reads — four columns, never more. */
