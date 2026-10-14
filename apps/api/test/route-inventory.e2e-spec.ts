@@ -182,20 +182,72 @@ const MANDATED_AUDIT: ReadonlyMap<string, readonly string[]> = new Map([
   ["SocietiesController POST /societies/join", ["society.joined"]],
   ["SocietiesController POST /societies/:societyId/leave", ["society.left"]],
   ["SocietiesController DELETE /societies/:societyId", ["society.deleted"]],
+
+  // ── expense sub-resources and attachments (Stage D group 5) ──────────────
+  // Every route here writes through its adapter's `run()` into `UnitOfWork`'s audit
+  // seam, so the entry commits with the business row or not at all. Three of them
+  // are conditional by design and the conditional is part of the contract, not an
+  // optimisation: `attachments/:attachmentId/complete` is a 200 no-op on replay
+  // (ADR-0012), and `comments/:commentId` is idempotent — an already-tombstoned
+  // comment is not a second transition — so neither flushes an entry when the
+  // database matched no row. The route inventory asserts the declaration; the
+  // persisted rows, including those two no-ops, are asserted in real SQL below.
+  [
+    "ExpenseCategoriesController POST /expense-categories",
+    ["expense.category_created"],
+  ],
+  [
+    "ExpenseCategoriesController PATCH /expense-categories/:categoryId",
+    ["expense.category_updated"],
+  ],
+  [
+    "ExpenseCategoriesController DELETE /expense-categories/:categoryId",
+    ["expense.category_deleted"],
+  ],
+  ["ExpensesController PUT /expenses/:expenseId/gst", ["expense.gst_updated"]],
+  [
+    "ExpensesController POST /expenses/:expenseId/comments",
+    ["expense.comment_added"],
+  ],
+  [
+    "ExpensesController DELETE /expenses/:expenseId/comments/:commentId",
+    ["expense.comment_deleted"],
+  ],
+  [
+    "AttachmentsController POST /expenses/:expenseId/attachments",
+    ["attachment.created"],
+  ],
+  [
+    "AttachmentsController POST /attachments/:attachmentId/complete",
+    ["attachment.completed"],
+  ],
+  [
+    "AttachmentsController DELETE /attachments/:attachmentId",
+    ["attachment.deleted"],
+  ],
 ]);
 
 /**
- * Write-verb routes that record no audit row **yet**, each with the reason.
+ * Write-verb routes that record no audit row, each with the reason.
  *
- * Two different reasons live here, and keeping them distinguishable is the point:
+ * Two reasons have lived here, and keeping them distinguishable is the point:
  *
  *  - **not a mutation** — the route only computes or validates (`preview-split`,
  *    `import/preview`), so there is no business change for an audit row to sit
  *    beside;
- *  - **Stage B coverage still outstanding** — the module's adapters have not been
- *    integrated yet. These are the remaining groups named by T050's own status
- *    block, and this list is the machine-readable form of that gap: the entry
- *    disappears in the same change that wires the module up.
+ *  - **coverage still outstanding** — the module's adapters have not been integrated
+ *    yet. These were the remaining groups named by T050's own status block, and this
+ *    list was the machine-readable form of that gap: the entry disappeared in the same
+ *    change that wired the module up.
+ *
+ * **The second reason is now empty.** Stage B took the core expense lifecycle, members,
+ * invitations and structure; Stage C took the six society lifecycle mutations; Stage D
+ * took the expense sub-resources (categories, comments, GST) and the attachment
+ * lifecycle — the last nine write-verb routes. So this list holds only the two routes
+ * that are not mutations, and it is deliberately kept as a list rather than deleted: an
+ * empty-but-present deferral register is what makes "every write-verb route is either
+ * mandated or reasoned about here" checkable, and the next task that adds a mutation
+ * route without its integration fails this suite rather than passing quietly.
  */
 const AUDIT_DEFERRED: ReadonlyMap<string, string> = new Map([
   // ── not mutations ───────────────────────────────────────────────────────
@@ -208,43 +260,13 @@ const AUDIT_DEFERRED: ReadonlyMap<string, string> = new Map([
     "Validates a CSV and reports per row; membership state is untouched (T048).",
   ],
 
-  // ── Stage B coverage outstanding ────────────────────────────────────────
-  [
-    "ExpensesController POST /expenses/:expenseId/comments",
-    "remaining Stage B group 5 (expense sub-resources)",
-  ],
-  [
-    "ExpensesController DELETE /expenses/:expenseId/comments/:commentId",
-    "remaining Stage B group 5 (expense sub-resources)",
-  ],
-  [
-    "ExpensesController PUT /expenses/:expenseId/gst",
-    "remaining Stage B group 5 (expense sub-resources)",
-  ],
-  [
-    "ExpenseCategoriesController POST /expense-categories",
-    "remaining Stage B group 5 (expense sub-resources)",
-  ],
-  [
-    "ExpenseCategoriesController PATCH /expense-categories/:categoryId",
-    "remaining Stage B group 5 (expense sub-resources)",
-  ],
-  [
-    "ExpenseCategoriesController DELETE /expense-categories/:categoryId",
-    "remaining Stage B group 5 (expense sub-resources)",
-  ],
-  [
-    "AttachmentsController POST /expenses/:expenseId/attachments",
-    "remaining Stage B group 5 (attachments)",
-  ],
-  [
-    "AttachmentsController POST /attachments/:attachmentId/complete",
-    "remaining Stage B group 5 (attachments)",
-  ],
-  [
-    "AttachmentsController DELETE /attachments/:attachmentId",
-    "remaining Stage B group 5 (attachments)",
-  ],
+  // ── Stage D coverage outstanding: none ──────────────────────────────────
+  //
+  // Stage D moved the last nine write-verb routes into `MANDATED_AUDIT` above, so the
+  // only entries left in this list are the two the docblock calls "not a mutation".
+  // T050's remaining gap is the **read** side — `GET /societies/:id/audit-logs` and its
+  // reader-audit row — which is Stage E and adds a route rather than covering one, so
+  // nothing on this list changes when it lands.
 ]);
 
 /**

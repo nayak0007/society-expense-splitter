@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -13,21 +13,28 @@ import {
   asMemberId,
   asSocietyId,
   asUserId,
+  attachmentError,
   paise,
+  parseGstin,
   systemClock,
   weight,
 } from "@ses/domain";
 import type {
   ApartmentId,
   ApartmentRepository,
+  AttachmentMembershipReader,
+  AttachmentRepository,
   AuditEntry,
   BuildingRepository,
   ExpenseCategoryId,
   ExpenseCategoryRepository,
+  ExpenseCommentRepository,
   ExpenseDraftFields,
+  ExpenseGstDetailsRepository,
   ExpenseId,
   ExpenseRepository,
   ExpenseSplitRepository,
+  Gstin,
   InvitationRepository,
   MemberId,
   MemberRepository,
@@ -35,19 +42,29 @@ import type {
   PublishExpenseAllocation,
   SocietyId,
   SocietyRepository,
+  StorageProvider,
   UserId,
 } from "@ses/domain";
 import type postgres from "postgres";
 
+import { MEMBERSHIP_READER } from "../../src/common/authorization/membership-reader";
 import { RequestContext } from "../../src/common/context/request-context";
 import { buildAuditEntry } from "../../src/common/audit/audit-context";
+import { AppConfig } from "../../src/config/app-config";
 import { resolveMigrationsDir } from "../../src/infrastructure/database/migrations/runner";
 import type { TransactionContext } from "../../src/infrastructure/database/unit-of-work";
+import { STORAGE_PROVIDER } from "../../src/infrastructure/storage/storage.tokens";
+import { ATTACHMENT_REPOSITORY } from "../../src/modules/attachments/application/attachment.tokens";
+import { CompleteUploadUseCase } from "../../src/modules/attachments/application/use-cases/complete-upload.use-case";
+import { PresignUploadUseCase } from "../../src/modules/attachments/application/use-cases/presign-upload.use-case";
 import { EXPENSE_CATEGORY_REPOSITORY } from "../../src/modules/expenses/application/expense-category.tokens";
 import {
+  EXPENSE_COMMENT_REPOSITORY,
+  EXPENSE_GST_DETAILS_REPOSITORY,
   EXPENSE_REPOSITORY,
   EXPENSE_SPLIT_REPOSITORY,
 } from "../../src/modules/expenses/application/expense.tokens";
+import { DeleteDraftUseCase } from "../../src/modules/expenses/application/use-cases/delete-draft.use-case";
 import { INVITATION_REPOSITORY } from "../../src/modules/invitations/application/invitation.tokens";
 import { MEMBER_REPOSITORY } from "../../src/modules/members/application/member.tokens";
 import { SOCIETY_REPOSITORY } from "../../src/modules/societies/application/society.tokens";
@@ -1858,5 +1875,1214 @@ describe("the audit trail of the society lifecycle (Stage C)", () => {
       select name from public.societies where id = ${fixture.societyId}::uuid
     `;
     expect(society?.name).toBe("Refused Court");
+  });
+});
+
+/**
+ * The audit trail of the expense sub-resources and the attachment lifecycle — T050
+ * Stage D.
+ *
+ * ## What only these cases can prove
+ *
+ * The mechanism is already proven generically (Stage A) and per-module for the core
+ * expense lifecycle, members, invitations, structure (Stage B) and the society
+ * lifecycle (Stage C). Stage D's nine routes are the last of T050's write surface, and
+ * what each case here adds is that the **specific mutation** is wired to the same seam:
+ *
+ *  - **categories** — a birth keyed to the minted id, an edit whose `before` is the
+ *    pre-edit state read in the same transaction, and a soft delete that keeps the row
+ *    and records the flag that changed;
+ *  - **comments** — an addition that records the author, the stream position and the
+ *    body's *length* and never the text, and a tombstone that is a real transition while
+ *    a replay of it is not;
+ *  - **GST** — a tax row recorded as a birth and then as a change, in the column's own
+ *    exact paise strings, with the split and ledger tables untouched;
+ *  - **attachments** — a reservation recorded without the upload URL, the storage key or
+ *    any bucket credential; completion recorded as a transition with the pre-state
+ *    reconstructed from the statement's own predicate; and a deletion whose `before`
+ *    comes out of the `DELETE`'s `RETURNING` and whose `after` is `null`.
+ *
+ * Two no-op cases are here because the alternative is a log that lies: an
+ * already-tombstoned comment and a replayed completion each write **nothing**, since
+ * neither is a second transition (ADR-0014 D4). Both are asserted by comparing the whole
+ * action list before and after the second call, not by counting a single action.
+ *
+ * The refusals asserted here are the database's own: a cross-society id, a category an
+ * expense still references, a comment the caller may neither author nor administer, and
+ * a write from outside the tenant. Each leaves the log exactly as it was, which is the
+ * half of the guarantee that a happy-path test cannot reach.
+ */
+/**
+ * The real store adapter with **one** method replaced: `presignUpload` refuses.
+ *
+ * Controlled fault injection at the signing boundary, and deliberately nothing more.
+ * The rejection is the same `storage_unavailable` an S3 5xx, 408, 429 or timeout
+ * produces (`S3StorageProvider`'s own classification), so the contract asserted below
+ * is the shipping one rather than a fixture's invention; every other method delegates,
+ * so a suite using this still reads and deletes real objects. It exists as a wrapper
+ * rather than a Nest override because only the *signing* half should fail — the
+ * database half has to be the real adapter for the reservation to commit.
+ */
+class FailingSigningStorage implements StorageProvider {
+  constructor(private readonly inner: StorageProvider) {}
+
+  presignUpload(): Promise<never> {
+    return Promise.reject(
+      attachmentError("storage_unavailable", "the store is unreachable"),
+    );
+  }
+
+  head(storageKey: string) {
+    return this.inner.head(storageKey);
+  }
+
+  readObject(storageKey: string) {
+    return this.inner.readObject(storageKey);
+  }
+
+  presignDownload(storageKey: string, ttlSeconds: number) {
+    return this.inner.presignDownload(storageKey, ttlSeconds);
+  }
+
+  copy(fromKey: string, toKey: string) {
+    return this.inner.copy(fromKey, toKey);
+  }
+
+  delete(storageKey: string) {
+    return this.inner.delete(storageKey);
+  }
+}
+
+describe("the audit trail of the expense sub-resources and attachments (Stage D)", () => {
+  let world: SocietyFixture & {
+    readonly categoryId: ExpenseCategoryId;
+    readonly expenseId: ExpenseId;
+  };
+  let categories: ExpenseCategoryRepository;
+  let comments: ExpenseCommentRepository;
+  let gstDetails: ExpenseGstDetailsRepository;
+  let attachments: AttachmentRepository;
+  let storage: StorageProvider;
+  let presignUpload: PresignUploadUseCase;
+  let completeUpload: CompleteUploadUseCase;
+  let deleteDraft: DeleteDraftUseCase;
+
+  beforeAll(() => {
+    categories = harness.app.get<ExpenseCategoryRepository>(
+      EXPENSE_CATEGORY_REPOSITORY,
+    );
+    comments = harness.app.get<ExpenseCommentRepository>(
+      EXPENSE_COMMENT_REPOSITORY,
+    );
+    gstDetails = harness.app.get<ExpenseGstDetailsRepository>(
+      EXPENSE_GST_DETAILS_REPOSITORY,
+    );
+    attachments = harness.app.get<AttachmentRepository>(ATTACHMENT_REPOSITORY);
+    storage = harness.app.get<StorageProvider>(STORAGE_PROVIDER);
+    presignUpload = harness.app.get(PresignUploadUseCase);
+    completeUpload = harness.app.get(CompleteUploadUseCase);
+    deleteDraft = harness.app.get(DeleteDraftUseCase);
+  });
+
+  beforeEach(async () => {
+    const society = await seedSociety(
+      harness,
+      "Stage D Court",
+      "admin@stage-d-audit.ses.test",
+    );
+    const listed = await categories.listCategories(
+      society.societyId,
+      society.adminUserId,
+    );
+    const category = listed.find((entry) => entry.name === "Lift");
+    if (category === undefined) {
+      throw new Error('The seeded category "Lift" is missing.');
+    }
+    world = {
+      ...society,
+      categoryId: category.id,
+      expenseId: await insertDraftExpense(
+        society.societyId,
+        category.id,
+        society.adminMemberId,
+      ),
+    };
+  });
+
+  /** Runs `work` inside a request context as `userId`, so the role is the trusted one. */
+  function asRequest<T>(
+    userId: UserId,
+    role: MemberRole,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return RequestContext.run(
+      {
+        requestId: "req-stage-d-audit",
+        userId,
+        member: {
+          membershipId: asMemberId(randomUUID()),
+          societyId: asSocietyId(randomUUID()),
+          role,
+          status: "active",
+        },
+        ip: undefined,
+        userAgent: undefined,
+        audited: [],
+      },
+      work,
+    );
+  }
+
+  const asAdmin = <T>(work: () => Promise<T>): Promise<T> =>
+    asRequest(world.adminUserId, "admin", work);
+
+  /** Every persisted action, in insertion order — the log's own order. */
+  async function actions(): Promise<readonly string[]> {
+    const rows = await owner<{ action: string }[]>`
+      select action from public.audit_logs order by id
+    `;
+    return rows.map((row) => row.action);
+  }
+
+  interface AuditRow {
+    readonly action: string;
+    readonly society_id: string;
+    readonly actor_user_id: string | null;
+    readonly actor_role: string | null;
+    readonly category: string;
+    readonly entity_type: string;
+    readonly entity_id: string | null;
+    readonly before: unknown;
+    readonly after: unknown;
+    readonly metadata: unknown;
+  }
+
+  /** Every row for one action, in insertion order. */
+  async function rowsFor(action: string): Promise<readonly AuditRow[]> {
+    return owner<AuditRow[]>`
+      select action,
+             society_id::text as society_id,
+             actor_user_id::text as actor_user_id,
+             actor_role::text as actor_role,
+             category,
+             entity_type,
+             entity_id::text as entity_id,
+             "before",
+             "after",
+             metadata
+        from public.audit_logs
+       where action = ${action}
+       order by id
+    `;
+  }
+
+  async function rowFor(action: string): Promise<AuditRow> {
+    const [row] = await rowsFor(action);
+    if (row === undefined) throw new Error(`No audit row for ${action}.`);
+    return row;
+  }
+
+  /**
+   * Everything the row persisted, as one string.
+   *
+   * The assertion this exists for is an *absence* — a comment's text, an upload URL, an
+   * S3 signature, a storage key — and an absence has to be checked against every column,
+   * not against the one a guess says it would be in. Stage C used the same shape for the
+   * join code (D11), and the reasoning is identical: a snapshot that merely *kept* the
+   * value somewhere else would pass a narrower test.
+   */
+  async function payloadTextFor(action: string): Promise<string> {
+    const [row] = await owner<{ payload: string }[]>`
+      select coalesce("before", 'null'::jsonb)::text
+             || coalesce("after", 'null'::jsonb)::text
+             || coalesce(metadata, 'null'::jsonb)::text as payload
+        from public.audit_logs
+       where action = ${action}
+       order by id desc
+       limit 1
+    `;
+    return row?.payload ?? "";
+  }
+
+  const newUser = (email: string): Promise<UserId> =>
+    createLocalUser(owner, email, "Stage D").then((id) => asUserId(id));
+
+  /** A live category of this society that nothing references yet. */
+  async function insertCategory(name: string): Promise<ExpenseCategoryId> {
+    const [row] = await owner<{ id: string }[]>`
+      insert into public.expense_categories (society_id, name, display_order)
+      values (${world.societyId}::uuid, ${name}::varchar, 99::smallint)
+      returning id
+    `;
+    return asExpenseCategoryId(row!.id);
+  }
+
+  /** A draft expense, inserted as the owner — no audit row, and no repository involved. */
+  async function insertDraftExpense(
+    societyId: SocietyId,
+    categoryId: ExpenseCategoryId,
+    memberId: MemberId,
+  ): Promise<ExpenseId> {
+    const [row] = await owner<{ id: string }[]>`
+      insert into public.expenses (
+        society_id, category_id, title, amount_paise, expense_date,
+        split_strategy, apartment_basis, status, created_by, version
+      )
+      values (
+        ${societyId}::uuid,
+        ${categoryId}::uuid,
+        'Stage D Bill',
+        '250000'::bigint,
+        '2026-09-30'::date,
+        'equal'::public.split_strategy,
+        null,
+        'draft'::public.expense_status,
+        ${memberId}::uuid,
+        1
+      )
+      returning id
+    `;
+    return asExpenseId(row!.id);
+  }
+
+  /** A checksum-valid GSTIN, through the domain's own parser rather than a cast. */
+  function gstin(value: string): Gstin {
+    const parsed = parseGstin(value);
+    if (!parsed.ok) throw new Error(`Invalid fixture GSTIN: ${value}`);
+    return parsed.value;
+  }
+
+  function sha256(bytes: Buffer): string {
+    return createHash("sha256").update(bytes).digest("hex");
+  }
+
+  /** Bytes whose signature and digest are genuinely those of a JPEG. */
+  function jpegBytes(payload = 0x41, size = 64): Buffer {
+    const body = Buffer.alloc(size, payload);
+    body[0] = 0xff;
+    body[1] = 0xd8;
+    body[2] = 0xff;
+    body[3] = 0xe0;
+    return body;
+  }
+
+  /** A real PUT of the exact bytes the signature pinned, through the real presigned URL. */
+  async function putObject(
+    url: string,
+    bytes: Buffer,
+    contentType: string,
+  ): Promise<number> {
+    const response = await fetch(url, {
+      method: "PUT",
+      body: bytes,
+      headers: { "content-type": contentType },
+    });
+    return response.status;
+  }
+
+  /**
+   * Spend `bytes` of the society's attachment quota on completed rows.
+   *
+   * Free is 500 MB and the per-object cap is 10 MB (`chk_attachments_size_max`), so a
+   * quota boundary cannot be reached with one row — the table refuses it. Filling in
+   * 10 MB rows is also the honest shape of the data: a society at its cap *is* a long
+   * list of bills. The rows go in as the owner, so the fixture writes no audit entry
+   * of its own and the only rows the log can hold are the ones under test.
+   */
+  async function fillPlan(expenseId: ExpenseId, bytes: number): Promise<void> {
+    const perRow = 10 * 1024 * 1024;
+    for (let remaining = bytes; remaining > 0; remaining -= perRow) {
+      const size = Math.min(perRow, remaining);
+      await owner`
+        insert into public.attachments (
+          society_id, entity_type, entity_id, storage_key, original_filename,
+          mime_type, size_bytes, checksum, uploaded_by, completed_at
+        ) values (
+          ${world.societyId}::uuid, 'expense', ${expenseId}::uuid,
+          ${`societies/${world.societyId}/expenses/${expenseId}/${randomUUID()}.jpg`},
+          'filler.jpg', 'image/jpeg', ${size}, ${"a".repeat(64)},
+          ${world.adminMemberId}::uuid, now()
+        )
+      `;
+    }
+  }
+
+  interface Refusal {
+    readonly code: string | undefined;
+    readonly status: number | undefined;
+    readonly message: string | undefined;
+    readonly detailCodes: readonly string[];
+  }
+
+  /**
+   * The thrown `AppError`, reduced to what a client branches on.
+   *
+   * Read off the error the use case raises rather than off an HTTP response, because these
+   * three paths are driven at the use-case boundary — but the fields are the same ones the
+   * filter renders and the e2e suite asserts, so the *contract* under test is unchanged.
+   */
+  async function refusalOf(run: () => Promise<unknown>): Promise<Refusal> {
+    try {
+      await run();
+    } catch (error: unknown) {
+      const app = error as {
+        code?: string;
+        status?: number;
+        message?: string;
+        payload?: { details?: readonly { code?: string }[] };
+      };
+      return {
+        code: app.code,
+        status: app.status,
+        message: app.message,
+        detailCodes: (app.payload?.details ?? []).map(
+          (detail) => detail.code ?? "",
+        ),
+      };
+    }
+    throw new Error("Expected the call to be refused.");
+  }
+
+  // ── categories ───────────────────────────────────────────────────────────
+
+  it("records a category creation as a birth keyed to the row it minted", async () => {
+    const created = await asAdmin(() =>
+      categories.create(
+        world.societyId,
+        { name: "Solar Panels", displayOrder: 21 },
+        world.adminUserId,
+      ),
+    );
+
+    expect(await actions()).toEqual(["expense.category_created"]);
+    const row = await rowFor("expense.category_created");
+    expect(row.society_id).toBe(world.societyId);
+    expect(row.actor_user_id).toBe(world.adminUserId);
+    expect(row.actor_role).toBe("admin");
+    // A category's flags decide how an expense in it is split and taxed, so it sits in
+    // the financial half a Treasurer reads (PRD §2.1).
+    expect(row.category).toBe("financial");
+    expect(row.entity_type).toBe("expense_category");
+    expect(row.entity_id).toBe(created.id);
+    // A birth: nothing was there before, and the id in `after` is the database's.
+    expect(row.before).toBeNull();
+    expect(row.after).toMatchObject({
+      name: "Solar Panels",
+      displayOrder: 21,
+      isActive: true,
+      gstApplicable: false,
+    });
+  });
+
+  it("records an edit with the pre-edit state as its before", async () => {
+    await asAdmin(() =>
+      categories.update(
+        world.categoryId,
+        world.societyId,
+        { name: "Lift Maintenance", isCapital: true },
+        world.adminUserId,
+      ),
+    );
+
+    expect(await actions()).toEqual(["expense.category_updated"]);
+    const row = await rowFor("expense.category_updated");
+    expect(row.entity_id).toBe(world.categoryId);
+    // The `before` is the state this transaction replaced, read ahead of the `UPDATE`.
+    expect(row.before).toMatchObject({ name: "Lift", isCapital: false });
+    expect(row.after).toMatchObject({
+      name: "Lift Maintenance",
+      isCapital: true,
+    });
+  });
+
+  it("records a soft delete that keeps the row and names the flag that changed", async () => {
+    const categoryId = await insertCategory("Deletable");
+
+    await asAdmin(() =>
+      categories.remove(categoryId, world.societyId, world.adminUserId),
+    );
+
+    expect(await actions()).toEqual(["expense.category_deleted"]);
+    const row = await rowFor("expense.category_deleted");
+    expect(row.entity_id).toBe(categoryId);
+    expect(row.before).toMatchObject({ name: "Deletable" });
+    // A soft delete: the row survives as the subject of the expenses filed under it, so
+    // the `after` is the flag rather than a missing entity (the same shape `society.deleted`
+    // takes).
+    expect(row.after).toEqual({ deletedAt: true });
+
+    const [stored] = await owner<{ name: string; deleted_at: string | null }[]>`
+      select name, deleted_at::text as deleted_at
+        from public.expense_categories
+       where id = ${categoryId}::uuid
+    `;
+    expect(stored?.name).toBe("Deletable");
+    expect(stored?.deleted_at).not.toBeNull();
+  });
+
+  it("records nothing when a category write is refused", async () => {
+    const outsider = await newUser("category-outsider@stage-d-audit.ses.test");
+    const otherSociety = await seedSociety(
+      harness,
+      "Other Court",
+      "admin@stage-d-other.ses.test",
+    );
+
+    // A category of one society, addressed with another's id: RLS scopes the update to
+    // nothing, so it raises `not_found` and the flush never runs.
+    await expect(
+      asAdmin(() =>
+        categories.update(
+          world.categoryId,
+          otherSociety.societyId,
+          { name: "Hijacked" },
+          world.adminUserId,
+        ),
+      ),
+    ).rejects.toThrow();
+
+    // A category an expense still references: the definer function refuses it.
+    await expect(
+      asAdmin(() =>
+        categories.remove(world.categoryId, world.societyId, world.adminUserId),
+      ),
+    ).rejects.toThrow();
+
+    // And a caller outside the tenant entirely.
+    await expect(
+      asRequest(outsider, "resident", () =>
+        categories.create(world.societyId, { name: "Contraband" }, outsider),
+      ),
+    ).rejects.toThrow();
+
+    expect(await actions()).toEqual([]);
+
+    // The row the refused edit named is untouched, and the referenced category is live.
+    const [category] = await owner<
+      { name: string; deleted_at: string | null }[]
+    >`
+      select name, deleted_at::text as deleted_at
+        from public.expense_categories
+       where id = ${world.categoryId}::uuid
+    `;
+    expect(category?.name).toBe("Lift");
+    expect(category?.deleted_at).toBeNull();
+  });
+
+  // ── comments ─────────────────────────────────────────────────────────────
+
+  it("records a comment's author and length, and never its text", async () => {
+    const body = "The lift invoice is attached.";
+
+    const added = await asAdmin(() =>
+      comments.add(
+        {
+          expenseId: world.expenseId,
+          societyId: world.societyId,
+          authorId: world.adminMemberId,
+          body,
+        },
+        world.adminUserId,
+      ),
+    );
+
+    expect(await actions()).toEqual(["expense.comment_added"]);
+    const row = await rowFor("expense.comment_added");
+    expect(row.society_id).toBe(world.societyId);
+    expect(row.actor_user_id).toBe(world.adminUserId);
+    // A comment is discussion, not financial state, so it stays out of the half a
+    // Treasurer's `audit.view` narrows to.
+    expect(row.category).toBe("other");
+    expect(row.entity_type).toBe("expense_comment");
+    expect(row.entity_id).toBe(added.id);
+    expect(row.before).toBeNull();
+    expect(row.after).toMatchObject({
+      authorId: world.adminMemberId,
+      sequence: added.sequence,
+      bodyLength: body.length,
+    });
+    expect(row.metadata).toMatchObject({ expenseId: world.expenseId });
+
+    // The minimal-allowlist decision, asserted rather than assumed: the words never reach
+    // a table no `DELETE` can reach.
+    const text = await payloadTextFor("expense.comment_added");
+    expect(text).not.toContain("lift invoice");
+  });
+
+  it("records a tombstone once, and a replay of it writes nothing", async () => {
+    const added = await asAdmin(() =>
+      comments.add(
+        {
+          expenseId: world.expenseId,
+          societyId: world.societyId,
+          authorId: world.adminMemberId,
+          body: "Removed later.",
+        },
+        world.adminUserId,
+      ),
+    );
+
+    await asAdmin(() =>
+      comments.softDelete(
+        added.id,
+        world.expenseId,
+        world.societyId,
+        world.adminUserId,
+      ),
+    );
+
+    expect(await actions()).toEqual([
+      "expense.comment_added",
+      "expense.comment_deleted",
+    ]);
+    const row = await rowFor("expense.comment_deleted");
+    expect(row.entity_type).toBe("expense_comment");
+    expect(row.entity_id).toBe(added.id);
+    expect(row.before).toMatchObject({
+      authorId: world.adminMemberId,
+      bodyLength: "Removed later.".length,
+    });
+    expect(row.after).toEqual({ deletedAt: true });
+
+    // The definer function is idempotent and returns the tombstoned row unchanged. That is
+    // a no-op, not a second transition, so the log is byte-identical afterwards.
+    await asAdmin(() =>
+      comments.softDelete(
+        added.id,
+        world.expenseId,
+        world.societyId,
+        world.adminUserId,
+      ),
+    );
+    expect(await actions()).toEqual([
+      "expense.comment_added",
+      "expense.comment_deleted",
+    ]);
+    expect(await rowsFor("expense.comment_deleted")).toHaveLength(1);
+  });
+
+  it("records nothing when the comment's author or an Admin refuses the delete", async () => {
+    const added = await asAdmin(() =>
+      comments.add(
+        {
+          expenseId: world.expenseId,
+          societyId: world.societyId,
+          authorId: world.adminMemberId,
+          body: "Admin's words.",
+        },
+        world.adminUserId,
+      ),
+    );
+
+    const resident = await newUser("commenter@stage-d-audit.ses.test");
+    await insertMember(owner, world.societyId, {
+      userId: resident,
+      role: "resident",
+      status: "active",
+    });
+
+    // Neither the author nor an Admin: the definer function raises before any write.
+    await expect(
+      asRequest(resident, "resident", () =>
+        comments.softDelete(
+          added.id,
+          world.expenseId,
+          world.societyId,
+          resident,
+        ),
+      ),
+    ).rejects.toThrow();
+
+    expect(await actions()).toEqual(["expense.comment_added"]);
+  });
+
+  // ── GST ──────────────────────────────────────────────────────────────────
+
+  it("records the tax row as a birth, then as a change in exact paise", async () => {
+    const [splitsBefore] = await owner<{ count: string }[]>`
+      select count(*)::text as count from public.expense_splits
+    `;
+
+    await asAdmin(() =>
+      gstDetails.upsertForExpense(
+        world.expenseId,
+        world.societyId,
+        {
+          gstin: gstin("27AAPFU0939F1ZV"),
+          invoiceNumber: "INV-1",
+          invoiceDate: "2026-09-28",
+          taxableValuePaise: paise(100_000n),
+          cgstPaise: paise(9_000n),
+          sgstPaise: paise(9_000n),
+          igstPaise: paise(0n),
+          cessPaise: paise(0n),
+          hsnSac: "995461",
+          placeOfSupply: "27",
+          isReverseCharge: false,
+          itcEligible: true,
+        },
+        world.adminUserId,
+      ),
+    );
+
+    expect(await actions()).toEqual(["expense.gst_updated"]);
+    const birth = await rowFor("expense.gst_updated");
+    expect(birth.society_id).toBe(world.societyId);
+    expect(birth.category).toBe("financial");
+    // The entity is the tax row, and this table's primary key *is* the expense id.
+    expect(birth.entity_type).toBe("expense_gst_details");
+    expect(birth.entity_id).toBe(world.expenseId);
+    expect(birth.before).toBeNull();
+    expect(birth.after).toMatchObject({
+      gstin: "27AAPFU0939F1ZV",
+      invoiceNumber: "INV-1",
+      invoiceDate: "2026-09-28",
+      // The column's own type, digit for digit — never a rounded number.
+      taxableValuePaise: "100000",
+      cgstPaise: "9000",
+      sgstPaise: "9000",
+      igstPaise: "0",
+      cessPaise: "0",
+      hsnSac: "995461",
+      placeOfSupply: "27",
+      isReverseCharge: false,
+      itcEligible: true,
+    });
+
+    // A second save is a change, and it names the row it replaced — the difference between
+    // "GST was recorded" and "GST was corrected".
+    await asAdmin(() =>
+      gstDetails.upsertForExpense(
+        world.expenseId,
+        world.societyId,
+        {
+          gstin: gstin("27AAPFU0939F1ZV"),
+          invoiceNumber: "INV-2",
+          invoiceDate: "2026-09-29",
+          taxableValuePaise: paise(250_000n),
+          cgstPaise: paise(22_500n),
+          sgstPaise: paise(22_500n),
+          igstPaise: paise(0n),
+          cessPaise: paise(0n),
+          hsnSac: "995461",
+          placeOfSupply: "27",
+          isReverseCharge: false,
+          itcEligible: true,
+        },
+        world.adminUserId,
+      ),
+    );
+
+    const rows = await rowsFor("expense.gst_updated");
+    expect(rows).toHaveLength(2);
+    expect(rows[1]?.before).toMatchObject({
+      invoiceNumber: "INV-1",
+      taxableValuePaise: "100000",
+      cgstPaise: "9000",
+    });
+    expect(rows[1]?.after).toMatchObject({
+      invoiceNumber: "INV-2",
+      taxableValuePaise: "250000",
+      cgstPaise: "22500",
+    });
+
+    // Nothing financial moved: recording tax detail writes one table and no split.
+    const [splitsAfter] = await owner<{ count: string }[]>`
+      select count(*)::text as count from public.expense_splits
+    `;
+    expect(splitsAfter?.count).toBe(splitsBefore?.count);
+  });
+
+  it("records nothing when the GST write is refused", async () => {
+    const outsider = await newUser("gst-outsider@stage-d-audit.ses.test");
+
+    // Outside the tenant: the row is invisible and the insert policy refuses it.
+    await expect(
+      asRequest(outsider, "resident", () =>
+        gstDetails.upsertForExpense(
+          world.expenseId,
+          world.societyId,
+          {
+            gstin: null,
+            invoiceNumber: "INV-X",
+            invoiceDate: null,
+            taxableValuePaise: paise(1n),
+            cgstPaise: paise(0n),
+            sgstPaise: paise(0n),
+            igstPaise: paise(0n),
+            cessPaise: paise(0n),
+            hsnSac: null,
+            placeOfSupply: null,
+            isReverseCharge: false,
+            itcEligible: false,
+          },
+          outsider,
+        ),
+      ),
+    ).rejects.toThrow();
+
+    expect(await actions()).toEqual([]);
+    const [row] = await owner<{ count: string }[]>`
+      select count(*)::text as count
+        from public.expense_gst_details
+       where expense_id = ${world.expenseId}::uuid
+    `;
+    expect(row?.count).toBe("0");
+  });
+
+  // ── attachments ──────────────────────────────────────────────────────────
+
+  it("records a reservation without the upload URL, the storage key or a credential", async () => {
+    const bytes = Buffer.alloc(2048, 0x41);
+
+    const reserved = await asAdmin(() =>
+      presignUpload.presign(
+        world.adminUserId,
+        world.societyId,
+        world.expenseId,
+        {
+          fileName: "lift-bill.jpg",
+          mimeType: "image/jpeg",
+          sizeBytes: bytes.byteLength,
+          checksum: sha256(bytes),
+        },
+      ),
+    );
+
+    expect(await actions()).toEqual(["attachment.created"]);
+    const row = await rowFor("attachment.created");
+    expect(row.society_id).toBe(world.societyId);
+    expect(row.actor_user_id).toBe(world.adminUserId);
+    // A bill is financial evidence, so its creation sits in the Treasurer's half.
+    expect(row.category).toBe("financial");
+    expect(row.entity_type).toBe("attachment");
+    expect(row.entity_id).toBe(reserved.attachment.id);
+    expect(row.before).toBeNull();
+    expect(row.after).toMatchObject({
+      expenseId: world.expenseId,
+      originalFilename: "lift-bill.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 2048,
+      checksum: sha256(bytes),
+      uploadedBy: world.adminMemberId,
+      // A reservation, not a bill: nothing has been verified or scanned yet.
+      scanStatus: "pending",
+      completedAt: null,
+    });
+
+    // The three things a presign response carries that must never be persisted: the signed
+    // URL, the key it addresses, and the object store's credential material.
+    const text = await payloadTextFor("attachment.created");
+    expect(text).not.toContain("X-Amz-Signature");
+    expect(text).not.toContain("X-Amz-Credential");
+    expect(text).not.toContain("http");
+    expect(text).not.toContain(reserved.storageKey);
+
+    // And the reservation really is only a reservation: the bucket holds nothing yet, which
+    // is what makes the object store's absence from this transaction the documented model
+    // rather than an omission.
+    expect(await storage.head(reserved.storageKey)).toBeNull();
+  });
+
+  it("records completion as a transition, and a replay of it writes nothing", async () => {
+    const bytes = Buffer.alloc(1024, 0x42);
+    const reserved = await asAdmin(() =>
+      presignUpload.presign(
+        world.adminUserId,
+        world.societyId,
+        world.expenseId,
+        {
+          fileName: "receipt.png",
+          mimeType: "image/png",
+          sizeBytes: bytes.byteLength,
+          checksum: sha256(bytes),
+        },
+      ),
+    );
+
+    const completed = await asAdmin(() =>
+      attachments.markComplete(
+        reserved.attachment.id,
+        world.societyId,
+        world.adminUserId,
+      ),
+    );
+    expect(completed.ok).toBe(true);
+
+    expect(await actions()).toEqual([
+      "attachment.created",
+      "attachment.completed",
+    ]);
+    const row = await rowFor("attachment.completed");
+    expect(row.entity_type).toBe("attachment");
+    expect(row.entity_id).toBe(reserved.attachment.id);
+    expect(row.metadata).toMatchObject({ expenseId: world.expenseId });
+    // The `before` is the pre-completion row, reconstructed from the statement's own
+    // `WHERE completed_at IS NULL` — the predicate is the evidence that the flag was unset.
+    expect(row.before).toMatchObject({
+      originalFilename: "receipt.png",
+      completedAt: null,
+    });
+    expect(row.after).toMatchObject({
+      originalFilename: "receipt.png",
+    });
+    expect(
+      (row.after as { completedAt: string | null }).completedAt,
+    ).not.toBeNull();
+
+    // ADR-0012: completing an already-complete upload answers the same success and writes
+    // nothing. A second entry here would be a second record of one transition.
+    const replayed = await asAdmin(() =>
+      attachments.markComplete(
+        reserved.attachment.id,
+        world.societyId,
+        world.adminUserId,
+      ),
+    );
+    expect(replayed.ok).toBe(true);
+    expect(await actions()).toEqual([
+      "attachment.created",
+      "attachment.completed",
+    ]);
+    expect(await rowsFor("attachment.completed")).toHaveLength(1);
+  });
+
+  it("records a deletion with the removed row and a null after", async () => {
+    const bytes = Buffer.alloc(512, 0x43);
+    const reserved = await asAdmin(() =>
+      presignUpload.presign(
+        world.adminUserId,
+        world.societyId,
+        world.expenseId,
+        {
+          fileName: "doomed.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: bytes.byteLength,
+          checksum: sha256(bytes),
+        },
+      ),
+    );
+
+    await asAdmin(() =>
+      attachments.deleteById(
+        reserved.attachment.id,
+        world.societyId,
+        world.adminUserId,
+      ),
+    );
+
+    expect(await actions()).toEqual([
+      "attachment.created",
+      "attachment.deleted",
+    ]);
+    const row = await rowFor("attachment.deleted");
+    expect(row.entity_type).toBe("attachment");
+    expect(row.entity_id).toBe(reserved.attachment.id);
+    // The `before` is the `DELETE`'s own `RETURNING` — the row as it was, from the
+    // statement that removed it — and the `after` is `null`, because the entity is gone.
+    expect(row.before).toMatchObject({
+      expenseId: world.expenseId,
+      originalFilename: "doomed.pdf",
+      checksum: sha256(bytes),
+    });
+    expect(row.after).toBeNull();
+
+    // The audit row survives the row it describes: `audit_logs` references the **society**,
+    // not the attachment, so the history is not a dependent row.
+    const [stored] = await owner<{ count: string }[]>`
+      select count(*)::text as count
+        from public.attachments
+       where id = ${reserved.attachment.id}::uuid
+    `;
+    expect(stored?.count).toBe("0");
+  });
+
+  it("records nothing when an attachment write is refused", async () => {
+    const bytes = Buffer.alloc(256, 0x44);
+    const reserved = await asAdmin(() =>
+      presignUpload.presign(
+        world.adminUserId,
+        world.societyId,
+        world.expenseId,
+        {
+          fileName: "private.jpg",
+          mimeType: "image/jpeg",
+          sizeBytes: bytes.byteLength,
+          checksum: sha256(bytes),
+        },
+      ),
+    );
+
+    const outsider = await newUser(
+      "attachment-outsider@stage-d-audit.ses.test",
+    );
+
+    // Outside the tenant: the reservation is invisible, so `markComplete` reports the row
+    // it could not see and flushes nothing.
+    const refused = await asRequest(outsider, "resident", () =>
+      attachments.markComplete(
+        reserved.attachment.id,
+        world.societyId,
+        outsider,
+      ),
+    );
+    expect(refused.ok).toBe(false);
+
+    await expect(
+      asRequest(outsider, "resident", () =>
+        attachments.deleteById(
+          reserved.attachment.id,
+          world.societyId,
+          outsider,
+        ),
+      ),
+    ).rejects.toThrow();
+
+    // Only the reservation is in the log — no refused completion and no refused deletion.
+    expect(await actions()).toEqual(["attachment.created"]);
+
+    // And the reservation itself is untouched by either refusal.
+    const remaining = await asAdmin(() =>
+      attachments.findById(
+        reserved.attachment.id,
+        world.societyId,
+        world.adminUserId,
+      ),
+    );
+    expect(remaining?.completedAt).toBeNull();
+  });
+
+  // ── the quota boundary (a refusal, not a mutation) ────────────────────────
+
+  it("records nothing when the plan's storage is full", async () => {
+    // Free is 500 MB, filled to the byte in 10 MB rows.
+    await fillPlan(world.expenseId, 500 * 1024 * 1024);
+
+    const refusal = await refusalOf(() =>
+      asAdmin(() =>
+        presignUpload.presign(
+          world.adminUserId,
+          world.societyId,
+          world.expenseId,
+          {
+            fileName: "over.jpg",
+            mimeType: "image/jpeg",
+            sizeBytes: 1,
+            checksum: sha256(jpegBytes()),
+          },
+        ),
+      ),
+    );
+
+    // The existing contract, unmoved: the catalogue's 402 and its stable detail code.
+    expect(refusal.code).toBe("PLAN_LIMIT_EXCEEDED");
+    expect(refusal.status).toBe(402);
+    expect(refusal.detailCodes).toContain("ATTACHMENT_QUOTA_EXCEEDED");
+
+    // The refusal happens **before** the insert (`quotaVerdict` runs at step 8, the row is
+    // written at step 12), so no reservation was committed — the only rows in the society
+    // are the fixture's filler.
+    const [over] = await owner<{ count: string }[]>`
+      select count(*)::text as count
+        from public.attachments
+       where society_id = ${world.societyId}::uuid
+         and original_filename = 'over.jpg'
+    `;
+    expect(over?.count).toBe("0");
+
+    // And no successful `attachment.created` was recorded: a refusal is not a transition.
+    expect(await actions()).toEqual([]);
+    expect(await rowsFor("attachment.created")).toHaveLength(0);
+  });
+
+  // ── the signing boundary (a committed pair, then a compensation) ──────────
+
+  it("audits both transitions when the store cannot sign, and keeps the 503 contract", async () => {
+    // The real repository and the real use case; only the store's signing half fails.
+    const useCase = new PresignUploadUseCase(
+      attachments,
+      new FailingSigningStorage(storage),
+      harness.app.get<AttachmentMembershipReader>(MEMBERSHIP_READER),
+      harness.app.get(AppConfig),
+    );
+
+    const bytes = jpegBytes();
+    const refusal = await refusalOf(() =>
+      asAdmin(() =>
+        useCase.presign(world.adminUserId, world.societyId, world.expenseId, {
+          fileName: "unsigned.jpg",
+          mimeType: "image/jpeg",
+          sizeBytes: bytes.byteLength,
+          checksum: sha256(bytes),
+        }),
+      ),
+    );
+
+    // The error contract is unchanged: a store that cannot mint a URL is a 503, not a 500.
+    expect(refusal.code).toBe("DEPENDENCY_UNAVAILABLE");
+    expect(refusal.status).toBe(503);
+
+    // **Both** database transitions committed and are audited. The reservation really did
+    // commit — writing the row before the URL exists *is* the quota's enforcement — and the
+    // compensation removed it explicitly. Suppressing the second entry would leave a
+    // `created` naming a row that no longer exists.
+    expect(await actions()).toEqual([
+      "attachment.created",
+      "attachment.deleted",
+    ]);
+
+    const created = await rowFor("attachment.created");
+    const deleted = await rowFor("attachment.deleted");
+    expect(deleted.entity_id).toBe(created.entity_id);
+    expect(created.before).toBeNull();
+    expect(created.after).toMatchObject({
+      originalFilename: "unsigned.jpg",
+      completedAt: null,
+    });
+    expect(deleted.before).toMatchObject({
+      originalFilename: "unsigned.jpg",
+    });
+    expect(deleted.after).toBeNull();
+
+    // No URL, signature material, credential or storage key in **either** row.
+    for (const action of ["attachment.created", "attachment.deleted"]) {
+      const text = await payloadTextFor(action);
+      expect(text).not.toContain("X-Amz-Signature");
+      expect(text).not.toContain("X-Amz-Credential");
+      expect(text).not.toContain("storageKey");
+      expect(text).not.toContain("http");
+    }
+
+    // The pair is not a phantom: the row really is gone.
+    const [gone] = await owner<{ count: string }[]>`
+      select count(*)::text as count
+        from public.attachments
+       where id = ${created.entity_id}::uuid
+    `;
+    expect(gone?.count).toBe("0");
+  });
+
+  // ── the real MinIO round trip ────────────────────────────────────────────
+
+  it("records exactly one completion for a verified MinIO upload, and none on replay", async () => {
+    const bytes = jpegBytes(0x7a, 4096);
+
+    const reserved = await asAdmin(() =>
+      presignUpload.presign(
+        world.adminUserId,
+        world.societyId,
+        world.expenseId,
+        {
+          fileName: "verified.jpg",
+          mimeType: "image/jpeg",
+          sizeBytes: bytes.byteLength,
+          checksum: sha256(bytes),
+        },
+      ),
+    );
+
+    // The object really is in the store, written through the real presigned URL.
+    const putStatus = await putObject(reserved.uploadUrl, bytes, "image/jpeg");
+    expect(putStatus).toBe(200);
+    const metadata = await storage.head(reserved.storageKey);
+    expect(metadata).not.toBeNull();
+    expect(metadata?.contentLength).toBe(bytes.byteLength);
+
+    // Completion re-verifies existence, length, SHA-256 and the magic number against the
+    // reservation, then stamps the row. Nothing here weakens that.
+    const completed = await asAdmin(() =>
+      completeUpload.complete(
+        world.adminUserId,
+        world.societyId,
+        reserved.attachment.id,
+        { checksum: sha256(bytes) },
+      ),
+    );
+    expect(completed.status).toBe("processing");
+
+    expect(await actions()).toEqual([
+      "attachment.created",
+      "attachment.completed",
+    ]);
+    const rows = await rowsFor("attachment.completed");
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    // The row names the right attachment, expense, society and actor.
+    expect(row.society_id).toBe(world.societyId);
+    expect(row.actor_user_id).toBe(world.adminUserId);
+    expect(row.actor_role).toBe("admin");
+    expect(row.category).toBe("financial");
+    expect(row.entity_type).toBe("attachment");
+    expect(row.entity_id).toBe(reserved.attachment.id);
+    expect(row.metadata).toMatchObject({ expenseId: world.expenseId });
+    expect(row.before).toMatchObject({ completedAt: null });
+    expect(row.after).toMatchObject({
+      expenseId: world.expenseId,
+      mimeType: "image/jpeg",
+      sizeBytes: bytes.byteLength,
+      checksum: sha256(bytes),
+      uploadedBy: world.adminMemberId,
+    });
+
+    // The replay answers the same success and adds nothing: one transition, one record.
+    const replayed = await asAdmin(() =>
+      completeUpload.complete(
+        world.adminUserId,
+        world.societyId,
+        reserved.attachment.id,
+        { checksum: sha256(bytes) },
+      ),
+    );
+    expect(replayed.status).toBe("processing");
+    expect(await rowsFor("attachment.completed")).toHaveLength(1);
+    expect(await actions()).toEqual([
+      "attachment.created",
+      "attachment.completed",
+    ]);
+
+    // The object is still there — a replay must not have disturbed it.
+    expect(await storage.head(reserved.storageKey)).not.toBeNull();
+  });
+
+  // ── the draft-deletion cascade, pinned as an aggregate ───────────────────
+
+  it("records a draft's removal as one expense.deleted entry, not per cascaded attachment", async () => {
+    const bytes = jpegBytes(0x55, 512);
+    const reserved = await asAdmin(() =>
+      presignUpload.presign(
+        world.adminUserId,
+        world.societyId,
+        world.expenseId,
+        {
+          fileName: "draft-bill.jpg",
+          mimeType: "image/jpeg",
+          sizeBytes: bytes.byteLength,
+          checksum: sha256(bytes),
+        },
+      ),
+    );
+
+    await asAdmin(() =>
+      deleteDraft.delete(world.adminUserId, world.societyId, world.expenseId),
+    );
+
+    // `expense_draft_delete()` removes the draft's attachment rows in the same
+    // transaction that removes the draft, so the row is gone...
+    const [cascaded] = await owner<{ count: string }[]>`
+      select count(*)::text as count
+        from public.attachments
+       where id = ${reserved.attachment.id}::uuid
+    `;
+    expect(cascaded?.count).toBe("0");
+
+    // ...and the log records the **expense's** removal only: no attachment-level entry,
+    // and nothing in the expense entry names the attachment it took with it. This is the
+    // aggregate semantics ADR-0014 D12 records as a finding rather than a decision, pinned
+    // so a later change has to be deliberate.
+    expect(await actions()).toEqual(["attachment.created", "expense.deleted"]);
+    expect(await rowsFor("attachment.deleted")).toHaveLength(0);
+
+    const text = await payloadTextFor("expense.deleted");
+    expect(text).not.toContain(reserved.attachment.id);
   });
 });
