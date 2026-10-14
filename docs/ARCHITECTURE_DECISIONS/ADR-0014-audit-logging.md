@@ -406,6 +406,106 @@ action. What remains outstanding is unchanged and still named: the expense
 sub-resources, attachments, and the `GET /societies/:id/audit-logs` read route with its
 reader-audit row (D8/PRD §11.7).
 
+### D12 — Stage D: the expense sub-resources, and a lifecycle the database does not own alone
+
+**Stage D covers the last nine write routes T050 named, and it found one boundary that is
+not a blocker but must never be described as atomic.** Expense categories
+(`expense.category_created`/`_updated`/`_deleted`), expense comments
+(`expense.comment_added`/`_deleted`), GST details (`expense.gst_updated`) and the
+attachment lifecycle (`attachment.created`/`_completed`/`_deleted`) now write through
+`UnitOfWork`'s seam. The vocabulary already carried all nine names — reserved in Stage A,
+which is why this stage adds no action and no migration — and each entry is handed to the
+seam from the **adapter**, because the use cases own no transaction: the same split Stages B
+and C established, for the same reason (`@ses/application` is shared with the mobile client
+and cannot hold a Postgres transaction).
+
+**Two defers are confirmed rather than assumed.** Every one of the nine paths runs inside
+the transaction `UnitOfWork` already opened, so nothing needed the identity re-application
+`invitation.accepted` did — and that was _checked_, not inferred: the only two definer
+functions on these paths, `expense_category_soft_delete()` and
+`expense_comment_soft_delete()`, neither touch `request.jwt.claim.sub`. The rule D5
+recorded therefore holds exactly as stated: the restoration exists for a function that
+clears the GUC on purpose, and there is still exactly one of those.
+
+**The category is not a display concern, and it is decided here.** `financial` for
+categories, GST and attachments; `other` for comments. A category's `gst_applicable`,
+`is_capital` and `default_split_strategy` decide how an expense is taxed and split, so its
+configuration belongs in the half a Treasurer's `audit.view` narrows to; a GST row _is_ a
+tax document, and an attachment is the bill an approval rests on. A comment is discussion,
+not financial state, so it stays out of that half — which is a decision about the audit
+**read** boundary (PRD §2.1) and not a claim that a comment is unimportant. None of the
+three is a schema change: `category` is a column value, and re-classifying an action later
+is an UPDATE, not a migration.
+
+**Entity identity names the row that changed, not the expense it hangs off.**
+`expense_category` and `expense_comment` carry their own ids; `attachment` carries the
+attachment's; and `expense_gst_details` carries the **expense id**, because that table's
+primary key _is_ `expense_id` and there is no separate row id to name. The parent expense
+travels in `metadata` for the three whose entity is not the expense, so the correlation is
+explicit rather than inferred from a join the reader would have to guess.
+
+**A comment's text is deliberately not in the log.** The entry records the author, the
+stream position, the creation stamp and the body's **length**, and never the words. PRD
+§3.5.3 gives a comment no retention or discoverability rule that would need its content in
+the audit trail, and copying a member's words into an append-only table that no `DELETE` can
+reach is a disclosure the narrowest reading does not require — the same reasoning D11 applied
+to the join code, and asserted the same way: the suite reads the row's combined
+`before`/`after`/`metadata` text and fails if the body appears in it. The GST snapshot is the
+opposite case and takes the whole row — twelve columns, paise as the column's own digit
+strings — because a tax record has no field an auditor would not ask for; the attachment
+snapshot sits between the two, taking the bill's identity (name, declared type, size,
+checksum, scan status, uploader, expense) and **dropping the storage key**, which is the
+object's address and useful only to something already holding bucket access.
+
+**The attachment audit records a committed database transition, and never claims more.**
+The presigned PUT, the `HEAD`, the byte read and the object deletion all happen outside any
+transaction; no distributed transaction is introduced to pretend otherwise. So what an
+`attachment.*` entry means is exactly "this row changed state in this database", and three
+consequences are decisions rather than omissions:
+
+- **A reservation withdrawn because its URL could not be minted is audited twice, and that
+  is the honest trail.** The row really did commit (ADR-0012 D2's ordering makes the
+  reservation the quota's enforcement, so it cannot wait for the signature), so the
+  compensating delete is a second committed transition. Suppressing its entry would leave a
+  `created` with no matching `deleted` for a row that no longer exists — a log that lies
+  about the present rather than one that is merely noisy about a failure.
+- **A completion replay writes nothing.** `markComplete` matches on `completed_at IS NULL`,
+  and the entry's `before` is reconstructed from that predicate — the predicate _is_ the
+  evidence that the flag was unset and that no other column moved. A replay matches no row,
+  answers the same `200` (ADR-0012), and flushes nothing. The snapshot needs no second
+  statement, so no read can race the write it is describing.
+- **An object orphaned by a failed deletion is not an audit row.** No database row changed
+  when the object deletion failed, so there is nothing to audit; the sweep's evidence is the
+  structured log line at the delete site, which carries the key and the society. Inventing
+  an entry there would put a storage fact in a table whose whole meaning is database state.
+
+**All three consequences are pinned by tests, and so are the two refusal boundaries around them.** The **quota refusal** — a society filled to its plan's storage cap — asserts the unmoved `402 PLAN_LIMIT_EXCEEDED` / `ATTACHMENT_QUOTA_EXCEEDED` contract _and_ the absence of evidence: no reservation row commits and no `attachment.created` is written. The **signing failure** asserts the compensating trail just described: both entries for the one id, with no URL, signature, credential or storage key in either, and the `503 DEPENDENCY_UNAVAILABLE` contract unmoved. Completion is asserted through a **real MinIO round trip** — a presigned `PUT`, a `HEAD`, then the use case's own existence, length, SHA-256 and magic-byte re-verification — writing exactly one `attachment.completed`, keyed to the right attachment, expense, society and actor, with a replay adding none. The one claim asserted at `HEAD` rather than by a byte comparison is the stored object's survival across that replay: the suite reads its existence (and its length before completion), not a re-download of its bytes. Nothing in the store's validation was weakened to make any of this pass.
+
+**A draft's deletion cascades its attachment rows, and that removal is recorded only at the expense — a finding, not a settled decision.** `expense_draft_delete()` hard-deletes the draft and PostgreSQL removes the `attachments` rows that referenced it, so a cascaded attachment leaves no `attachment.deleted` entry: what the log holds is the `attachment.created` row from the reservation and one `expense.deleted` whose snapshot names the expense and **not** the attachments it took with it. The suite pins that shape (`records a draft's removal as one expense.deleted entry, not per cascaded attachment`) so it cannot change by accident. The audit history therefore does **not** identify the attachment rows the cascade removed, and the smallest safe ways to give it that accountability — recorded here for review, none of them implemented in this stage — are, smallest first:
+
+- **Read the cascade off the existing `created` rows.** No change at all: an `attachment.created` whose `metadata.expenseId` is the deleted draft, with no `completed` and no `deleted` ever following it, is evidence the bill existed and stopped existing. What it cannot say is _when_ the row went, or by whose request, because the draft's deletion is the only entry that carries a time.
+- **Name the removed attachments in the single `expense.deleted` entry's `metadata`.** One row, no fan-out, no migration — and safe only if the ids are read under the lock the definer itself takes: an `INSERT` into `attachments` takes `FOR KEY SHARE` on the parent expense row, so reading the expense `FOR UPDATE` first and its attachments second is complete, while an unlocked read can miss a reservation committing concurrently. The RPC returns `void`, so the ids come from that read or from a new migration that widens the return.
+- **One `attachment.deleted` per cascaded row, from that same locked read.** The complete and noisiest form: several rows for one request, and the same locking requirement as the option above.
+- **Move it into the database.** A new migration adding an `AFTER DELETE` trigger on `attachments` that writes the entry is complete by construction, and the only option here that needs a migration at all.
+- **Remove the cascade instead.** Refuse the draft delete while any attachment row exists (`EXPENSE_HAS_ATTACHMENTS`, mirroring `EXPENSE_HAS_SPLITS`), so every removal is an explicit, individually audited delete. Complete and race-free, but it is a product rule rather than a log change: the user would have to remove the bill before the draft.
+
+**An idempotent no-op is not a transition, and the tombstone test follows the same shape.**
+`expense_comment_soft_delete()` returns an already-tombstoned row unchanged. The `before`
+read inside the transaction carries the row's own `deleted_at`, so an already-deleted comment
+flushes nothing while a first delete flushes one entry — the row's state decides, not a call
+count the transaction cannot see. D4's "one transition, one record" is what this preserves:
+the two conditional flushes here are the only Stage D paths where an entry is suppressed, and
+both are suppressed because the database matched no row. A write that _does_ run always
+records — including a save that changes nothing — because the entry describes a committed
+write, and an update that wrote the same values is a fact about the request, not an absence.
+
+**One SQL statement changed shape, and it is additive.** `AttachmentRepository.deleteById`'s
+`DELETE … RETURNING id` became `RETURNING <the readable column list>`, so the `before`
+snapshot comes out of the statement that removed the row and needs no second query that could
+race it. Which rows are deleted and which are refused is untouched, and no grant, policy,
+function or table changed: Stage D is migration-free, and the only new SQL text is that
+projection.
+
 ## Consequences
 
 - **Every later module writes audits through `UnitOfWork`'s seam.** A new mutation
@@ -419,13 +519,15 @@ reader-audit row (D8/PRD §11.7).
   one policy reads `can_view_audit`, and a stranger's read matches no row. The
   integration suite proves the read with an Admin, a Treasurer (financial half only),
   a resident, a stranger and another society's Admin.
-- **Stage C closed the society lifecycle; the read route and two groups remain.**
-  Integration into the expense lifecycle, members, buildings/flats, all three
-  invitation mutations (`created`, `revoked`, `accepted`) and the six society
-  lifecycle mutations has landed, together with D10's declaration-level enforcement.
-  Still outstanding, and named as such in the Roadmap: the expense sub-resources
-  (categories, comments, GST), attachments, and the `GET /societies/:id/audit-logs`
-  read route with its reader-audit row (D8/PRD §11.7).
+- **Stage D closed the write surface; only the read side remains.** Integration into the
+  expense lifecycle, members, buildings/flats, all three invitation mutations (`created`,
+  `revoked`, `accepted`), the six society lifecycle mutations and now the expense
+  sub-resources and the attachment lifecycle has landed, together with D10's
+  declaration-level enforcement — which no longer defers a single write-verb route (its
+  deferral register holds only the two routes that are not mutations, kept as a register so
+  the next un-integrated mutation fails the suite). Still outstanding, and named as such in
+  the Roadmap: the `GET /societies/:id/audit-logs` read route with its reader-audit row
+  (D8/PRD §11.7), refusal-class auditing, a retention/archival job and the audit UI.
 - **The unique `operation_id` is an operational fact, not just a constraint.** A
   client that retries an audited mutation with the same id gets a rolled-back
   transaction, not a silent second row; that is the intended failure mode (D4).
