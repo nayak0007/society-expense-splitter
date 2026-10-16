@@ -8,6 +8,7 @@ export * from "./primitives";
 export * from "./common/envelope";
 export * from "./common/errors";
 export * from "./common/pagination";
+export * from "./audit";
 export * from "./auth";
 export * from "./apartment";
 export * from "./attachments";

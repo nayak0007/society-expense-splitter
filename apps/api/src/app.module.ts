@@ -83,11 +83,13 @@ import { buildLoggerParams } from "./observability/logger";
     // and because `ExpensesModule` consumes one of its ports (the draft-deletion
     // cleanup), which is a contract this module exports rather than an internals reach.
     AttachmentsModule,
-    // T050's audit infrastructure (ADR-0014). No route and no controller: it owns the
-    // append-only audit table's write seam and the `@Audited()` declaration. Imported
-    // where it is used (here for the interceptor, and by the member and expense
-    // modules whose repositories record rows) rather than made `@Global()`, so the
-    // dependency stays visible in the graph.
+    // T050's audit infrastructure (ADR-0014). It owns the append-only audit table's
+    // write seam, the `@Audited()` declaration and — since Stage E1 — the one read
+    // route, `GET /v1/audit-logs`, whose successful read records an `audit.viewed` row
+    // in the same transaction (PRD §11.7). Imported where it is used (here for the
+    // interceptor, and by the member, expense, structure, invitation, society and
+    // attachment modules whose repositories record rows) rather than made `@Global()`,
+    // so the dependency stays visible in the graph.
     AuditModule,
   ],
   providers: [

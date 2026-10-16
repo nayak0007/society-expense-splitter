@@ -79,8 +79,31 @@ export const AUDIT_ACTIONS = [
   "attachment.created",
   "attachment.completed",
   "attachment.deleted",
+  // ── the reader audit (Stage E1) ──────────────────────────────────────────
+  // PRD §11.7's "the log itself records who viewed it". The entity is the log
+  // itself (`audit_log`, and no single `entity_id` — a read addresses a page, not a
+  // row), and the category is `other`: an *access* to the log is not financial
+  // state, and classifying it `financial` would hand a Treasurer the record of
+  // every Admin's read (ADR-0014 D13).
+  "audit.viewed",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
+
+/**
+ * Is this string an action this build knows? — the narrowing a *reader* needs.
+ *
+ * The write side never needs it: `AuditAction` is enforced at the call site by the
+ * compiler. The read side does, because `action` is a regex-shaped column rather than
+ * an enum (so a later deploy may record a name this build has never heard of) and a
+ * row's action must therefore be narrowed before it is switched on. Unwritten in that
+ * case is not an error: the row still renders, as the opaque name it carries.
+ */
+export function isAuditAction(value: unknown): value is AuditAction {
+  return (
+    typeof value === "string" &&
+    (AUDIT_ACTIONS as readonly string[]).includes(value)
+  );
+}
 
 /**
  * A JSON value after redaction — the shape `before`/`after`/`metadata` are

@@ -2265,6 +2265,720 @@ paths:
       security: *a15
       summary: Leave a society
       tags: *a16
+  /v1/audit-logs:
+    get:
+      description: One page of the society named in X-Society-Id, newest first
+        (occurred_at, then id descending), with a base64 cursor for the next
+        page. An Admin reads the whole log; a Treasurer reads only `financial`
+        entries, because PRD §2.1 grants them that half. Every read records an
+        `audit.viewed` entry in the same transaction, so a read whose audit
+        write fails is an error rather than a successful response. The client's
+        own view entry appears on a later request, never in the response it
+        produced.
+      operationId: AuditLogsController_list
+      parameters:
+        - name: X-Society-Id
+          in: header
+          description:
+            The society this request is scoped to (UUID). Authorisation is
+            evaluated against the caller's membership in it.
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          required: false
+          in: query
+          description: Page size; default 20, clamped to 100 (SAD §7.4).
+          schema: {}
+        - name: cursor
+          required: false
+          in: query
+          description: Opaque cursor from the previous page's `nextCursor`.
+          schema: {}
+      responses:
+        "200":
+          description:
+            One page of audit entries, with `nextCursor` and `hasMore`. IP
+            addresses and user agents are never returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      entries:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            occurredAt:
+                              type: string
+                            category:
+                              type: string
+                              enum:
+                                - financial
+                                - other
+                            action:
+                              type: string
+                            entityType:
+                              type: string
+                            entityId:
+                              nullable: true
+                              type: string
+                            actorUserId:
+                              nullable: true
+                              type: string
+                            actorRole:
+                              nullable: true
+                              type: string
+                              enum:
+                                - admin
+                                - treasurer
+                                - committee_member
+                                - resident
+                                - tenant
+                                - guest
+                            before:
+                              $ref: "#/definitions/__schema0"
+                            after:
+                              $ref: "#/definitions/__schema1"
+                            requestId:
+                              nullable: true
+                              type: string
+                            metadata:
+                              type: object
+                              additionalProperties:
+                                $ref: "#/definitions/__schema2"
+                          required:
+                            - id
+                            - occurredAt
+                            - category
+                            - action
+                            - entityType
+                            - entityId
+                            - actorUserId
+                            - actorRole
+                            - before
+                            - after
+                            - requestId
+                            - metadata
+                          additionalProperties: false
+                      nextCursor:
+                        nullable: true
+                        type: string
+                      hasMore:
+                        type: boolean
+                    required:
+                      - entries
+                      - nextCursor
+                      - hasMore
+                    additionalProperties: false
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
+                    required:
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - data
+                  - meta
+                additionalProperties: false
+                definitions:
+                  __schema0:
+                    anyOf:
+                      - type: string
+                      - type: number
+                      - type: boolean
+                      - type: string
+                        nullable: true
+                        enum:
+                          - null
+                      - type: array
+                        items:
+                          $ref: "#/definitions/__schema0"
+                      - type: object
+                        additionalProperties:
+                          $ref: "#/definitions/__schema0"
+                  __schema1:
+                    anyOf:
+                      - type: string
+                      - type: number
+                      - type: boolean
+                      - type: string
+                        nullable: true
+                        enum:
+                          - null
+                      - type: array
+                        items:
+                          $ref: "#/definitions/__schema1"
+                      - type: object
+                        additionalProperties:
+                          $ref: "#/definitions/__schema1"
+                  __schema2:
+                    anyOf:
+                      - type: string
+                      - type: number
+                      - type: boolean
+                      - type: string
+                        nullable: true
+                        enum:
+                          - null
+                      - type: array
+                        items:
+                          $ref: "#/definitions/__schema2"
+                      - type: object
+                        additionalProperties:
+                          $ref: "#/definitions/__schema2"
+        "400":
+          description: Malformed payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "401":
+          description: No session, an invalid token, or an expired one.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "403":
+          description:
+            An active member whose role does not hold `audit.view` — Admin or
+            Treasurer. A Treasurer's grant is the `financial` half only, so
+            their request succeeds with a narrowed page rather than failing;
+            every other role, and any membership that is not active
+            (`MEMBER_INACTIVE`), is refused here.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "404":
+          description:
+            No such society, or one the caller holds no live membership in.
+            This API deliberately does not distinguish these (PRD T041).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "409":
+          description:
+            "Not produced by this route: the log is append-only, and the read
+            addresses no row that could move under it."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "422":
+          description: Well-formed payload whose values are invalid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+        "429":
+          description: Rate limited.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - UNAUTHENTICATED
+                          - TOKEN_EXPIRED
+                          - TOKEN_REUSED
+                          - FORBIDDEN
+                          - NOT_FOUND
+                          - VALIDATION_ERROR
+                          - CONFLICT
+                          - VERSION_MISMATCH
+                          - DUPLICATE_RESOURCE
+                          - IDEMPOTENCY_KEY_REUSE
+                          - RATE_LIMITED
+                          - PLAN_LIMIT_EXCEEDED
+                          - PAYMENT_FAILED
+                          - PAYMENT_ALREADY_VERIFIED
+                          - SIGNATURE_INVALID
+                          - SPLIT_MISMATCH
+                          - INVALID_TRANSITION
+                          - UNSETTLED_DUES
+                          - CYCLE_ALREADY_PUBLISHED
+                          - SOCIETY_ADMIN_REQUIRED
+                          - MEMBER_INACTIVE
+                          - UPGRADE_REQUIRED
+                          - DEPENDENCY_UNAVAILABLE
+                          - INTERNAL
+                      message:
+                        type: string
+                      field:
+                        type: string
+                      details:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            field:
+                              type: string
+                            code:
+                              type: string
+                            message:
+                              type: string
+                            received: {}
+                            limit: {}
+                            current: {}
+                          required:
+                            - field
+                            - code
+                            - message
+                          additionalProperties: false
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                      docs:
+                        type: string
+                    required:
+                      - code
+                      - message
+                      - requestId
+                      - timestamp
+                    additionalProperties: false
+                required:
+                  - error
+                additionalProperties: false
+      security:
+        - supabase-jwt: []
+      summary: Read a society's audit log
+      tags:
+        - audit-logs
   /v1/buildings:
     get:
       description:
