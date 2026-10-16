@@ -506,6 +506,139 @@ race it. Which rows are deleted and which are refused is untouched, and no grant
 function or table changed: Stage D is migration-free, and the only new SQL text is that
 projection.
 
+### D13 — Stage E1: the read route, and a log that records who viewed it
+
+**The read route ships, and it is header-scoped rather than the PRD's sketch.** PRD §1857
+lists `GET /societies/:id/audit-logs`; it ships as `GET /v1/audit-logs` behind
+`X-Society-Id`. The reason is the one `categories.controller.ts` records in full and it is
+not stylistic: `SocietyGuard` and `PermissionGuard` are **inert unless a route declares
+`@RequirePermission(…)`**, and a permission is a _per-membership_ grant — so a route that
+names one is by definition society-scoped, and the header is how it says which society. A
+`:societyId` path parameter carrying no declared permission would run with no membership
+resolution at all, which is the failure mode the whole chain exists to prevent. The path is
+a bare noun (`/audit-logs`) for the same reason `/buildings` and `/expense-categories` are:
+the scope travels in the header, and the PRD's path shape is the document's sketch rather
+than the shipped convention.
+
+**The narrowing is the matrix asked per category, and it travels into the query.**
+`audit.view` is Admin ✅ and Treasurer 🟡 financial-only (PRD §2.1). `auditVisibleCategories`
+enumerates the two categories and asks `canOnResource` about each, so there is no
+`role === "treasurer"` anywhere in this path — the rule is read from the one place the
+matrix lives, exactly as `PermissionGuard` reads it — and an inactive membership is refused
+by the evaluator itself, so a pending or suspended member sees nothing even though their
+`role` column may still say `admin`. The answer is pushed **into** the query
+(`category in (…)`), not applied after the fetch: a post-filter would return _short_ pages,
+which breaks the cursor's whole contract ("a full page or the last one"), and would read
+rows the caller may not see into the process. The table's `audit_logs_select_authorized`
+policy narrows through `can_view_audit` the same way, so the application decides which pages
+exist and RLS decides which rows do. The suite asserts the two layers **separately** — one
+case goes through the use case, another asks the adapter for both halves on behalf of a
+Treasurer and requires the policy to answer the financial half — because a test that only
+ever exercised them together could not tell which one was doing the work.
+
+**The read records itself, in the read's own transaction.** PRD §11.7: "the log itself
+records who viewed it". The plan is a **required parameter of the port** — no overload, no
+default no-op — because an optional parameter is exactly how that requirement would
+silently disappear from a future call site, and the adapter runs it inside the same
+`UnitOfWork.transaction` that performed the `SELECT`. So the row commits with the read or
+the transaction rolls back: a read whose audit write fails is an error response, never a
+page. The entry is a **descriptor handed to the transaction's seam**, not a trigger on the
+table and not a `SELECT` side effect, so `write_audit_logs` inserts one row for one
+descriptor and returns — recording a read cannot fire another read, and recursion is
+impossible by construction rather than by policy.
+
+**The reader-audit row is `other`, and that is a privilege decision rather than a
+classification.** Access to the log is an event, not financial state, so `audit.viewed` is
+`other` — which means it cannot appear in a Treasurer's narrowed view, _including their own
+read_. Classifying it `financial` would hand a Treasurer the record of every Admin's read:
+an escalation of what the matrix grants them, achieved inside the log itself. The row
+carries `entity_type: "audit_log"` and `entity_id: null` (a read addresses a page, not a
+row, so there is no single id that would be true) and `before`/`after` **null** (a read
+transitions nothing; the alternative — an `after` describing the response — would copy page
+content into an append-only table no `DELETE` can reach). Its `metadata` is limited to the
+visibility that applied, the page size, whether a cursor was used and how many rows came
+back. The **cursor's contents are deliberately absent**: it names a position, and a stored
+copy would be a second, unreachable copy of a query parameter — `usedCursor` is the only
+part with audit meaning. `returned: 0` is a recorded fact rather than a missing row, which
+is what makes "somebody looked and found nothing" distinguishable from "somebody never
+looked".
+
+**The response is an allowlist, and the removals are the decision.** `ip_address` and
+`user_agent` are dropped from `metadata` for **everybody, including an Admin**: they exist
+so an investigator reading the database can answer "from where", and shipping every
+society's Admin the addresses and browsers of their members would widen the disclosure
+surface for no product benefit. `requestId` is **lifted** out of `metadata` into a field of
+its own and removed from the object, so a client reads it in one place rather than two — it
+is already public by construction, echoed on every response and in the `X-Request-Id`
+header. `operationId` is never returned: it is the writer's idempotency key, explicitly
+allowed to be meaningless (D4), so exposing it would invite a client to build on something
+that may be a replay's artifact. **Display names are not resolved** — `actorUserId` is the
+stable correlation key, and turning it into a name would join `members`/`auth.users` on
+every row of every page and make this endpoint a PII surface; a client that wants a name
+already has the member list. The projection is an allowlist of stored values plus those two
+removals, it lives in the mapper rather than in SQL (so there is one list of internal keys,
+next to the contract that documents the exclusion), and the contract's own schema validates
+the result — a field the contract does not describe cannot leak by accident.
+
+**The read's own row appears on a later request, never in the response it produced.** It is
+inserted after the `SELECT` has run, which is also what keeps a page from shifting under its
+own cursor: the first page's `nextCursor` points at a row that was the last of _that_ page,
+and a row appended after it cannot change what the cursor means. A client's own view entry
+therefore shows up on the next page, or the next visit, and the document says so.
+
+**Ordering is total, served by the table's own index, and the cursor is the tuple.**
+`order by occurred_at desc, id desc` matches `idx_audit_logs_society_occurred
+(society_id, occurred_at DESC, id DESC)`, and the keyset predicate is a **row comparison** —
+`(occurred_at, id) < (…, …)` — rather than two `OR`ed conditions, which is what lets the
+planner use that index for the continuation as well as the first page. The tuple is not a
+convenience: two audit rows can share an instant (a batch import, one request writing
+several entries), and a cursor naming only the timestamp would either skip the rest of that
+millisecond or repeat it. `id` travels as its **decimal string** because it is a `bigint`
+identity column and a JS `number` loses precision past 2^53 — the same choice every paise
+amount in this codebase makes. The adapter reads **one row more than asked for**, so
+`hasMore` is answered honestly without a `COUNT(*)`; `total` is deliberately absent, because
+a count over the whole log on every page is precisely the unbounded scan the cursor exists
+to avoid (SAD §7.4 makes it optional for that reason). A malformed cursor is refused at the
+wire edge (422 on `field: "cursor"`), before any query is built, so a client bug cannot
+silently become duplicated or skipped rows on a screen — and no access is recorded for it,
+because an access that did not happen must not become an audit row.
+
+**A foreign or forged position cannot widen anything either, and that is structural.** The
+tenant filter, the visibility filter and the keyset predicate are one statement, so a cursor
+can only move the page _within_ what the caller may already read — it cannot name another
+society, cannot add a category back and cannot invent a row. The suite asserts it rather
+than leaning on the shape: another society's own position, encoded and decoded through both
+halves of the production codec, gives an Admin only this society's rows and a Treasurer's
+hidden half does not come back; a position forged _behind_ the whole log is an empty page
+rather than an error or a second way in.
+
+**`action` is a string on the read, and the read vocabulary stays open.** The write
+vocabulary (`AuditAction`) is a closed TS union enforced at the call site by the compiler;
+the column is regex-shaped rather than an enum, precisely so a later deploy can record an
+action this build has never heard of. Typing the response as the union would make the
+contract lie about data the server is allowed to return and would break every client on the
+day a new action shipped, so `AuditLogRecord.action` is `string` and narrowing is the
+consumer's (`isAuditAction`). An unknown action renders as the opaque name it carries
+rather than crashing a screen, and the suite asserts exactly that.
+
+**Enforcement needed a second manifest, and that is what the gap was made of.** The
+route-inventory suite's `MANDATED_AUDIT` is keyed off `WRITE_VERBS`: it answers "which
+mutation does this route record?", and a `GET` has no answer to that — which is why PRD
+§11.7's sentence could sit unimplemented through four stages without a single test
+objecting. Stage E1 adds `MANDATED_READ_AUDIT`, keyed by route and asserting the declared
+`audit.viewed`, so an endpoint that silently stops recording still returns a `200` with the
+right rows and **fails the suite anyway**. The declaration now describes a write the route
+really performs (the row is flushed through the seam inside the read's transaction), which
+is the condition D7 recorded for a declaration being accurate rather than aspirational.
+
+**Stage E1 is migration-free.** The table, the writer, `can_view_audit` and the one `SELECT`
+policy shipped in migration #37 exactly as Stage A wrote them; this stage adds no grant, no
+policy, no function, no column and no action name (all of `audit.viewed`'s vocabulary was
+reserved in Stage A). What it adds is the read port, the adapter, the use case, the contract,
+the route and the reader-audit row. The RLS posture is unchanged and deliberately so:
+`ENABLE` without `FORCE`, because the owner writes through the definer — the **privilege**
+is the write control and the one policy is the read control.
+
 ## Consequences
 
 - **Every later module writes audits through `UnitOfWork`'s seam.** A new mutation
@@ -519,15 +652,25 @@ projection.
   one policy reads `can_view_audit`, and a stranger's read matches no row. The
   integration suite proves the read with an Admin, a Treasurer (financial half only),
   a resident, a stranger and another society's Admin.
-- **Stage D closed the write surface; only the read side remains.** Integration into the
+- **The write surface and the read route have both landed.** Integration into the
   expense lifecycle, members, buildings/flats, all three invitation mutations (`created`,
-  `revoked`, `accepted`), the six society lifecycle mutations and now the expense
-  sub-resources and the attachment lifecycle has landed, together with D10's
-  declaration-level enforcement — which no longer defers a single write-verb route (its
-  deferral register holds only the two routes that are not mutations, kept as a register so
-  the next un-integrated mutation fails the suite). Still outstanding, and named as such in
-  the Roadmap: the `GET /societies/:id/audit-logs` read route with its reader-audit row
-  (D8/PRD §11.7), refusal-class auditing, a retention/archival job and the audit UI.
+  `revoked`, `accepted`), the six society lifecycle mutations, the expense sub-resources
+  and the attachment lifecycle is complete, together with D10's declaration-level
+  enforcement — which no longer defers a single write-verb route (its deferral register
+  holds only the two routes that are not mutations, kept as a register so the next
+  un-integrated mutation fails the suite). D13 adds the read: `GET /v1/audit-logs`, the
+  reader-audit row that commits inside its transaction, and a second manifest
+  (`MANDATED_READ_AUDIT`) that makes a read route which stops recording fail the suite.
+  Still outstanding, and named as such in the Roadmap: refusal-class auditing (a
+  403/404-class record), the retention/archival job, the audit UI (Phase 4) and the
+  draft-cascade accountability D12 records as a finding.
+- **A read is audited, and the audit row is outside the half it might narrow.**
+  `audit.viewed` is `other`, so the Treasurer whose `audit.view` narrows the log to
+  `financial` cannot read the record of who read it — including their own. Any future
+  access-class action (an export, a bulk download, a support impersonation) belongs in the
+  same category for the same reason, and `entity_id: null` with both snapshots `null` is
+  the shape a non-transitional record takes: state that a read cannot change, recorded
+  without copying page content into a table no `DELETE` can reach.
 - **The unique `operation_id` is an operational fact, not just a constraint.** A
   client that retries an audited mutation with the same id gets a rolled-back
   transaction, not a silent second row; that is the intended failure mode (D4).
