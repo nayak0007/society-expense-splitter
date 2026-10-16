@@ -249,6 +249,50 @@ const MANDATED_AUDIT: ReadonlyMap<string, readonly string[]> = new Map([
  * mandated or reasoned about here" checkable, and the next task that adds a mutation
  * route without its integration fails this suite rather than passing quietly.
  */
+/**
+ * **Read** routes that must record a reader-audit entry — T050 Stage E1.
+ *
+ * A second manifest rather than an entry in `MANDATED_AUDIT` above, because the two
+ * assert different things about different verbs. `MANDATED_AUDIT` is keyed off
+ * `WRITE_VERBS`: it answers "which mutation does this route record?", and a `GET` has no
+ * answer to that — which is exactly why PRD §11.7's "the log itself records who viewed
+ * it" could sit unimplemented through four stages without a single test objecting.
+ *
+ * This manifest is the machine-readable form of that sentence. One route qualifies
+ * today, and the reason it must not go missing is the one every audit declaration
+ * shares: an endpoint that silently stops recording still returns a 200 with the right
+ * rows, so nothing but a test like this one would notice.
+ *
+ * The declaration it asserts (`@Audited("audit.viewed")`) describes a write the route
+ * really performs — the row is flushed through `UnitOfWork`'s seam inside the read's own
+ * transaction — and the *persisted* row is the integration suite's assertion.
+ */
+const MANDATED_READ_AUDIT: ReadonlyMap<string, readonly string[]> = new Map([
+  ["AuditLogsController GET /audit-logs", ["audit.viewed"]],
+]);
+
+/**
+ * Write-verb routes that record no audit row, each with the reason.
+ *
+ * Two reasons have lived here, and keeping them distinguishable is the point:
+ *
+ *  - **not a mutation** — the route only computes or validates (`preview-split`,
+ *    `import/preview`), so there is no business change for an audit row to sit
+ *    beside;
+ *  - **coverage still outstanding** — the module's adapters have not been integrated
+ *    yet. These were the remaining groups named by T050's own status block, and this
+ *    list was the machine-readable form of that gap: the entry disappeared in the same
+ *    change that wired the module up.
+ *
+ * **The second reason is now empty.** Stage B took the core expense lifecycle, members,
+ * invitations and structure; Stage C took the six society lifecycle mutations; Stage D
+ * took the expense sub-resources (categories, comments, GST) and the attachment
+ * lifecycle — the last nine write-verb routes. So this list holds only the two routes
+ * that are not mutations, and it is deliberately kept as a list rather than deleted: an
+ * empty-but-present deferral register is what makes "every write-verb route is either
+ * mandated or reasoned about here" checkable, and the next task that adds a mutation
+ * route without its integration fails this suite rather than passing quietly.
+ */
 const AUDIT_DEFERRED: ReadonlyMap<string, string> = new Map([
   // ── not mutations ───────────────────────────────────────────────────────
   [
@@ -264,9 +308,9 @@ const AUDIT_DEFERRED: ReadonlyMap<string, string> = new Map([
   //
   // Stage D moved the last nine write-verb routes into `MANDATED_AUDIT` above, so the
   // only entries left in this list are the two the docblock calls "not a mutation".
-  // T050's remaining gap is the **read** side — `GET /societies/:id/audit-logs` and its
-  // reader-audit row — which is Stage E and adds a route rather than covering one, so
-  // nothing on this list changes when it lands.
+  // Stage E1 added the read route and its reader-audit row, and it is asserted by
+  // `MANDATED_READ_AUDIT` below rather than here: this register is about *mutations*,
+  // and a read that records a row is still a read.
 ]);
 
 /**
@@ -383,6 +427,15 @@ const NARROWED_ROUTES: readonly string[] = [
   // `pending_approval` or `published` expense is not a draft) after refusing a
   // `void` one for everybody (D4). No `gst.*` permission exists (D3).
   "ExpensesController PUT /expenses/:expenseId/gst",
+
+  // T050 Stage E1's read route. `audit.view` is the one scoped cell whose narrowing
+  // is on the *row's own category* rather than on ownership ("✅ Admin, 🟡 Treasurer
+  // financial only"), so the site is `auditVisibleCategories` in `@ses/domain`, called
+  // by `listAuditLogs`: it asks `canOnResource` about each of the two categories and
+  // pushes the answer into the query (`category in (…)`), which the read's RLS policy
+  // narrows the same way. The narrowing is here rather than in the controller so no
+  // role string is ever compared.
+  "AuditLogsController GET /audit-logs",
 ];
 
 async function collectRoutes(
@@ -554,6 +607,35 @@ describe("route inventory", () => {
       .map(keyOf);
 
     expect(undeclared).toEqual([]);
+  });
+
+  it("declares a reader-audit action on every read it has integrated", () => {
+    // Stage E1's enforcement: `GET /audit-logs` must still declare `audit.viewed`, and
+    // the route must still exist under the name the manifest expects. Both halves
+    // matter — a renamed controller would otherwise remove the route from the check
+    // silently, because every assertion below is keyed by this string.
+    const mismatched = [...MANDATED_READ_AUDIT].flatMap(([key, expected]) => {
+      const route = routes.find((candidate) => keyOf(candidate) === key);
+      if (route === undefined) {
+        return [`${key} → no such route`];
+      }
+      const declared = [...route.audited].sort().join(", ");
+      const wanted = [...expected].sort().join(", ");
+      return declared === wanted
+        ? []
+        : [`${key} → declares ${declared || "nothing"}, expected ${wanted}`];
+    });
+
+    expect(mismatched).toEqual([]);
+  });
+
+  it("keeps the reader-audit manifest free of stale entries", () => {
+    // The same anti-rot rule the other three lists keep: an entry naming a route that
+    // no longer exists would mask the next route that reuses its address.
+    const present = new Set(routes.map(keyOf));
+    expect(
+      [...MANDATED_READ_AUDIT.keys()].filter((key) => !present.has(key)),
+    ).toEqual([]);
   });
 
   it("declares exactly the actions the manifest expects", () => {

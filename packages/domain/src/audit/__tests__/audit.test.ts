@@ -4,6 +4,7 @@ import {
   AUDIT_MAX_DEPTH,
   AUDIT_REDACTED,
   auditKeySegments,
+  isAuditAction,
   isSensitiveAuditKey,
   redactAuditEntry,
   redactAuditPayload,
@@ -191,5 +192,21 @@ describe("the vocabulary", () => {
       expect(action).toMatch(/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/);
       expect(action.length).toBeLessThanOrEqual(64);
     }
+  });
+
+  it("names the reader audit, because PRD §11.7 logs who viewed the log", () => {
+    expect([...AUDIT_ACTIONS]).toContain("audit.viewed");
+  });
+});
+
+describe("isAuditAction", () => {
+  it("narrows a known action and refuses anything else", () => {
+    expect(isAuditAction("expense.published")).toBe(true);
+    expect(isAuditAction("audit.viewed")).toBe(true);
+    // A row written by a later deploy: shaped like an action, unknown to this build.
+    expect(isAuditAction("expense.reconciled")).toBe(false);
+    expect(isAuditAction("published")).toBe(false);
+    expect(isAuditAction(undefined)).toBe(false);
+    expect(isAuditAction(7)).toBe(false);
   });
 });

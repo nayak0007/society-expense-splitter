@@ -7,6 +7,7 @@ import type { JWTVerifyGetKey } from "jose";
 import type {
   ApartmentRepository,
   AttachmentRepository,
+  AuditLogReader,
   BuildingRepository,
   ExpenseCategoryRepository,
   ExpenseCommentRepository,
@@ -57,6 +58,7 @@ import {
   EXPENSE_SPLITS_READER,
 } from "../../src/modules/expenses/application/expense.tokens";
 import { ATTACHMENT_REPOSITORY } from "../../src/modules/attachments/application/attachment.tokens";
+import { AUDIT_LOG_READER } from "../../src/modules/audit/application/audit.tokens";
 import { STORAGE_PROVIDER } from "../../src/infrastructure/storage/storage.tokens";
 import {
   EXPENSE_PARTICIPANT_READER,
@@ -341,6 +343,25 @@ export type TestAppOptions = {
    * response contract and the use cases' own author-or-Admin narrowing.
    */
   comments?: ExpenseCommentRepository;
+  /**
+   * Substitutes the audit-log read (T050 Stage E1) — `GET /audit-logs`.
+   *
+   * A fourteenth seam, and the first whose subject is the audit module's *read* path:
+   * the write path has no seam because it has no adapter to swap (every module writes
+   * through `AuditService` + `UnitOfWork`'s seam), while this route owns
+   * `AuditLogRepositoryPostgres`.
+   *
+   * It is a genuine seam rather than a convenience: the real adapter opens a
+   * transaction and writes a reader-audit row, so an e2e suite that left it in place
+   * would need a database and would be asserting the integration suite's subject twice.
+   * What this suite proves instead is the route, the guard chain and the response
+   * projection; the RLS policies, the keyset SQL and the committed `audit.viewed` row
+   * stay the integration suite's.
+   *
+   * The fake is handed the reader-audit plan and may call it (that is what the adapter
+   * does), which is how a suite asserts the endpoint cannot quietly stop recording.
+   */
+  auditLogs?: AuditLogReader;
 };
 
 /** A stand-in indicator whose only job is to report the status the test asked for. */
@@ -478,6 +499,9 @@ export async function createTestApp(
     builder
       .overrideProvider(EXPENSE_COMMENT_REPOSITORY)
       .useValue(options.comments);
+  }
+  if (options.auditLogs !== undefined) {
+    builder.overrideProvider(AUDIT_LOG_READER).useValue(options.auditLogs);
   }
 
   const moduleRef = await builder.compile();

@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
+import { listAuditLogs } from "@ses/application";
+import type { AuditLogList } from "@ses/application";
 import {
   AUDIT_REDACTED,
   Expense,
@@ -24,7 +26,12 @@ import type {
   ApartmentRepository,
   AttachmentMembershipReader,
   AttachmentRepository,
+  AuditDescriptor,
   AuditEntry,
+  AuditError,
+  AuditLogCursor,
+  AuditLogPage,
+  AuditLogReader,
   BuildingRepository,
   ExpenseCategoryId,
   ExpenseCategoryRepository,
@@ -39,7 +46,10 @@ import type {
   MemberId,
   MemberRepository,
   MemberRole,
+  MemberSnapshot,
   PublishExpenseAllocation,
+  ReaderAuditPlan,
+  Result,
   SocietyId,
   SocietyRepository,
   StorageProvider,
@@ -56,6 +66,11 @@ import type { TransactionContext } from "../../src/infrastructure/database/unit-
 import { STORAGE_PROVIDER } from "../../src/infrastructure/storage/storage.tokens";
 import { ATTACHMENT_REPOSITORY } from "../../src/modules/attachments/application/attachment.tokens";
 import { CompleteUploadUseCase } from "../../src/modules/attachments/application/use-cases/complete-upload.use-case";
+import {
+  decodeAuditCursor,
+  encodeAuditCursor,
+} from "../../src/modules/audit/application/audit-cursor";
+import { AUDIT_LOG_READER } from "../../src/modules/audit/application/audit.tokens";
 import { PresignUploadUseCase } from "../../src/modules/attachments/application/use-cases/presign-upload.use-case";
 import { EXPENSE_CATEGORY_REPOSITORY } from "../../src/modules/expenses/application/expense-category.tokens";
 import {
@@ -3085,4 +3100,556 @@ describe("the audit trail of the expense sub-resources and attachments (Stage D)
     const text = await payloadTextFor("expense.deleted");
     expect(text).not.toContain(reserved.attachment.id);
   });
+});
+
+describe("the audit log's read path (Stage E1)", () => {
+  /** The instant the trio of fixture rows shares, in the shared-instant case. */
+  const SHARED_INSTANT = "2026-09-01T00:00:00Z";
+  const REQUEST_ID = "req-stage-e-read";
+  const READER_IP = "203.0.113.7";
+  const READER_USER_AGENT = "stage-e-suite/1.0";
+
+  let logs: AuditLogReader;
+  let fixture: SocietyFixture;
+  let treasurerUserId: UserId;
+  let strangerUserId: UserId;
+
+  beforeAll(() => {
+    logs = harness.app.get<AuditLogReader>(AUDIT_LOG_READER);
+  });
+
+  beforeEach(async () => {
+    fixture = await seedSociety(
+      harness,
+      "Stage E Court",
+      "admin@stage-e-audit.ses.test",
+    );
+    treasurerUserId = asUserId(
+      await createLocalUser(owner, "treasurer@stage-e-audit.ses.test", "Tre"),
+    );
+    await insertMember(owner, fixture.societyId, {
+      userId: treasurerUserId,
+      role: "treasurer",
+      displayName: "Treasurer",
+    });
+    strangerUserId = asUserId(
+      await createLocalUser(owner, "stranger@stage-e-audit.ses.test", "Str"),
+    );
+
+    // Three rows at three instants — two financial, one not — written on the owner
+    // connection because fixtures must exist before any identity does. `seedSociety`
+    // has already cleared its own creation entry, so the log starts exactly here.
+    await owner`
+      insert into public.audit_logs
+        (society_id, occurred_at, category, action, entity_type, operation_id)
+      values
+        (${fixture.societyId}::uuid, '2026-10-03T00:00:00Z'::timestamptz, 'financial', 'expense.published', 'expense', gen_random_uuid()),
+        (${fixture.societyId}::uuid, '2026-10-02T00:00:00Z'::timestamptz, 'other', 'member.role_assigned', 'member', gen_random_uuid()),
+        (${fixture.societyId}::uuid, '2026-10-01T00:00:00Z'::timestamptz, 'financial', 'expense.created', 'expense', gen_random_uuid())
+    `;
+  });
+
+  /**
+   * Runs `work` inside a request context, so the reader-audit row has an actor.
+   *
+   * The role on the row is read from this context, not from the caller's arguments
+   * (ADR-0014 D5) — so a read performed without one would record a `null` role and
+   * prove nothing about where the role comes from.
+   */
+  function asRequest<T>(
+    userId: UserId,
+    role: MemberRole,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return RequestContext.run(
+      {
+        requestId: REQUEST_ID,
+        userId,
+        member: {
+          membershipId: asMemberId(randomUUID()),
+          societyId: fixture.societyId,
+          role,
+          status: "active",
+        },
+        ip: READER_IP,
+        userAgent: READER_USER_AGENT,
+        audited: [],
+      },
+      work,
+    );
+  }
+
+  /**
+   * The production read path: the use case's visibility decision, then the real
+   * adapter — RLS, the keyset SQL and the reader-audit flush included.
+   *
+   * Deliberately the use case rather than a hand-built query. The two claims this
+   * closes are that `auditVisibleCategories` and `can_view_audit` answer identically,
+   * and that the plan the use case supplies is the one that reaches the writer —
+   * neither of which a suite that built its own query and its own descriptor could
+   * say anything about.
+   */
+  function read(
+    userId: UserId,
+    role: MemberRole,
+    options: {
+      readonly limit?: number;
+      readonly cursor?: AuditLogCursor | null;
+    } = {},
+  ): Promise<Result<AuditLogList, AuditError>> {
+    const limit = options.limit ?? 20;
+    const cursor = options.cursor ?? null;
+    const member: MemberSnapshot = {
+      membershipId: asMemberId(randomUUID()),
+      societyId: fixture.societyId,
+      role,
+      status: "active",
+    };
+    return asRequest(userId, role, () =>
+      listAuditLogs({ logs }, { actor: userId, member, limit, cursor }),
+    );
+  }
+
+  const readAsAdmin = (
+    options: {
+      readonly limit?: number;
+      readonly cursor?: AuditLogCursor | null;
+    } = {},
+  ) => read(fixture.adminUserId, "admin", options);
+
+  const readAsTreasurer = (
+    options: {
+      readonly limit?: number;
+      readonly cursor?: AuditLogCursor | null;
+    } = {},
+  ) => read(treasurerUserId, "treasurer", options);
+
+  /** The page of a read that succeeded — a refusal fails the test with its own code. */
+  function pageOf(result: Result<AuditLogList, AuditError>): AuditLogPage {
+    if (!result.ok) {
+      throw new Error(`The read was refused: ${result.error.code}`);
+    }
+    return result.value.page;
+  }
+
+  interface AccessRow {
+    readonly society_id: string;
+    readonly actor_user_id: string | null;
+    readonly actor_role: string | null;
+    readonly category: string;
+    readonly entity_type: string;
+    readonly entity_id: string | null;
+    readonly before: unknown;
+    readonly after: unknown;
+    readonly metadata: Record<string, unknown> | null;
+  }
+
+  /** Every persisted reader-audit row, in insertion order. */
+  function accessRows(): Promise<readonly AccessRow[]> {
+    return owner<AccessRow[]>`
+      select society_id::text as society_id,
+             actor_user_id::text as actor_user_id,
+             actor_role::text as actor_role,
+             category,
+             entity_type,
+             entity_id::text as entity_id,
+             "before",
+             "after",
+             metadata
+        from public.audit_logs
+       where action = 'audit.viewed'
+       order by id
+    `;
+  }
+
+  it("returns a page ordered by (occurred_at, id) and answers hasMore with one extra row", async () => {
+    const first = pageOf(await readAsAdmin({ limit: 2 }));
+
+    expect(first.records.map((record) => record.action)).toEqual([
+      "expense.published",
+      "member.role_assigned",
+    ]);
+    expect(first.hasMore).toBe(true);
+    // The cursor is the *page's last row's* own tuple — not the first row's — with
+    // `occurred_at` as the column yields it and `id` as its decimal spelling, because
+    // a `bigint` must never become a JS number on the way through.
+    expect(first.nextCursor).toEqual({
+      occurredAt: "2026-10-02T00:00:00.000Z",
+      id: first.records[1]!.id,
+    });
+    for (const record of first.records) {
+      expect(record.id).toMatch(/^\d+$/);
+    }
+
+    const second = pageOf(
+      await readAsAdmin({ limit: 2, cursor: first.nextCursor }),
+    );
+    expect(second.records.map((record) => record.action)).toEqual([
+      "expense.created",
+    ]);
+    expect(second.hasMore).toBe(false);
+    expect(second.nextCursor).toBeNull();
+
+    // No row was skipped or repeated across the boundary, and the two pages are the
+    // whole log.
+    const ids = [...first.records, ...second.records].map(
+      (record) => record.id,
+    );
+    expect(ids).toHaveLength(3);
+    expect(new Set(ids).size).toBe(3);
+  });
+
+  it("breaks a shared instant by id, so a page boundary cannot skip or repeat a row", async () => {
+    // The case the tuple's second half exists for: one request writing several entries
+    // gives them the same `now()`. Inserted in this order, so their ids ascend and the
+    // `id DESC` tie-break is the reverse of the insertion order.
+    await owner`
+      insert into public.audit_logs
+        (society_id, occurred_at, category, action, entity_type, operation_id)
+      values
+        (${fixture.societyId}::uuid, ${SHARED_INSTANT}::timestamptz, 'financial', 'expense.updated', 'expense', gen_random_uuid()),
+        (${fixture.societyId}::uuid, ${SHARED_INSTANT}::timestamptz, 'financial', 'expense.deleted', 'expense', gen_random_uuid()),
+        (${fixture.societyId}::uuid, ${SHARED_INSTANT}::timestamptz, 'financial', 'expense.voided', 'expense', gen_random_uuid())
+    `;
+
+    // The head page ends at the oldest fixture row, so the trio is exactly what follows.
+    const head = pageOf(await readAsAdmin({ limit: 3 }));
+    expect(head.hasMore).toBe(true);
+
+    const second = pageOf(
+      await readAsAdmin({ limit: 2, cursor: head.nextCursor }),
+    );
+    const third = pageOf(
+      await readAsAdmin({ limit: 2, cursor: second.nextCursor }),
+    );
+
+    expect(second.records.map((record) => record.action)).toEqual([
+      "expense.voided",
+      "expense.deleted",
+    ]);
+    expect(third.records.map((record) => record.action)).toEqual([
+      "expense.updated",
+    ]);
+    expect(third.hasMore).toBe(false);
+
+    // A timestamp-only cursor would have repeated or skipped part of that instant; the
+    // tuple does neither.
+    const ids = [...head.records, ...second.records, ...third.records].map(
+      (record) => record.id,
+    );
+    expect(ids).toHaveLength(6);
+    expect(new Set(ids).size).toBe(6);
+  });
+
+  it("narrows a Treasurer to the financial half and gives an Admin both", async () => {
+    const treasurer = pageOf(await readAsTreasurer());
+    expect(treasurer.records.map((record) => record.category)).toEqual([
+      "financial",
+      "financial",
+    ]);
+    expect(treasurer.records.map((record) => record.action)).toEqual([
+      "expense.published",
+      "expense.created",
+    ]);
+
+    // The Admin's page is the three fixture rows *plus* the Treasurer's own
+    // `audit.viewed` row: the read above committed it inside its own transaction, so
+    // the next read sees it and the read that wrote it does not (D13). It sorts first
+    // because it is the newest row here, and it is `other` — which is exactly why the
+    // Treasurer could not have read it back, their own access included.
+    const admin = pageOf(await readAsAdmin());
+    expect(admin.records.map((record) => record.action)).toEqual([
+      "audit.viewed",
+      "expense.published",
+      "member.role_assigned",
+      "expense.created",
+    ]);
+    expect(admin.records.map((record) => record.category)).toEqual([
+      "other",
+      "financial",
+      "other",
+      "financial",
+    ]);
+    // The access row names the Treasurer whose read produced it, not the Admin
+    // reading it now.
+    expect(admin.records[0]?.actorUserId).toBe(treasurerUserId);
+  });
+
+  it("filters before the page is cut, not after it", async () => {
+    // Two `other` rows newer than everything, so a fetch that ignored the category and
+    // filtered in memory would come back with a *short* page for a Treasurer while still
+    // claiming `hasMore` — the failure mode the query-input filter exists to prevent.
+    await owner`
+      insert into public.audit_logs
+        (society_id, occurred_at, category, action, entity_type, operation_id)
+      values
+        (${fixture.societyId}::uuid, '2026-10-05T00:00:00Z'::timestamptz, 'other', 'member.updated', 'member', gen_random_uuid()),
+        (${fixture.societyId}::uuid, '2026-10-04T00:00:00Z'::timestamptz, 'other', 'member.reactivated', 'member', gen_random_uuid())
+    `;
+
+    const page = pageOf(await readAsTreasurer({ limit: 2 }));
+
+    expect(page.records.map((record) => record.action)).toEqual([
+      "expense.published",
+      "expense.created",
+    ]);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it("cannot be steered at another society or past the narrowed half by a cursor", async () => {
+    // A second society with its own history: the rows a reused or forged cursor would
+    // have to reach, and the ones no filter here may ever let through.
+    const other = await seedSociety(
+      harness,
+      "Stage E Other Court",
+      "admin@stage-e-other.ses.test",
+    );
+    const [foreignRow] = await owner<{ id: string }[]>`
+      insert into public.audit_logs
+        (society_id, occurred_at, category, action, entity_type, operation_id)
+      values
+        (${other.societyId}::uuid, '2026-10-04T00:00:00Z'::timestamptz, 'financial', 'expense.voided', 'expense', gen_random_uuid())
+      returning id
+    `;
+    await owner`
+      insert into public.audit_logs
+        (society_id, occurred_at, category, action, entity_type, operation_id)
+      values
+        (${other.societyId}::uuid, '2026-09-30T00:00:00Z'::timestamptz, 'other', 'member.removed', 'member', gen_random_uuid())
+    `;
+
+    // A real position inside the other society's log. It travels the way a client's
+    // cursor does — through both halves of the production codec — so what this read is
+    // handed is the value a wire cursor from that society decodes to, not a hand-built
+    // tuple the adapter would never see.
+    const foreign = decodeAuditCursor(
+      encodeAuditCursor({
+        occurredAt: "2026-10-04T00:00:00.000Z",
+        id: foreignRow!.id,
+      }),
+    );
+
+    // An Admin of *this* society replays it. The tenant filter, the visibility filter and
+    // the keyset predicate are one statement, so a foreign position can only move the
+    // page: every row is still this society's, and neither other-society action appears.
+    const admin = pageOf(await readAsAdmin({ limit: 20, cursor: foreign }));
+    expect(admin.records.map((record) => record.action)).toEqual([
+      "expense.published",
+      "member.role_assigned",
+      "expense.created",
+    ]);
+    expect(admin.hasMore).toBe(false);
+
+    // The same foreign position replayed by a Treasurer cannot put the `other` half
+    // back: the category filter does not depend on the cursor.
+    const treasurer = pageOf(
+      await readAsTreasurer({ limit: 20, cursor: foreign }),
+    );
+    expect(treasurer.records.map((record) => record.category)).toEqual([
+      "financial",
+      "financial",
+    ]);
+
+    // And a position forged *behind* the whole log is an empty page rather than an error
+    // or a second way in: the statement's own filters still decide what exists.
+    const forged = decodeAuditCursor(
+      encodeAuditCursor({
+        occurredAt: "2020-01-01T00:00:00.000Z",
+        id: "1",
+      }),
+    );
+    const empty = pageOf(await readAsAdmin({ limit: 20, cursor: forged }));
+    expect(empty.records).toEqual([]);
+    expect(empty.nextCursor).toBeNull();
+  });
+
+  it("narrows at the policy too, so the two layers cannot disagree", async () => {
+    // The adapter is asked for both halves on behalf of a Treasurer — a query the use
+    // case would never build. `auditVisibleCategories` documents that
+    // `audit_logs_select_authorized` narrows the same way, and this is that claim: the
+    // application decides which pages exist, and RLS decides which rows do.
+    const both = await asRequest(treasurerUserId, "treasurer", () =>
+      logs.list(
+        {
+          societyId: fixture.societyId,
+          categories: ["financial", "other"],
+          limit: 20,
+          cursor: null,
+        },
+        treasurerUserId,
+        readerPlan(20, false),
+      ),
+    );
+
+    expect(both.records.map((record) => record.category)).toEqual([
+      "financial",
+      "financial",
+    ]);
+  });
+
+  it("refuses an empty category set at the adapter rather than reading everything", async () => {
+    const neverRuns: ReaderAuditPlan = () => {
+      throw new Error("the plan must not run for a refused read");
+    };
+
+    await expect(
+      asRequest(fixture.adminUserId, "admin", () =>
+        logs.list(
+          {
+            societyId: fixture.societyId,
+            categories: [],
+            limit: 20,
+            cursor: null,
+          },
+          fixture.adminUserId,
+          neverRuns,
+        ),
+      ),
+    ).rejects.toThrow(/cannot view its audit log/);
+
+    expect(await accessRows()).toHaveLength(0);
+  });
+
+  it("refuses a membership with no view grant without reading, and records no access", async () => {
+    const result = await read(strangerUserId, "resident");
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected the read to be refused");
+    expect(result.error.code).toBe("forbidden");
+    // Refused before the query is built, so nothing was read *and* nothing was
+    // recorded: an access that never happened must not become an audit row.
+    expect(await accessRows()).toHaveLength(0);
+  });
+
+  it("commits an audit.viewed row describing the access, inside the read's own transaction", async () => {
+    pageOf(await readAsAdmin({ limit: 2 }));
+
+    const rows = await accessRows();
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.society_id).toBe(fixture.societyId);
+    expect(row.actor_user_id).toBe(fixture.adminUserId);
+    expect(row.actor_role).toBe("admin");
+    // `other`, not `financial`: reading the log is an access event rather than financial
+    // state, which is why it cannot appear in a Treasurer's narrowed page (D13).
+    expect(row.category).toBe("other");
+    expect(row.entity_type).toBe("audit_log");
+    // A read addresses a page, not a row, so there is no single id that would be true.
+    expect(row.entity_id).toBeNull();
+    // A read transitions nothing — and the alternative would copy page content into an
+    // append-only table no `DELETE` can reach.
+    expect(row.before).toBeNull();
+    expect(row.after).toBeNull();
+    expect(row.metadata).toMatchObject({
+      categories: ["financial", "other"],
+      limit: 2,
+      usedCursor: false,
+      returned: 2,
+      // The trusted request facts, from the server-side context rather than the caller.
+      requestId: REQUEST_ID,
+      ip: READER_IP,
+      userAgent: READER_USER_AGENT,
+    });
+  });
+
+  it("records the visibility that applied rather than a role", async () => {
+    pageOf(await readAsTreasurer({ limit: 1 }));
+
+    const rows = await accessRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.actor_role).toBe("treasurer");
+    expect(rows[0]?.metadata).toMatchObject({
+      categories: ["financial"],
+      limit: 1,
+      usedCursor: false,
+      returned: 1,
+    });
+  });
+
+  it("records that a scroll continued, and never stores the cursor's contents", async () => {
+    const first = pageOf(await readAsAdmin({ limit: 1 }));
+    expect(first.nextCursor).not.toBeNull();
+
+    pageOf(await readAsAdmin({ limit: 1, cursor: first.nextCursor }));
+
+    const rows = await accessRows();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.metadata).toMatchObject({ usedCursor: false, returned: 1 });
+    expect(rows[1]?.metadata).toMatchObject({ usedCursor: true, returned: 1 });
+    // `usedCursor` is the only part with audit meaning: a stored copy would be a second,
+    // unreachable copy of a query parameter. So the entry's metadata is *exactly* the
+    // documented facts, and the cursor's own contents are nowhere in the row.
+    //
+    // Asserted as a key set, plus the cursor's instant, rather than with
+    // `not.toContain(id)`: an `id` is a short decimal string (`"2"`, `"14"`) that
+    // collides with nearly any uuid, timestamp or count, so that form of the check
+    // passes and fails for reasons that have nothing to do with the cursor.
+    expect(Object.keys(rows[1]?.metadata ?? {}).sort()).toEqual([
+      "categories",
+      "ip",
+      "limit",
+      "requestId",
+      "returned",
+      "usedCursor",
+      "userAgent",
+    ]);
+    expect(JSON.stringify(rows[1])).not.toContain(first.nextCursor!.occurredAt);
+  });
+
+  it("never returns the access row it just wrote, and returns it on the next read", async () => {
+    const first = pageOf(await readAsAdmin());
+    expect(first.records.map((record) => record.action)).not.toContain(
+      "audit.viewed",
+    );
+
+    // The row is written after the `SELECT`, so it appears on a *later* request — which
+    // is also what keeps a page from shifting under its own cursor.
+    const second = pageOf(await readAsAdmin());
+    expect(second.records).toHaveLength(4);
+    expect(second.records[0]?.action).toBe("audit.viewed");
+    expect(second.records[0]?.entityType).toBe("audit_log");
+
+    // No de-duplication: two reads are two accesses, and both are recorded (D4).
+    expect(await accessRows()).toHaveLength(2);
+  });
+
+  it("keeps the access rows out of a Treasurer's view, including their own", async () => {
+    pageOf(await readAsAdmin());
+    expect(await accessRows()).toHaveLength(1);
+
+    const treasurer = pageOf(await readAsTreasurer());
+
+    expect(treasurer.records.map((record) => record.action)).toEqual([
+      "expense.published",
+      "expense.created",
+    ]);
+    // The Treasurer's own read was recorded, and they cannot see it: `audit.viewed` is
+    // `other`, and PRD §2.1 grants them the financial half only.
+    expect(await accessRows()).toHaveLength(2);
+  });
+
+  /**
+   * The production plan's descriptor shape, for the two adapter-level calls above.
+   *
+   * A copy, and deliberately confined to those two: they bypass the use case on purpose,
+   * so there is nothing else to hand the port. What the *production* plan records is
+   * asserted by the reads that go through `listAuditLogs`.
+   */
+  function readerPlan(limit: number, usedCursor: boolean): ReaderAuditPlan {
+    return (page: AuditLogPage): AuditDescriptor => ({
+      societyId: fixture.societyId,
+      category: "other",
+      action: "audit.viewed",
+      entityType: "audit_log",
+      entityId: null,
+      before: null,
+      after: null,
+      metadata: {
+        limit,
+        usedCursor,
+        returned: page.records.length,
+      },
+    });
+  }
 });
