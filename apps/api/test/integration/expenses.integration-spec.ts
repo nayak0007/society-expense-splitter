@@ -557,6 +557,228 @@ describe("expense lifecycle against real PostgreSQL", () => {
     });
   });
 
+  // ── the audit trail of the sequence, and the four strategies T077 names ─────
+
+  describe("audit rows after each operation (T077 acceptance)", () => {
+    it("records exactly one row per operation, in order, keyed to the expense", async () => {
+      const expenseId = await createDraft(fixture);
+      await updateExpense.update(
+        fixture.adminUserId,
+        fixture.societyId,
+        expenseId,
+        { expectedVersion: 1, title: "Lift AMC — Q4 (audited)" },
+      );
+      await publishOf(fixture, expenseId, 2);
+
+      // The fixture clears the society's own `society.created` row, and every
+      // fixture insert above runs on the owner connection rather than the API, so
+      // the trail below is the workflow's and nothing else's.
+      const rows = await owner<{ action: string; entity_id: string | null }[]>`
+        select action, entity_id::text as entity_id
+          from public.audit_logs
+         where society_id = ${fixture.societyId}::uuid
+         order by id
+      `;
+
+      expect(rows.map((row) => row.action)).toEqual([
+        "expense.created",
+        "expense.updated",
+        "expense.published",
+      ]);
+      expect(rows.every((row) => row.entity_id === expenseId)).toBe(true);
+
+      // The publication's own row carries the transition it committed, and the
+      // financial state it describes is the state on the table.
+      const [published] = await owner<{ after: Record<string, unknown> }[]>`
+        select "after" from public.audit_logs
+         where action = 'expense.published' and society_id = ${fixture.societyId}::uuid
+      `;
+      expect(published?.after).toMatchObject({ status: "published" });
+      await expectConserved(expenseId, 600_000n);
+    });
+  });
+
+  describe("the strategies this suite had not published (T077 acceptance)", () => {
+    interface StoredSplit {
+      readonly apartmentId: string;
+      readonly amountPaise: bigint;
+      readonly percent: string | null;
+      readonly weight: string | null;
+    }
+
+    function storedSplits(expenseId: ExpenseId): Promise<StoredSplit[]> {
+      return owner<
+        {
+          apartment_id: string;
+          amount_paise: string;
+          percent: string | null;
+          weight: string | null;
+        }[]
+      >`
+        select apartment_id::text as apartment_id,
+               amount_paise::text as amount_paise,
+               percent::text as percent,
+               weight::text as weight
+          from public.expense_splits
+         where expense_id = ${expenseId}::uuid
+      `.then((rows) =>
+        rows.map((row) => ({
+          apartmentId: row.apartment_id,
+          amountPaise: BigInt(row.amount_paise),
+          percent: row.percent,
+          weight: row.weight,
+        })),
+      );
+    }
+
+    /**
+     * The persisted amount for each fixture flat, in the fixture's own order.
+     *
+     * Keyed by flat rather than by participant order, because the resolver's order
+     * is its own rule and a test that assumed it would be asserting an ordering it
+     * does not own. A flat with no split row is a failure of the write, not a zero.
+     */
+    function amountsByFlat(splits: readonly StoredSplit[]): readonly bigint[] {
+      const byApartment = new Map(
+        splits.map((split) => [split.apartmentId, split.amountPaise]),
+      );
+      expect(byApartment.size).toBe(splits.length);
+      return fixture.flats.map((flat) => {
+        const amount = byApartment.get(flat.apartmentId);
+        if (amount === undefined) {
+          throw new Error(
+            `Flat ${flat.apartmentId} has no persisted split row.`,
+          );
+        }
+        return amount;
+      });
+    }
+
+    it("publishes an equal split and places the odd paisa instead of rounding it away", async () => {
+      // 600,001 paise over four flats is not divisible: the engine must place the
+      // residual, and nothing may be lost.
+      const expenseId = await createDraft(fixture, {
+        amountPaise: 600_001,
+        splitStrategy: "equal",
+      });
+      await publishOf(fixture, expenseId, 1);
+
+      const splits = await storedSplits(expenseId);
+      expect(splits).toHaveLength(fixture.flats.length);
+      expect(splits.reduce((sum, split) => sum + split.amountPaise, 0n)).toBe(
+        600_001n,
+      );
+
+      const amounts = amountsByFlat(splits).map(Number);
+      expect(Math.max(...amounts) - Math.min(...amounts)).toBeLessThanOrEqual(
+        1,
+      );
+      for (const split of splits) {
+        // `weight` is the strategy's own figure — one share each — and `percent`
+        // belongs to the percentage strategy alone, so it is NULL here.
+        expect(Number(split.weight)).toBe(1);
+        expect(split.percent).toBeNull();
+        expect(split.amountPaise).toBeGreaterThan(0n);
+      }
+
+      await expectConserved(expenseId, 600_001n);
+    });
+
+    it("publishes a percentage split and stores each flat's own basis points as percent", async () => {
+      const basisPoints = [4000, 3000, 2000, 1000];
+      const expenseId = await createDraft(fixture, {
+        amountPaise: 600_001,
+        splitStrategy: "percentage",
+        splitConfig: {
+          percentages: fixture.flats.map((flat, index) => ({
+            apartmentId: flat.apartmentId,
+            basisPoints: basisPoints[index] ?? 0,
+          })),
+        },
+      });
+      await publishOf(fixture, expenseId, 1);
+
+      const splits = await storedSplits(expenseId);
+      expect(splits.reduce((sum, split) => sum + split.amountPaise, 0n)).toBe(
+        600_001n,
+      );
+
+      const percentByApartment = new Map(
+        splits.map((split) => [split.apartmentId, split.percent]),
+      );
+      fixture.flats.forEach((flat, index) => {
+        // `percentOf` is an exact integer shift of the basis points: 4000 → "40.0000".
+        expect(Number(percentByApartment.get(flat.apartmentId))).toBe(
+          (basisPoints[index] ?? 0) / 100,
+        );
+      });
+
+      await expectConserved(expenseId, 600_001n);
+    });
+
+    it("publishes a shares split in exact proportion to the configured shares", async () => {
+      const shares = [1000, 2000, 3000, 4000];
+      const expenseId = await createDraft(fixture, {
+        amountPaise: 600_000,
+        splitStrategy: "shares",
+        splitConfig: {
+          shares: fixture.flats.map((flat, index) => ({
+            apartmentId: flat.apartmentId,
+            shareUnits: shares[index] ?? 0,
+          })),
+        },
+      });
+      await publishOf(fixture, expenseId, 1);
+
+      const splits = await storedSplits(expenseId);
+      // 1:2:3:4 of ₹6,000 is exactly 600/1,200/1,800/2,400 — every paisa is
+      // allocated, so the assertion is an equality rather than a tolerance.
+      expect(amountsByFlat(splits)).toEqual([
+        60_000n,
+        120_000n,
+        180_000n,
+        240_000n,
+      ]);
+
+      const weightByApartment = new Map(
+        splits.map((split) => [split.apartmentId, split.weight]),
+      );
+      fixture.flats.forEach((flat, index) => {
+        // The weight is the share the engine was handed, in its thousandths.
+        expect(Number(weightByApartment.get(flat.apartmentId))).toBe(
+          shares[index] ?? 0,
+        );
+      });
+
+      await expectConserved(expenseId, 600_000n);
+    });
+
+    it("publishes a custom split with each stated amount persisted exactly", async () => {
+      const stated = [100_000, 200_000, 300_000, 1];
+      const expenseId = await createDraft(fixture, {
+        amountPaise: 600_001,
+        splitStrategy: "custom",
+        splitConfig: {
+          customAmounts: fixture.flats.map((flat, index) => ({
+            apartmentId: flat.apartmentId,
+            amountPaise: stated[index] ?? 0,
+          })),
+        },
+      });
+      await publishOf(fixture, expenseId, 1);
+
+      const splits = await storedSplits(expenseId);
+      expect(amountsByFlat(splits)).toEqual(
+        stated.map((amount) => BigInt(amount)),
+      );
+      for (const split of splits) {
+        expect(split.percent).toBeNull();
+      }
+
+      await expectConserved(expenseId, 600_001n);
+    });
+  });
+
   describe("approval threshold (T070 / ADR-0011)", () => {
     it("routes an at-threshold create to pending_approval and refuses publish until approved", async () => {
       // The society's threshold is 1,000,000 paise; `amount >= threshold` requires approval.
