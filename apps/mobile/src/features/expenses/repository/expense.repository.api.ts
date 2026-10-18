@@ -34,6 +34,7 @@ import {
   expenseRevisionsResponseSchema,
   expenseSplitsResponseSchema,
   previewSplitResponseSchema,
+  publishExpenseResponseSchema,
   buildingListResponseSchema,
   memberListResponseSchema,
 } from '@ses/contracts';
@@ -41,6 +42,7 @@ import type {
   CreateExpensePayload,
   ExpenseDto,
   PreviewSplitResponseDto,
+  PublishExpensePayload,
   UpdateExpensePayload,
 } from '@ses/contracts';
 
@@ -57,6 +59,7 @@ import type {
   ExpenseListQuery,
   ExpensePage,
   ExpensePayerOption,
+  ExpensePublication,
   ExpenseRepository,
   ExpenseRevisionView,
   ExpenseSplitView,
@@ -407,5 +410,29 @@ export class ApiExpenseRepository implements ExpenseRepository {
       body: payload,
     });
     return toSummary(expense);
+  }
+
+  async publish(
+    expenseId: string,
+    societyId: string,
+    _actor: string,
+    payload: PublishExpensePayload,
+    idempotencyKey: string,
+  ): Promise<ExpensePublication> {
+    // The key travels as a header because the body is the operation's *input*, not its
+    // retry identity: the API's `publishExpenseSchema` is a strict object that would
+    // refuse an `idempotencyKey` field, and SAD §7.7 puts the key on the wire precisely
+    // so a retry is byte-identical to the request it repeats.
+    const response = await apiRequest('POST', `expenses/${expenseId}/publish`, {
+      schema: publishExpenseResponseSchema,
+      societyId,
+      body: payload,
+      headers: { 'Idempotency-Key': idempotencyKey },
+    });
+
+    return {
+      expense: toSummary(response.expense),
+      splitSummary: response.splitSummary,
+    };
   }
 }

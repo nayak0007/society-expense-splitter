@@ -17,6 +17,7 @@
 import type {
   CreateExpensePayload,
   PreviewSplitResponseDto,
+  PublishExpensePayload,
   UpdateExpensePayload,
 } from '@ses/contracts';
 
@@ -31,6 +32,7 @@ import type {
   ExpenseListQuery,
   ExpensePage,
   ExpensePayerOption,
+  ExpensePublication,
   ExpenseRevisionView,
   ExpenseSplitView,
   ExpenseSummary,
@@ -199,6 +201,26 @@ export async function updateExpense(
   payload: UpdateExpensePayload,
 ): Promise<ExpenseSummary> {
   return getExpenseRepository().update(expenseId, societyId, actorId, payload);
+}
+
+/**
+ * Publish a draft or a pending-approval expense — `POST /v1/expenses/:expenseId/publish`.
+ *
+ * The one mobile write that carries an `Idempotency-Key` (SAD §7.7), and the service
+ * deliberately does not mint it: the key names **one attempt**, so the caller that knows
+ * whether it is retrying supplies it, and the same value must travel again on a retry.
+ * A committed publication replayed under its own key answers the stored row rather than
+ * refusing it, which is what makes "the response was lost" recoverable without a second
+ * bill.
+ */
+export async function publishExpense(
+  actorId: string,
+  societyId: string,
+  expenseId: string,
+  payload: PublishExpensePayload,
+  idempotencyKey: string,
+): Promise<ExpensePublication> {
+  return getExpenseRepository().publish(expenseId, societyId, actorId, payload, idempotencyKey);
 }
 
 /**

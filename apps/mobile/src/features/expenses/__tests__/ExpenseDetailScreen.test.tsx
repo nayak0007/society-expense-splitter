@@ -1,5 +1,9 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react-native';
-import { Linking } from 'react-native';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react-native';
+import { asMemberId, asSocietyId } from '@ses/domain';
+import type { MemberRole } from '@ses/domain';
+import { Alert, Linking } from 'react-native';
+
+import { useSocietyStore } from '@/stores/society.store';
 
 import {
   makeAttachment,
@@ -32,7 +36,12 @@ jest.mock('../hooks/use-expense', () => ({
   fetchAttachmentDownloadUrl: jest.fn(),
 }));
 
-import ExpenseDetailScreen from '../screens/ExpenseDetailScreen';
+// The publish mutation is mocked at the hook seam, like every other write on this screen: the
+// hook's own contract (the idempotency key, the scope) is `use-expense-actions.test.ts`'s.
+jest.mock('../hooks/use-expense-actions', () => ({
+  usePublishExpense: jest.fn(),
+}));
+
 import {
   fetchAttachmentDownloadUrl,
   useExpense,
@@ -41,6 +50,8 @@ import {
   useExpenseRevisions,
   useExpenseSplits,
 } from '../hooks/use-expense';
+import { usePublishExpense } from '../hooks/use-expense-actions';
+import ExpenseDetailScreen from '../screens/ExpenseDetailScreen';
 
 const mockExpense = useExpense as jest.Mock;
 const mockSplits = useExpenseSplits as jest.Mock;
@@ -48,6 +59,34 @@ const mockRevisions = useExpenseRevisions as jest.Mock;
 const mockComments = useExpenseComments as jest.Mock;
 const mockAttachments = useExpenseAttachments as jest.Mock;
 const mockDownload = fetchAttachmentDownloadUrl as jest.Mock;
+const mockPublish = usePublishExpense as jest.Mock;
+
+/**
+ * The session the screen gates against: an active membership in the active society.
+ *
+ * Awaited (`act(async …)`) because these tests change the session *after* a render: a Zustand
+ * `setState` re-renders the subscribing screen, and the store's persisted `setState` answers a
+ * thenable — so an un-awaited `act` would warn and the update would not be applied before the
+ * next assertion.
+ */
+async function setSession(role: MemberRole): Promise<void> {
+  await act(async () => {
+    await useSocietyStore.setState({
+      memberships: [
+        {
+          id: asMemberId('mem-1'),
+          societyId: asSocietyId('soc-1'),
+          userId: 'user-1' as never,
+          role,
+          status: 'active',
+          occupancyType: 'owner',
+          joinedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      activeSocietyId: asSocietyId('soc-1'),
+    });
+  });
+}
 
 function setDetail(overrides: {
   expense?: unknown;
@@ -153,5 +192,115 @@ describe('ExpenseDetailScreen', () => {
     await fireEvent.press(screen.getByText('Edited · 1 revision'));
     expect(screen.getByText('Revision history')).toBeTruthy();
     expect(screen.getByText('Version 1 → 2')).toBeTruthy();
+  });
+
+  /*
+    Publishing (T077). The gate is the matrix's own `expense.publish` cell, evaluated
+    through the real `can()`; the mutation itself is mocked, because what this screen owns
+    is *when* it offers the action and what it does with the answer.
+  */
+  describe('publishing', () => {
+    const summary = {
+      participantCount: 2,
+      totalPaise: 3_000_000,
+      minPaise: 1_500_000,
+      maxPaise: 1_500_000,
+    };
+
+    /** Accepts the confirmation for the caller, so a press reaches the mutation. */
+    function confirmAlerts(): jest.SpyInstance {
+      return jest.spyOn(Alert, 'alert').mockImplementation(((_title, _message, buttons) => {
+        buttons?.find((button) => button.text === 'Publish')?.onPress?.();
+      }) as typeof Alert.alert);
+    }
+
+    it('offers Publish to the two roles the matrix allows, and not on a published row', async () => {
+      mockPublish.mockReturnValue({ isPending: false, mutateAsync: jest.fn() });
+
+      await setSession('admin');
+      setDetail({ expense: makeExpense({ status: 'draft', version: 3 }) });
+      await render(<ExpenseDetailScreen />);
+      expect(screen.getByText('Publish expense')).toBeTruthy();
+
+      await setSession('treasurer');
+      setDetail({ expense: makeExpense({ status: 'pending_approval', version: 2 }) });
+      await render(<ExpenseDetailScreen />);
+      expect(screen.getByText('Publish expense')).toBeTruthy();
+
+      // A published row is not publishable again — the button is absent, not merely refused.
+      await setSession('admin');
+      setDetail({ expense: makeExpense({ status: 'published' }) });
+      await render(<ExpenseDetailScreen />);
+      expect(screen.queryByText('Publish expense')).toBeNull();
+    });
+
+    /*
+      A `void` row is the other terminal state, and it is the one a careless gate gets wrong:
+      `void` is neither `published` nor publishable, so a check written as `status !== 'published'`
+      would offer the button on a bill that has already been reversed. The server refuses it (the
+      definer re-checks the lifecycle under the row lock), but the screen must not offer it.
+    */
+    it('never offers Publish on a void row', async () => {
+      mockPublish.mockReturnValue({ isPending: false, mutateAsync: jest.fn() });
+      await setSession('admin');
+      setDetail({ expense: makeExpense({ status: 'void' }) });
+      await render(<ExpenseDetailScreen />);
+
+      expect(screen.queryByText('Publish expense')).toBeNull();
+    });
+
+    // One test per role rather than a loop: each role is a separate claim, and a loop that
+    // re-rendered under a moving session would be asserting four renders inside one case.
+    it.each(['resident', 'committee_member', 'tenant', 'guest'] as const)(
+      'hides Publish from a %s',
+      async (role) => {
+        mockPublish.mockReturnValue({ isPending: false, mutateAsync: jest.fn() });
+        await setSession(role);
+        setDetail({ expense: makeExpense({ status: 'draft' }) });
+        await render(<ExpenseDetailScreen />);
+        expect(screen.queryByText('Publish expense')).toBeNull();
+      },
+    );
+
+    it('publishes the row\u2019s version and renders the summary the server measured', async () => {
+      const mutateAsync = jest.fn().mockResolvedValue({
+        expense: makeExpense({ status: 'published' }),
+        splitSummary: summary,
+      });
+      mockPublish.mockReturnValue({ isPending: false, mutateAsync });
+      const alert = confirmAlerts();
+      await setSession('treasurer');
+      setDetail({ expense: makeExpense({ status: 'draft', version: 7 }) });
+      await render(<ExpenseDetailScreen />);
+
+      await fireEvent.press(screen.getByText('Publish expense'));
+
+      // The optimistic lock is the rendered row's version, never a default.
+      await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({ expectedVersion: 7 }));
+      expect(alert).toHaveBeenCalled();
+      expect(await screen.findByText('Published 2 shares totalling ₹30,000.00.')).toBeTruthy();
+      alert.mockRestore();
+    });
+
+    it('renders the server\u2019s refusal instead of a success state', async () => {
+      const mutateAsync = jest.fn().mockRejectedValue({
+        message: 'This expense needs an Admin\u2019s approval before it can be published.',
+      });
+      mockPublish.mockReturnValue({ isPending: false, mutateAsync });
+      const alert = confirmAlerts();
+      await setSession('admin');
+      setDetail({ expense: makeExpense({ status: 'pending_approval', version: 2 }) });
+      await render(<ExpenseDetailScreen />);
+
+      await fireEvent.press(screen.getByText('Publish expense'));
+
+      expect(
+        await screen.findByText(
+          'This expense needs an Admin\u2019s approval before it can be published.',
+        ),
+      ).toBeTruthy();
+      expect(screen.queryByText(/^Published /)).toBeNull();
+      alert.mockRestore();
+    });
   });
 });

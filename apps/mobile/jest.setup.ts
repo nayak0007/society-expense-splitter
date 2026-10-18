@@ -174,6 +174,14 @@ jest.mock('expo-crypto', () => {
     return out.buffer;
   };
 
+  /**
+   * `randomUUID` is an incrementing value rather than a constant — T077's publish hook mints
+   * one idempotency key per operation, and a test can only tell a *reused* key (one attempt
+   * being retried, which is what SAD §7.7 requires) from a *new* one (a second publication)
+   * if two calls can differ.
+   */
+  let uuidCounter = 0;
+
   return {
     CryptoDigestAlgorithm: { SHA256: 'SHA-256', SHA1: 'SHA-1', MD5: 'MD5' },
     CryptoEncoding: { HEX: 'hex', BASE64: 'base64' },
@@ -189,7 +197,10 @@ jest.mock('expo-crypto', () => {
       return buffer;
     }),
     digestStringAsync: jest.fn(async () => ''),
-    randomUUID: jest.fn(() => '00000000-0000-4000-8000-000000000000'),
+    randomUUID: jest.fn(() => {
+      uuidCounter += 1;
+      return `00000000-0000-4000-8000-${String(uuidCounter).padStart(12, '0')}`;
+    }),
   };
 });
 

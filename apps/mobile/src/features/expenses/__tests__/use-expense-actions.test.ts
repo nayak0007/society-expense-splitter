@@ -20,13 +20,19 @@ import { expenseKeys } from '../hooks/expense-keys';
  */
 const mockCreateExpense = jest.fn();
 const mockUpdateExpense = jest.fn();
+const mockPublishExpense = jest.fn();
 
 jest.mock('../services/expense.service', () => ({
   createExpense: (...args: unknown[]) => mockCreateExpense(...args),
   updateExpense: (...args: unknown[]) => mockUpdateExpense(...args),
+  publishExpense: (...args: unknown[]) => mockPublishExpense(...args),
 }));
 
-import { useCreateExpense, useUpdateExpense } from '../hooks/use-expense-actions';
+import {
+  useCreateExpense,
+  usePublishExpense,
+  useUpdateExpense,
+} from '../hooks/use-expense-actions';
 
 let queryClient: QueryClient;
 let invalidate: jest.SpyInstance;
@@ -138,5 +144,136 @@ describe('useUpdateExpense', () => {
       );
     });
     expect(mockUpdateExpense).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `usePublishExpense` (T077) — the one write whose **retry identity** the client owns.
+ *
+ * The screen's tests cover the button and the response rendering; what matters here is the
+ * part a screen cannot show: that the key is minted per operation and **reused** while the
+ * same operation is being retried, which is the whole reason SAD §7.7 puts a key on the wire.
+ * The `expo-crypto` double in `jest.setup.ts` returns an incrementing uuid, so a test can tell
+ * a replay from a new operation by the value itself.
+ */
+describe('usePublishExpense', () => {
+  const publication = {
+    expense: makeExpense({ id: 'exp-9', status: 'published' }),
+    splitSummary: {
+      participantCount: 2,
+      totalPaise: 3_000_000,
+      minPaise: 1_500_000,
+      maxPaise: 1_500_000,
+    },
+  };
+
+  it('publishes through the session\u2019s society and invalidates the expense namespace', async () => {
+    mockPublishExpense.mockResolvedValue(publication);
+    const { result } = await renderHook(() => usePublishExpense('exp-9'), { wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync({ expectedVersion: 4 });
+    });
+
+    expect(mockPublishExpense).toHaveBeenCalledWith(
+      'user-1',
+      'soc-1',
+      'exp-9',
+      { expectedVersion: 4 },
+      expect.any(String),
+    );
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: expenseKeys.all });
+  });
+
+  it('reuses the key for a retry of the same attempt, and mints a new one after it commits', async () => {
+    mockPublishExpense
+      .mockRejectedValueOnce(new Error('the response was lost'))
+      .mockResolvedValue(publication);
+    const { result } = await renderHook(() => usePublishExpense('exp-9'), { wrapper });
+
+    await act(async () => {
+      await expect(result.current.mutateAsync({ expectedVersion: 1 })).rejects.toThrow(
+        'the response was lost',
+      );
+    });
+    await act(async () => {
+      await result.current.mutateAsync({ expectedVersion: 1 });
+    });
+    await act(async () => {
+      await result.current.mutateAsync({ expectedVersion: 1 });
+    });
+
+    const keys = mockPublishExpense.mock.calls.map((call) => call[4] as string);
+    expect(keys[0]).toBe(keys[1]);
+    expect(keys[2]).not.toBe(keys[1]);
+  });
+
+  it('keeps the key after a refusal, so the next attempt is a replay of it', async () => {
+    mockPublishExpense.mockRejectedValue(new Error('APPROVAL_REQUIRED'));
+    const { result } = await renderHook(() => usePublishExpense('exp-9'), { wrapper });
+
+    await act(async () => {
+      await expect(result.current.mutateAsync({ expectedVersion: 1 })).rejects.toThrow(
+        'APPROVAL_REQUIRED',
+      );
+    });
+    await act(async () => {
+      await expect(result.current.mutateAsync({ expectedVersion: 1 })).rejects.toThrow(
+        'APPROVAL_REQUIRED',
+      );
+    });
+
+    const keys = mockPublishExpense.mock.calls.map((call) => call[4] as string);
+    expect(keys[0]).toBe(keys[1]);
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  /*
+    Overlapping taps are one operation, not two.
+
+    The confirmation dialog is the only thing between a double tap and two submissions, so this
+    pins what happens when both get through: the second call must carry the **same** key, which
+    makes it the API's replay (the stored publication) or its refusal — never a second publication.
+    The key is only rotated in `onSuccess`, so it cannot move between two calls that have not
+    committed yet; a rotation on *send* would turn the second tap into a fresh operation, which is
+    exactly the duplicate bill SAD §7.7's mandatory key exists to prevent.
+  */
+  it('sends one key when two taps overlap', async () => {
+    const keys: string[] = [];
+    const pending: (() => void)[] = [];
+    mockPublishExpense.mockImplementation(
+      (_actor: string, _society: string, _id: string, _payload: unknown, key: string) => {
+        keys.push(key);
+        return new Promise((resolve) => {
+          pending.push(() => resolve(publication));
+        });
+      },
+    );
+    const { result } = await renderHook(() => usePublishExpense('exp-9'), { wrapper });
+
+    await act(async () => {
+      const first = result.current.mutateAsync({ expectedVersion: 2 });
+      const second = result.current.mutateAsync({ expectedVersion: 2 });
+      // Bounded, so a call that never happens fails the assertion below instead of hanging.
+      for (let tick = 0; tick < 20 && pending.length < 2; tick += 1) {
+        await Promise.resolve();
+      }
+      for (const resolve of pending) resolve();
+      await Promise.all([first, second]);
+    });
+
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
+  });
+
+  it('refuses to publish with no expense id, without calling the API', async () => {
+    const { result } = await renderHook(() => usePublishExpense(null), { wrapper });
+
+    await act(async () => {
+      await expect(result.current.mutateAsync({ expectedVersion: 1 })).rejects.toThrow(
+        /not available/i,
+      );
+    });
+    expect(mockPublishExpense).not.toHaveBeenCalled();
   });
 });

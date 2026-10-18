@@ -1,7 +1,7 @@
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import { Linking, ScrollView, View } from 'react-native';
+import { Alert, Linking, ScrollView, View } from 'react-native';
 
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -22,13 +22,15 @@ import {
   fetchAttachmentDownloadUrl,
 } from '../hooks/use-expense';
 import { useAttachmentUploader, useAttachmentUploads } from '../hooks/use-attachment-upload';
+import { usePublishExpense } from '../hooks/use-expense-actions';
 import { useExpenseCategoryNames } from '../hooks/use-expenses';
 import type { ExpenseAttachmentView } from '../repository/expense.repository';
 import { formatAttachmentBytes, scanStatusLabel } from '../schemas/attachment.schemas';
 import { formatExpenseDate, formatPaise } from '../schemas/expense.schemas';
 import { expenseErrorMessage } from '../services/expense.service';
 import { selectActiveMembership, useSocietyStore } from '@/stores/society.store';
-import { asMemberId, canOnResource, memberSnapshotOf } from '@ses/domain';
+import { asMemberId, can, canOnResource, memberSnapshotOf } from '@ses/domain';
+import type { ExpenseSplitSummaryDto } from '@ses/contracts';
 
 /**
  * One expense (PRD §3.5.3, Roadmap T073): amount, category, date, status, the full split
@@ -73,8 +75,11 @@ export default function ExpenseDetailScreen() {
   // happened on the scanner route this screen pushed.
   const { uploads } = useAttachmentUploads(expenseId);
   const uploader = useAttachmentUploader();
+  const publish = usePublishExpense(expenseId);
   const [showRevisions, setShowRevisions] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
+  const [publishedSummary, setPublishedSummary] = useState<ExpenseSplitSummaryDto | null>(null);
 
   if (isLoading) {
     return <LoadingIndicator message="Loading expense…" />;
@@ -126,6 +131,56 @@ export default function ExpenseDetailScreen() {
       createdByMembershipId: asMemberId(expense.createdBy),
       published: false,
     });
+
+  /*
+    Whether this screen offers "Publish expense" (T077).
+
+    Publishing is the transition that turns a plan into money owed, so the control is
+    offered only where the API would accept it: a `draft` or a `pending_approval` row, and
+    the `expense.publish` cell of PRD §2.1 — Admin and Treasurer, unscoped — read through
+    `can()`, the same function the guard evaluates. A `published` or `void` row never shows
+    it. The at-or-above-threshold case is deliberately **not** filtered out here: approval
+    is the database's decision against the *current* threshold at the moment of the request
+    (ADR-0011 D4), so the honest behaviour is to let the server refuse it and render the
+    refusal it gives.
+  */
+  const canPublish =
+    (expense.status === 'draft' || expense.status === 'pending_approval') &&
+    membership !== null &&
+    can(membership.role, 'expense.publish');
+
+  /*
+    Confirmed, then committed. The alert is not decoration: a publication writes a due for
+    every member and cannot be undone (a published expense is voided instead), which is the
+    one sentence the user has to have read before the tap.
+  */
+  const confirmPublish = (): void => {
+    setPublishError(null);
+    Alert.alert(
+      'Publish this expense?',
+      'Every member’s share becomes a due. This cannot be undone — a published expense is voided instead.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Publish',
+          onPress: () => {
+            void (async () => {
+              try {
+                // The version on the rendered row is the lock the server checks; a stale
+                // one is refused with `VERSION_MISMATCH`, which the refetch then resolves.
+                const result = await publish.mutateAsync({
+                  expectedVersion: expense.version,
+                });
+                setPublishedSummary(result.splitSummary);
+              } catch (caught: unknown) {
+                setPublishError(expenseErrorMessage(caught));
+              }
+            })();
+          },
+        },
+      ],
+    );
+  };
 
   /*
     Whether this screen offers "Add bill".
@@ -205,6 +260,45 @@ export default function ExpenseDetailScreen() {
               </View>
             </View>
           </Card>
+
+          {/*
+            The publication (T077). The response's summary is rendered rather than the
+            allocations that were sent, because the summary is measured over the rows the
+            server persisted — the same reason the split table below is a read.
+          */}
+          {canPublish ? (
+            <Card variant="outlined">
+              <View className="gap-2">
+                <Text variant="titleSmall">Publish</Text>
+                <Text variant="bodySmall" color="onSurfaceVariant">
+                  Publishing writes each member’s share as a due, from the split stored on this
+                  expense. It cannot be undone.
+                </Text>
+                <Button
+                  variant="filled"
+                  loading={publish.isPending}
+                  onPress={confirmPublish}
+                  testID="publish-expense"
+                >
+                  Publish expense
+                </Button>
+              </View>
+            </Card>
+          ) : null}
+
+          {publishedSummary !== null ? (
+            <Text variant="bodyMedium">
+              {`Published ${String(publishedSummary.participantCount)} shares totalling ${formatPaise(
+                publishedSummary.totalPaise,
+              )}.`}
+            </Text>
+          ) : null}
+
+          {publishError !== null ? (
+            <Text variant="bodySmall" color="error">
+              {publishError}
+            </Text>
+          ) : null}
 
           {showRevisions ? (
             <Section title="Revision history">

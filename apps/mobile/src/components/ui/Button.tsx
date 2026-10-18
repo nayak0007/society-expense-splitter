@@ -24,6 +24,15 @@ export interface ButtonProps {
   readonly loading?: boolean;
   /** Leading icon slot — pass any 20×20 node (an icon-font or SVG glyph). */
   readonly icon?: ReactNode;
+  /**
+   * A stable identifier for automation (Roadmap T035/T077's Maestro flows).
+   *
+   * Optional and rarely needed: Maestro matches visible text first, and a button whose
+   * label is already unique should not carry a second name. It exists for the cases
+   * where the label is *not* stable — a control whose text is derived from data — so a
+   * flow never has to match on a coordinate or a coincidental string.
+   */
+  readonly testID?: string;
   onPress?: (() => void) | undefined;
 }
 
@@ -53,6 +62,7 @@ export function Button({
   disabled = false,
   loading = false,
   icon,
+  testID,
   onPress,
 }: ButtonProps) {
   const styles = VARIANT_STYLES[variant];
@@ -65,6 +75,7 @@ export function Button({
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ disabled: isDisabled, busy: loading }}
+        {...(testID === undefined ? {} : { testID })}
         onPress={isDisabled ? undefined : onPress}
         className={`flex-row items-center justify-center rounded-full ${styles.container} ${sizeStyle.container}`}
       >

@@ -20,8 +20,10 @@
 
 import type {
   CreateExpensePayload,
+  ExpenseSplitSummaryDto,
   ParticipantSelectorPayload,
   PreviewSplitResponseDto,
+  PublishExpensePayload,
   SplitConfigPayload,
   UpdateExpensePayload,
 } from '@ses/contracts';
@@ -178,6 +180,20 @@ export interface AttachmentUploadTarget {
  */
 export interface AttachmentCompletion {
   readonly status: 'processing';
+}
+
+/**
+ * What a publication wrote — the published row and the split summary over the rows it
+ * persisted (T066, PRD §8.3).
+ *
+ * `expense` is the same view model the rest of the feature renders and is read back from
+ * the row the transition wrote, so the detail screen shows the server's state rather than
+ * the state the caller hoped for. `splitSummary` is measured over `expense_splits`; it is
+ * deliberately not a re-computation of the split.
+ */
+export interface ExpensePublication {
+  readonly expense: ExpenseSummary;
+  readonly splitSummary: ExpenseSplitSummaryDto;
 }
 
 /** One page of the society's expenses plus the cursor for the next page. */
@@ -348,6 +364,28 @@ export interface ExpenseRepository {
     actor: string,
     payload: UpdateExpensePayload,
   ): Promise<ExpenseSummary>;
+
+  /**
+   * Publish a draft or a pending-approval expense — `POST /expenses/:expenseId/publish`.
+   *
+   * The server recomputes the split from the **stored** strategy and selector, writes the
+   * splits, the transition and one principal due per split in a single transaction, and
+   * checks the approval threshold itself; nothing about the allocation travels in this
+   * request, which is what keeps a stale preview from ever becoming a bill.
+   *
+   * `idempotencyKey` is required and is **not** generated here. SAD §7.7 makes the key the
+   * caller's statement of "this is one operation": the same value must be reused when the
+   * same attempt is retried after an ambiguous outcome (the API answers the stored
+   * publication rather than refusing it), while a genuinely new attempt is a new key. The
+   * hook owns that decision because the hook is what knows whether it is retrying.
+   */
+  publish(
+    expenseId: string,
+    societyId: string,
+    actor: string,
+    payload: PublishExpensePayload,
+    idempotencyKey: string,
+  ): Promise<ExpensePublication>;
 
   /**
    * The society's **active** categories, for the form's picker.

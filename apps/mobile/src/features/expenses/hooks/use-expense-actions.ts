@@ -1,11 +1,17 @@
-import type { CreateExpensePayload, UpdateExpensePayload } from '@ses/contracts';
+import type {
+  CreateExpensePayload,
+  PublishExpensePayload,
+  UpdateExpensePayload,
+} from '@ses/contracts';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import * as Crypto from 'expo-crypto';
+import { useRef } from 'react';
 
 import { selectAuthUser, useAuthStore } from '@/stores/auth.store';
 import { selectActiveSocietyId, useSocietyStore } from '@/stores/society.store';
 
-import type { ExpenseSummary } from '../repository/expense.repository';
-import { createExpense, updateExpense } from '../services/expense.service';
+import type { ExpensePublication, ExpenseSummary } from '../repository/expense.repository';
+import { createExpense, publishExpense, updateExpense } from '../services/expense.service';
 
 import { expenseKeys } from './expense-keys';
 
@@ -99,6 +105,49 @@ export function useUpdateExpense(expenseId: string | null) {
       return updateExpense(actorId, societyId, expenseId, payload);
     },
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: expenseKeys.all });
+    },
+  });
+}
+
+/**
+ * Publish a draft or pending-approval expense (PRD §3.4, T066).
+ *
+ * ## Why this hook mints the idempotency key, and when it reuses it
+ *
+ * Publishing is the one money-moving call whose retry must be deduplicated, so it is the
+ * one call that carries an `Idempotency-Key` (SAD §7.7). The key's meaning is "this is one
+ * operation": a retry after an ambiguous outcome — a timeout, a lost response, a double
+ * tap — must carry **the same** key so the server can answer the stored publication, while
+ * a genuinely new publication must carry a new one or it would be answered with the earlier
+ * row instead of writing anything.
+ *
+ * The hook is the layer that knows which of the two it is, so the key lives here: one key
+ * per mounted screen, minted on first use and **regenerated only after a commit**. A failed
+ * attempt keeps its key, which is exactly what makes the retry the user taps afterwards a
+ * replay rather than a second attempt.
+ *
+ * The write is server-confirmed and never optimistic, for the same three reasons
+ * `useCreateExpense` records — the server owns `status`, `version`, the splits and the dues.
+ * The response additionally carries the split summary measured over the rows it persisted,
+ * which is the only honest thing to show after a publication.
+ */
+export function usePublishExpense(expenseId: string | null) {
+  const scope = useScope();
+  const queryClient = useQueryClient();
+  const keyRef = useRef<string | null>(null);
+
+  return useMutation<ExpensePublication, unknown, PublishExpensePayload>({
+    mutationFn: (payload) => {
+      const { actorId, societyId } = requireScope(scope);
+      if (expenseId === null) {
+        throw new Error('That expense is not available to you.');
+      }
+      keyRef.current ??= Crypto.randomUUID();
+      return publishExpense(actorId, societyId, expenseId, payload, keyRef.current);
+    },
+    onSuccess: () => {
+      keyRef.current = null;
       void queryClient.invalidateQueries({ queryKey: expenseKeys.all });
     },
   });

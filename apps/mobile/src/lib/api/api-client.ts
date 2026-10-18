@@ -126,7 +126,26 @@ export interface ApiRequestOptions<TValue> {
    * authorised against one society and reading another.
    */
   readonly societyId?: string;
+
+  /**
+   * Extra headers for a route that requires one of its own.
+   *
+   * Exactly one route needs this: `POST /expenses/:expenseId/publish` is the only
+   * money-moving call that mandates an `Idempotency-Key` (SAD §7.7), so the publish
+   * adapter is the only caller. It is a narrow allowance rather than a general header
+   * bag — the four headers that carry identity are still written by this client, and a
+   * name that would replace one of them is ignored rather than honoured, so a route can
+   * add a header but cannot change who it is or which society it acts in.
+   */
+  readonly headers?: Readonly<Record<string, string>>;
 }
+
+/**
+ * The headers this client owns. A caller-supplied name matching one of them is dropped:
+ * `authorization` and `x-society-id` are the session and the tenant, and a second writer
+ * for either is how a request ends up authorised as one caller and scoped to another.
+ */
+const RESERVED_HEADERS = new Set(['accept', 'authorization', 'content-type', 'x-society-id']);
 
 /**
  * `config.apiUrl` already includes the version segment
@@ -179,6 +198,11 @@ async function send(
   // an empty payload, which turns a legitimate 204 route into a 400.
   if (options.body !== undefined) headers['content-type'] = 'application/json';
   if (options.societyId !== undefined) headers['x-society-id'] = options.societyId;
+  for (const [name, value] of Object.entries(options.headers ?? {})) {
+    const key = name.toLowerCase();
+    if (RESERVED_HEADERS.has(key)) continue;
+    headers[key] = value;
+  }
 
   return fetch(url(path), {
     method,
