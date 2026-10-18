@@ -80,13 +80,22 @@ conventions exist rather than one:
   screen's header title and its button are both "Log in" (and the register screen's are both
   "Create account"), so those taps are `below:` the last field rather than a bare label.
 
-### Two labels the flows deliberately avoid
+### Two labels the flows handle, and one that is a known risk
 
-`'Expenses'` is both a tab label and (later) a screen header, and `'Publish'` is both the alert's
-confirm action and the publish card's heading. The flows tap them where only one match exists
-(the tab, from the home screen) or by `id` (the card), rather than relying on Maestro picking the
-front-most match. If the first real run reports an ambiguous match, the fix is another `testID`
-on the component that lost — not a coordinate.
+`'Expenses'` is both a tab label and (later) a screen header: the flow taps it from the home
+screen, where only the tab matches. The publish card is addressed by `id`, never by its heading.
+
+**`'Publish'` is the one genuinely ambiguous tap in the suite**, and it is called out rather
+than glossed: the native confirmation's confirm action is exactly `Publish`, and so is the
+publish card's heading — and Maestro matches `text:` by _contains_, so the required
+`- tapOn: 'Publish'` on the alert can see more than one element. `Alert.alert` renders a native
+dialog with no `testID` to address, so there is no id-based fix available on the client side.
+This is therefore the **most likely first-run failure**, and it fails loudly (the tap lands on
+the covered card, the dialog stays open and the `Published …` assertion times out) rather than
+passing wrongly. The fix when it is observed is one of: give the card heading a distinct string
+(it is decorative next to a button already labelled "Publish expense"), or replace the native
+alert with the app's own confirm modal, which can carry a `testID`. Both are product decisions
+for whoever sees the failure — not a coordinate, and not a weakened assertion.
 
 ## Test data, isolation and cleanup
 
