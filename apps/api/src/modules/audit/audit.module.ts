@@ -1,9 +1,11 @@
 import { Module } from "@nestjs/common";
 
+import { SECURITY_EVENT_RECORDER } from "../../common/authorization/security-event-recorder";
 import { DatabaseModule } from "../../infrastructure/database/database.module";
 import { AuditService } from "./audit.service";
 import { AuditLogOperations } from "./application/audit.operations";
 import { AUDIT_LOG_READER } from "./application/audit.tokens";
+import { RefusalRecorderService } from "./application/refusal-recorder.service";
 import { AuditLogRepositoryPostgres } from "./infrastructure/audit-log.repository";
 import { AuditLogsController } from "./presentation/audit-logs.controller";
 
@@ -68,7 +70,14 @@ import { AuditLogsController } from "./presentation/audit-logs.controller";
     // second, real adapter in the graph — the convention every module's tokens follow.
     { provide: AUDIT_LOG_READER, useExisting: AuditLogRepositoryPostgres },
     AuditLogOperations,
+    // Stage E2's refusal recorder (ADR-0014 D14). Satisfied here because this is where
+    // the audit vocabulary, the writer's transaction seam and the retention decisions
+    // already live; consumed by the *global* `PermissionGuard`, which is why the token is
+    // exported — the guard is declared in `AppModule`, which imports this module, so this
+    // one export is the whole edge.
+    RefusalRecorderService,
+    { provide: SECURITY_EVENT_RECORDER, useExisting: RefusalRecorderService },
   ],
-  exports: [AuditService],
+  exports: [AuditService, SECURITY_EVENT_RECORDER],
 })
 export class AuditModule {}

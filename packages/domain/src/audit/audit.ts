@@ -86,6 +86,14 @@ export const AUDIT_ACTIONS = [
   // state, and classifying it `financial` would hand a Treasurer the record of
   // every Admin's read (ADR-0014 D13).
   "audit.viewed",
+  // ── the refusal record (Stage E2) ────────────────────────────────────────
+  // ADR-0014 D14: an authenticated member of this society was refused an action
+  // their role (or membership status) does not allow. Not a mutation — nothing
+  // changed and nothing rolled back — so the row carries null snapshots, and its
+  // category is `other`, keeping every refusal out of a Treasurer's narrowed view.
+  // The reason lives in `metadata.reason` (`role_denied` | `member_inactive`)
+  // rather than in a second action name: one refusal, one action, one row.
+  "security.permission_denied",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

@@ -1,5 +1,7 @@
 import {
+  Inject,
   Injectable,
+  Logger,
   type CanActivate,
   type ExecutionContext,
 } from "@nestjs/common";
@@ -7,9 +9,20 @@ import { Reflector } from "@nestjs/core";
 import { can, isAction } from "@ses/domain";
 import type { Action } from "@ses/domain";
 
+import {
+  SECURITY_EVENT_RECORDER,
+  type PermissionRefusalReason,
+  type SecurityEventRecorder,
+} from "../authorization/security-event-recorder";
 import { REQUIRE_PERMISSION_KEY } from "../decorators/require-permission.decorator";
 import { AppError } from "../errors/app-error";
-import { readRequestMembership } from "../http/http-access";
+import {
+  readRequestActor,
+  readRequestIp,
+  readRequestId,
+  readRequestMembership,
+  readRequestUserAgent,
+} from "../http/http-access";
 
 /**
  * Stage 4 of the guard chain — SAD §9.4. Reads the action a route declared and
@@ -53,12 +66,38 @@ import { readRequestMembership } from "../http/http-access";
  * stated here rather than implied because allowing a request is exactly the point
  * at which forgetting it becomes a privilege bug — and the report lists it as the
  * first piece of remaining work.
+ *
+ * ## The two 403s it decides are recorded — T050 Stage E2, ADR-0014 D14
+ *
+ * A refusal made here is the only kind this codebase keeps a durable record of: the
+ * caller is authenticated, the society and the role come from the membership the
+ * previous guard resolved from the database, and the action is the one the route
+ * declared. The write happens outside the request's own work — there is none yet, because
+ * this guard runs before any handler — so it goes through `SecurityEventRecorder`, whose
+ * adapter owns that transaction and is bounded to one row per member, action, reason and
+ * hour.
+ *
+ * The refusals this guard does *not* decide stay unrecorded by design. A 401 (no verified
+ * actor) and `SocietyGuard`'s 404 (no live membership) are out of scope, and D14 says why:
+ * an unauthenticated caller must not be able to write to an immutable table at all, and a
+ * cross-society row would have to be filed under the target society.
+ *
+ * Recording is awaited before the refusal is thrown, so the row is on the table by the
+ * time the client reads the status. It is not transactional with anything (there is
+ * nothing to be transactional with), and its failure cannot change the answer: the
+ * recorder logs and returns, and the guard refuses regardless.
  */
 @Injectable()
 export class PermissionGuard implements CanActivate {
-  constructor(private readonly reflector: Reflector) {}
+  private readonly logger = new Logger(PermissionGuard.name);
 
-  canActivate(context: ExecutionContext): boolean {
+  constructor(
+    private readonly reflector: Reflector,
+    @Inject(SECURITY_EVENT_RECORDER)
+    private readonly refusals: SecurityEventRecorder,
+  ) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const required = this.reflector.getAllAndOverride<unknown>(
       REQUIRE_PERMISSION_KEY,
       [context.getHandler(), context.getClass()],
@@ -89,6 +128,7 @@ export class PermissionGuard implements CanActivate {
     }
 
     if (membership.status !== "active") {
+      await this.recordRefusal(context, request, action, "member_inactive");
       throw new AppError(
         "MEMBER_INACTIVE",
         "Your membership is awaiting approval in this society.",
@@ -96,6 +136,7 @@ export class PermissionGuard implements CanActivate {
     }
 
     if (!can(membership.role, action)) {
+      await this.recordRefusal(context, request, action, "role_denied");
       throw new AppError(
         "FORBIDDEN",
         `Your role in this society does not allow "${action}".`,
@@ -105,5 +146,56 @@ export class PermissionGuard implements CanActivate {
     // Eligible — including a conditional (scoped) grant, which the handler must
     // narrow against the record. See the docstring above.
     return true;
+  }
+
+  /**
+   * Hands one refusal to the recorder, and never lets that hand-off change the answer.
+   *
+   * Every fact is read from what the chain already established: the actor from the verified
+   * token, the society and role from the resolved membership, and the route from the
+   * controller and handler **names** rather than from the request's URL — a path or query
+   * would carry the ids a 404 is meant not to disclose.
+   *
+   * A missing actor or membership means the chain is mis-wired rather than that the caller
+   * is unauthorised, and the guard already refuses that case with the `INTERNAL` above; there
+   * is nothing honest to record, so this returns without one.
+   */
+  private async recordRefusal(
+    context: ExecutionContext,
+    request: unknown,
+    action: Action,
+    reason: PermissionRefusalReason,
+  ): Promise<void> {
+    const actor = readRequestActor(request);
+    const membership = readRequestMembership(request);
+    if (actor === undefined || membership === undefined) {
+      return;
+    }
+
+    try {
+      await this.refusals.recordRefusal({
+        societyId: membership.societyId,
+        actorUserId: actor.userId,
+        actorRole: membership.role,
+        reason,
+        action,
+        controller: context.getClass().name,
+        handler: context.getHandler().name,
+        requestId: readRequestId(request),
+        ip: readRequestIp(request),
+        userAgent: readRequestUserAgent(request),
+      });
+    } catch (error: unknown) {
+      // Defence in depth, not the design: the recorder's contract is that it never
+      // throws, and the real adapter swallows its own failures after logging them. This
+      // exists because a *misbehaving* implementation must still not be able to turn a
+      // correct `403` into a `500` — the authorization answer is the guard's to give.
+      this.logger.warn(
+        `The refusal of "${action}" was not recorded. The caller was refused ` +
+          `regardless. Cause: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+      );
+    }
   }
 }
