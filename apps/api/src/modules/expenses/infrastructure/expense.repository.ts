@@ -30,6 +30,7 @@ import {
 import { AuditService } from "../../audit/audit.service";
 import {
   NO_WORKFLOW_STAMPS,
+  draftDeleteRemovedAttachmentsSchema,
   enrichVersionMismatch,
   expenseDetailRowListSchema,
   expenseDetailRowSchema,
@@ -78,10 +79,21 @@ import type { ExpenseWorkflowStamps } from "./expense.rows";
  *
  * ## Deleting is the definer function, and nothing here writes `DELETE`
  *
- * `expense_draft_delete()` (migration `20261004120000`) is the only path: `DELETE`
- * is not granted on `expenses`, and the function enforces creator-only,
- * draft-only and no-splits inside the database. This adapter classifies its
- * refusals; it does not re-implement its rules.
+ * `expense_draft_delete()` (migration `20261004120000`, extended by
+ * `20261011120000` and `20261017120000`) is the only path: `DELETE` is not granted
+ * on `expenses`, and the function enforces creator-only, draft-only and no-splits
+ * inside the database. This adapter classifies its refusals; it does not
+ * re-implement its rules.
+ *
+ * ## The cascade's evidence comes from the statement that removed the rows
+ *
+ * T071's function also removes the draft's `attachments` rows, and since
+ * `20261017120000` it **returns their ids**. This adapter takes them from that
+ * return value and puts them in the entry's `metadata` (ADR-0014 D16) rather than
+ * reading the rows first: a read taken before the call can miss a reservation
+ * committing in between, while `RETURNING` inside the function is complete by
+ * construction — the same reasoning `AttachmentRepository.deleteById` records for
+ * taking its `before` snapshot from the `DELETE` itself.
  */
 @Injectable()
 export class ExpenseRepositoryPostgres implements ExpenseRepository {
@@ -379,6 +391,10 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
     actor: UserId,
   ): Promise<void> {
     let before: ExpenseRecord | null = null;
+    // The cascade's evidence, collected by the statement that removed the rows. Its
+    // absence (`[]`) is a recorded fact — the draft had no attachments — rather than
+    // a missing field, which is why the function answers an empty array, not NULL.
+    let removedAttachments: readonly string[] = [];
 
     await this.run(
       actor,
@@ -390,10 +406,11 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
         // rule, and the audit entry describes its effect from the outside rather
         // than re-implementing a decision.
         before = await this.readForAudit(tx, id, societyId);
-        await runQuery(
+        const rows = await runQuery(
           tx,
-          sql`select public.expense_draft_delete(${id}::uuid, ${societyId}::uuid)`,
+          sql`select public.expense_draft_delete(${id}::uuid, ${societyId}::uuid) as removed_attachments`,
         );
+        removedAttachments = parseRemovedAttachments(rows);
       },
       () => [
         this.audit.entry({
@@ -404,6 +421,10 @@ export class ExpenseRepositoryPostgres implements ExpenseRepository {
           entityId: id,
           before: before === null ? null : expenseAuditSnapshot(before),
           after: null,
+          // ADR-0014 D16: the draft's own removal, naming the attachment rows the
+          // cascade took with it. One entry, no fan-out — a single id array in this
+          // row's metadata, never one row per cascaded attachment.
+          metadata: { removedAttachments },
         }),
       ],
     );
@@ -727,6 +748,29 @@ export async function runQuery(
 ): Promise<readonly Row[]> {
   const rows = await tx.execute(statement);
   return rows as unknown as readonly Row[];
+}
+
+/**
+ * `expense_draft_delete()`'s return value → the removed attachment ids (D16).
+ *
+ * A shape failure is an `unexpected_shape` error rather than an empty list: the
+ * function is the only writer of that array, so a value this schema cannot read means
+ * the return contract moved, and quietly recording "nothing was cascaded" would be a
+ * claim the adapter cannot support.
+ *
+ * The column is selected with an explicit alias because the driver names a
+ * function-result column after the function itself, and a rename there would otherwise
+ * silently change which value is read.
+ */
+function parseRemovedAttachments(rows: readonly Row[]): readonly string[] {
+  const [first] = rows;
+  const parsed = draftDeleteRemovedAttachmentsSchema.safeParse(
+    first?.["removed_attachments"],
+  );
+  if (!parsed.success) {
+    throw unexpectedShapeError("draft deletion");
+  }
+  return parsed.data;
 }
 
 function parseRows(rows: readonly Row[]) {

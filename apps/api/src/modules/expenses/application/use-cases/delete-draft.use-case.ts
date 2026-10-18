@@ -71,6 +71,13 @@ import {
  * is removed by the function but its object is not swept by this call — which is the
  * accepted abandoned-object obligation the ADR records, not a gap introduced here.
  *
+ * That pre-read is deliberately **not** what the audit trail rests on. Since
+ * `20261017120000` the definer function returns the ids of the rows it removed, and
+ * the adapter puts them in the single `expense.deleted` entry's metadata (ADR-0014
+ * D16), so the log names the cascade completely — the read above can miss a
+ * reservation committing in between, and the object sweep is the only obligation
+ * that tolerates that.
+ *
  * Note what this deliberately does **not** do: it does not re-implement the
  * attachment-delete authorization path. The caller has already passed creator-only,
  * draft-only and no-splits to reach this point, and the rows being removed are

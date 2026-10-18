@@ -234,6 +234,21 @@ export function expenseFromDetailRow(row: ExpenseDetailRow): ExpenseRecord {
 }
 
 /**
+ * What `expense_draft_delete()` reports it removed — the ids of the draft's
+ * attachment rows the cascade took with it (ADR-0014 D16).
+ *
+ * Since `20261017120000_expense_draft_delete_removed_attachments.sql` the function
+ * returns a `jsonb` array of id strings rather than `void`, so the single
+ * `expense.deleted` audit entry can name the rows the cascade removed instead of
+ * leaving that accountability to a reconstruction D12 recorded as a finding. `jsonb`
+ * and not `uuid[]`: this driver parses `jsonb` and does not parse a `uuid[]`.
+ *
+ * Validated rather than trusted, like every other row: a function whose return shape
+ * changed under us must fail loudly here rather than reach a use case as `undefined`.
+ */
+export const draftDeleteRemovedAttachmentsSchema = z.array(z.uuid());
+
+/**
  * The named exceptions `expense_draft_delete()` and T060's own checks raise.
  *
  * A table for the reason the category one is: every `P0001` refusal arrives on one

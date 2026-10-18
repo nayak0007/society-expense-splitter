@@ -81,6 +81,7 @@ import {
 } from "../../src/modules/expenses/application/expense.tokens";
 import { DeleteDraftUseCase } from "../../src/modules/expenses/application/use-cases/delete-draft.use-case";
 import { INVITATION_REPOSITORY } from "../../src/modules/invitations/application/invitation.tokens";
+import { MembersOperations } from "../../src/modules/members/application/members.operations";
 import { MEMBER_REPOSITORY } from "../../src/modules/members/application/member.tokens";
 import { SOCIETY_REPOSITORY } from "../../src/modules/societies/application/society.tokens";
 import {
@@ -1268,12 +1269,14 @@ describe("the audit trail of memberships, invitations and structure", () => {
   let invitations: InvitationRepository;
   let buildings: BuildingRepository;
   let apartments: ApartmentRepository;
+  let operations: MembersOperations;
 
   beforeAll(() => {
     members = harness.app.get<MemberRepository>(MEMBER_REPOSITORY);
     invitations = harness.app.get<InvitationRepository>(INVITATION_REPOSITORY);
     buildings = harness.app.get<BuildingRepository>(BUILDING_REPOSITORY);
     apartments = harness.app.get<ApartmentRepository>(APARTMENT_REPOSITORY);
+    operations = harness.app.get(MembersOperations);
   });
 
   beforeEach(async () => {
@@ -1456,6 +1459,77 @@ describe("the audit trail of memberships, invitations and structure", () => {
     expect(rows.every((row) => row.request_id === "req-stage-b-audit")).toBe(
       true,
     );
+  });
+
+  it("records one member.created per imported row, and the batch shares one request id", async () => {
+    // T048's CSV import — the bulk path D10's decision was actually written for (the
+    // two-flat batch above is its twin). Every imported row commits in its own
+    // transaction and is its own `member.created` row, so there is deliberately **no**
+    // synthetic summary record: the batch is the set of rows sharing this request's
+    // `requestId`, and a row that failed writes nothing at all.
+    // Two real flats, inserted as the owner (fixtures precede identities): an import
+    // resolves flats but never creates one, so the rows it imports have to name
+    // numbers that exist.
+    const building = await insertBuilding(
+      owner,
+      fixture.societyId,
+      "Imported Block",
+    );
+    await insertApartment(owner, fixture.societyId, building, "A-201");
+    await insertApartment(owner, fixture.societyId, building, "A-202");
+
+    const csv = [
+      "flat_no,name,phone,email,occupancy_type",
+      "A-201,Imported One,+919000000201,,owner_occupied",
+      "A-202,Imported Two,+919000000202,,tenant",
+      // No phone: invalid, so it is reported per row and creates nothing.
+      ",Imported Three,,,",
+    ].join("\n");
+
+    const result = await asAdminRequest(() =>
+      operations.importMembers(fixture.adminUserId, fixture.societyId, { csv }),
+    );
+
+    // Partial success, with the arithmetic the contract makes checkable: nothing is
+    // silently dropped, and the counters add up to the file.
+    expect(result.summary.totalRows).toBe(3);
+    expect(result.summary.imported).toBe(2);
+    expect(result.summary.invalidRows).toBe(1);
+    expect(result.summary.conflicts).toBe(0);
+    expect(result.summary.skipped).toBe(1);
+    expect(result.failed).toHaveLength(1);
+
+    const rows = await owner<
+      { request_id: string | null; entity_id: string }[]
+    >`
+      select metadata ->> 'requestId' as request_id,
+             entity_id::text as entity_id
+        from public.audit_logs
+       where action = 'member.created'
+       order by id
+    `;
+
+    // Exactly the two rows that were created: the refused row is not a mutation, so
+    // it is not an audit row either.
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((row) => row.entity_id)).size).toBe(2);
+    expect(rows.every((row) => row.request_id === "req-stage-b-audit")).toBe(
+      true,
+    );
+
+    // The entities are the members the import answered with, so the batch is
+    // identifiable from the response as well as from the log — what an import-level
+    // summary row would have had to say, without one being written.
+    expect(rows.map((row) => row.entity_id).sort()).toEqual(
+      result.imported.map((member) => member.id).sort(),
+    );
+
+    // And the preview — the same file's dry run — writes nothing, because it is a
+    // validation path rather than a mutation.
+    await asAdminRequest(() =>
+      operations.importPreview(fixture.adminUserId, fixture.societyId, { csv }),
+    );
+    expect(await actions()).toEqual(["member.created", "member.created"]);
   });
 
   it("records an invitation's creation and revocation, never its token digest", async () => {
@@ -3059,9 +3133,9 @@ describe("the audit trail of the expense sub-resources and attachments (Stage D)
     expect(await storage.head(reserved.storageKey)).not.toBeNull();
   });
 
-  // ── the draft-deletion cascade, pinned as an aggregate ───────────────────
+  // ── the draft-deletion cascade, now named in the entry that removes it ───
 
-  it("records a draft's removal as one expense.deleted entry, not per cascaded attachment", async () => {
+  it("records a draft's removal as one expense.deleted entry naming the cascaded attachment", async () => {
     const bytes = jpegBytes(0x55, 512);
     const reserved = await asAdmin(() =>
       presignUpload.presign(
@@ -3090,15 +3164,28 @@ describe("the audit trail of the expense sub-resources and attachments (Stage D)
     `;
     expect(cascaded?.count).toBe("0");
 
-    // ...and the log records the **expense's** removal only: no attachment-level entry,
-    // and nothing in the expense entry names the attachment it took with it. This is the
-    // aggregate semantics ADR-0014 D12 records as a finding rather than a decision, pinned
-    // so a later change has to be deliberate.
+    // ...and the log still records the **expense's** removal only — one row for one
+    // request, never one row per cascaded attachment...
     expect(await actions()).toEqual(["attachment.created", "expense.deleted"]);
     expect(await rowsFor("attachment.deleted")).toHaveLength(0);
 
+    // ...but that one row now *names* what the cascade took with it (ADR-0014 D16).
+    // The ids come from the `DELETE … RETURNING` inside the definer function, so the
+    // set is complete by construction: an unlocked read taken before the call can miss
+    // a reservation committing in between, which is what D12 recorded as the gap and
+    // what the previous shape of this case pinned as a finding.
+    const entry = await rowFor("expense.deleted");
+    expect(
+      (entry.metadata as { removedAttachments?: readonly string[] })
+        .removedAttachments,
+    ).toEqual([reserved.attachment.id]);
+
+    // The *row* is named, and the object's address is not: D12's snapshot rule drops
+    // the storage key everywhere an attachment is described, and the cascade is no
+    // exception — the key is useful only to something already holding bucket access.
     const text = await payloadTextFor("expense.deleted");
-    expect(text).not.toContain(reserved.attachment.id);
+    expect(text).toContain(reserved.attachment.id);
+    expect(text).not.toContain(reserved.storageKey);
   });
 });
 
