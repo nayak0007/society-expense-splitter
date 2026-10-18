@@ -1,8 +1,19 @@
 # ADR-0014 — Append-only audit logging
 
-**Status:** Accepted · **Date:** 2026-10-10 · **Scope:** T050 Stage A, binding on
-every later module that records an audit row and on the hosted rollout of
+**Status:** Accepted · **Date:** 2026-10-10 (Stage E2 decisions added 2026-10-16) ·
+**Scope:** T050 Stages A–E2, binding on every later module that records an audit row,
+on the refusal record `PermissionGuard` writes, on the retention floor
+`20261016120000_audit_retention_floor.sql` enforces, and on the hosted rollout of
 `20261015120000_audit_logs.sql`
+
+**Decisions by stage:** A — D1–D9 (the write boundary, the schema deviations, the
+retention policy, the rollout prerequisites); B — D10 (batches, declaration-level
+enforcement, `invitation.accepted`); C — D11 (the society lifecycle); D — D12 (the
+expense sub-resources, attachments, and the draft-cascade _finding_); E1 — D13 (the
+read route and the reader-audit row); E2 — **D14** (403-class refusals are recorded,
+401s and 404s are not), **D15** (the seven-year window enforced as a floor),
+**D16** (a cascaded attachment is named by the entry that removed it, closing D12's
+finding) and **D17** (the audit screen and its export belong to other rows).
 
 ## Context
 
@@ -489,6 +500,12 @@ consequences are decisions rather than omissions:
 - **Move it into the database.** A new migration adding an `AFTER DELETE` trigger on `attachments` that writes the entry is complete by construction, and the only option here that needs a migration at all.
 - **Remove the cascade instead.** Refuse the draft delete while any attachment row exists (`EXPENSE_HAS_ATTACHMENTS`, mirroring `EXPENSE_HAS_SPLITS`), so every removal is an explicit, individually audited delete. Complete and race-free, but it is a product rule rather than a log change: the user would have to remove the bill before the draft.
 
+Stage E2 chose the **second** of those options — the smallest one that is complete — and
+**D16** records the migration that made it so. The other four are left as they stand: the
+first cannot say when a row went or by whose request, the third is the same work with more
+rows, the fourth moves the entry's construction into SQL, and the fifth is a product rule
+rather than a logging change.
+
 **An idempotent no-op is not a transition, and the tombstone test follows the same shape.**
 `expense_comment_soft_delete()` returns an already-tombstoned row unchanged. The `before`
 read inside the transaction carries the row's own `deleted_at`, so an already-deleted comment
@@ -639,6 +656,237 @@ the route and the reader-audit row. The RLS posture is unchanged and deliberatel
 `ENABLE` without `FORCE`, because the owner writes through the definer — the **privilege**
 is the write control and the one policy is the read control.
 
+### D14 — Stage E2: a refused 403 is recorded, and a 401 or a 404 is not
+
+**The two 403-class refusals `PermissionGuard` decides are now persisted, and the boundary
+around them is the decision.** A refusal is the only authorisation answer this codebase keeps
+a durable record of, and the guard is the one place that knows all four facts such a row needs
+— the resolved society, the verified actor, the role the matrix refused and the action the
+route declared — because it is where the refusal is _decided_. The write cannot live in
+`apps/api/src/common` (`.dependency-cruiser.js` forbids that layer reaching `infrastructure/`
+or `modules/`, which is where `UnitOfWork` and the audit vocabulary are), so the _port_ lives
+beside the guard (`common/authorization/security-event-recorder.ts`) and the _adapter_ lives in
+the audit module (`RefusalRecorderService`), exactly as `SocietyAuthorizationReader` does for
+the society guard. It is injected as a required provider, never `@Optional()`: an optional
+recorder would turn a missing registration into "refusals are silently no longer recorded".
+
+**It is its own transaction, and that is the whole difference from every other entry.** A
+mutation's row is handed to `UnitOfWork.transaction(actor, work, audit)` so it commits _with_
+the change it describes (D1). A refusal has no such change — the guard refuses before any
+handler runs — so there is nothing to share and nothing to roll back, and the adapter opens
+the one transaction it needs. D1 is untouched for every mutation and reader entry; what is
+different here is that the refusal is the _only_ class of record for which a second
+transaction is the correct shape rather than the hole T050 exists to close.
+
+**The row is one action with the reason in `metadata`.** `security.permission_denied` (the
+name Stage A's vocabulary reserved for it), category `other` — access to the society is an
+event, not financial state, and the same choice `audit.viewed` makes, for the same reason: a
+Treasurer's narrowed `audit.view` must not fill with the security record of their colleagues'
+refusals, or their own. `entity_type` is `permission`, `entity_id` **null**, `before`/`after`
+**null**: a refusal addresses no row, and the entry is a decision rather than a transition.
+`metadata` carries the reason (`role_denied` | `member_inactive`), the matrix action that was
+refused, the controller and handler **names**, the request id, IP and user agent, and the
+dedup window. Deliberately absent: the path, the query and every parameter — a refusal record
+that carried a record id would disclose exactly what a 404 is written to hide, and the guard
+runs before any id is addressed anyway.
+
+**The facts come from the guard chain, not from `buildAuditEntry`, and that is forced rather
+than chosen.** The builder reads the actor, role and request facts from the `AsyncLocalStorage`
+store that `RequestContextInterceptor` establishes **after** guards run — so at the moment a
+refusal is decided that store does not exist and the builder would record a null role and no
+request id. The guard therefore passes the facts it already resolved and reads the three raw
+request facts through `common/http/http-access.ts`; `flushAudit` still re-stamps the actor from
+the transaction identity, so D5's "two readings of one value" holds.
+
+**Bounded by construction: one row per member, action, reason and hour.** The `operation_id` is
+**derived** — a UUID v5-shaped digest of `(society, actor, action, reason, hour)` — and
+`uq_audit_logs_operation_id` is `UNIQUE` with no `ON CONFLICT DO NOTHING` (D4), so a repeat
+inside the same hour raises `23505` and the adapter treats it as _already represented_ rather
+than as a failure. This is the one place in the codebase where a duplicate operation id is the
+intended outcome, and it is what keeps an unloved route from being hammered into an unbounded
+number of rows in a seven-year immutable table while SAD §7.6's throttler does not exist. The
+cost is stated rather than hidden: **the row says that a refusal happened in that hour, not how
+many times**; a count would need an `UPDATE`, which D15 now refuses for every role.
+
+**Fail-open, loudly.** The caller is about to be told `403`, which is the correct answer whether
+or not the row lands. Making the audit write able to replace that with a `500` would trade a
+correct refusal for a misleading status and still not restore the missing row, so the recorder
+logs everything an operator needs and swallows the failure. Nothing here claims the record is
+guaranteed.
+
+**Three refusals are deliberately not recorded, and each for its own reason.**
+
+- **401, no verified actor.** Unauthenticated traffic must never be able to write to an
+  immutable, seven-year table — that is a write-amplification vector with no ceiling — and
+  there is no actor to name: the row's actor column would be a claim the caller made about
+  themselves.
+- **`SocietyGuard`'s 404, no live membership.** The whole point of that answer is that a caller
+  cannot tell a society they are not in from one that does not exist. A row naming the target
+  society would have to be filed **under that society** — the only one that exists — so a
+  stranger could write into another tenant's log at request rate and that society's Admins
+  would read it. SAD §7.6's throttler (not built) is the prerequisite for closing this, and a
+  membership that cannot be resolved is exactly the case where the guard chain is telling us it
+  has no trustworthy society to file under.
+- **Validation and business refusals** (422, and the use cases' own 403/404-class answers inside
+  a transaction). Those are per-request input or state judgements rather than permission
+  decisions, and recording them would mean a second transaction written after a rolled-back
+  business one — the exception this decision grants to exactly one class.
+
+**Evidence.** `apps/api/src/common/guards/__tests__/permission.guard.test.ts` and
+`apps/api/src/modules/audit/application/__tests__/refusal-recorder.test.ts` cover the guard's
+two refusals, the never-throw contract and the dedup id; `apps/api/test/integration/security-refusals.integration-spec.ts`
+proves against real PostgreSQL that the row is written in its own transaction, moves no business
+row, is written **once** for repeated refusals inside the same hour and again for a different
+action, records an inactive membership with its own reason and real role, stays out of a
+Treasurer's narrowed read while an Admin can read it, and that the privilege boundary Stage A
+set (`INSERT`/`DELETE` for `authenticated`, `EXECUTE` for anything but `ses_api`) is unchanged.
+
+### D15 — Stage E2: the seven-year window is enforced as a floor, not as a purge job
+
+**The retention requirement becomes something the database refuses to violate, and nothing is
+deleted.** PRD §11.7, SAD §13.7 and PRD §14's DPDP section all say the audit history is retained
+**seven years**; none of them asks for a delete on the seventh birthday, and D9 already recorded
+that "an append-only table with a pruning job is a contradiction". What was missing until this
+stage is not the deletion — it is the guarantee that **nothing can destroy history inside the
+window**. Migration #38 (`20261016120000_audit_retention_floor.sql`) adds exactly that and
+nothing else: it refuses, it never removes.
+
+**Two triggers, both for every role.** `trg_audit_logs_retention_floor` is a `BEFORE DELETE` row
+trigger raising `AUDIT_RETENTION_FLOOR` (`P0001`) for any row whose `occurred_at` is newer than
+`now() - interval '7 years'`, and it fires for the table's owner and for a superuser as well as
+for every client role: the grants already mean no application role can reach the table, and this
+makes the window a property **of the table** rather than of who is asking. A row _older_ than the
+window stays removable, which is what leaves T167's archival job buildable without weakening the
+guarantee today. The window starts at `occurred_at` — the instant of the event, which the writer
+sets from `now()` and never from a caller's value — because that is the timestamp an auditor, a
+court or an AGM reads. `trg_audit_logs_block_update` is a `BEFORE UPDATE` row trigger raising
+`AUDIT_APPEND_ONLY` for every row and every role, which closes the last way an audit row could be
+rewritten by a privileged path rather than a grant. Neither trigger function is granted to
+anybody: a trigger function is invoked by the server, and `ALTER DEFAULT PRIVILEGES` would
+otherwise leave two callable no-ops whose only behaviour is to raise.
+
+**The test harness has one explicit, documented escape, and that is why no role is exempt.**
+`integration-fixtures.ts` clears a freshly seeded society's own `society.created` row so a suite
+can assert an exact action list. That fixture now deletes through PostgreSQL's own mechanism for
+a maintenance window — `SET LOCAL session_replication_role = replica`, which disables row triggers
+for one transaction on a disposable container — rather than the guard carrying an exemption for a
+role some privileged production path also holds. Nothing in the application, the migrations or
+`scripts/db/rls-canary.sql` sets that setting.
+
+**What is still not built, and where it belongs.** The retention _job_ — export and archival on
+the seven-year boundary — is Roadmap T167 ("Legal, privacy and DPDP compliance": "visitor logs 12
+months, notifications 90 days, audit 7 years"), which also owns
+`apps/api/src/jobs/schedules/cron.definitions.ts`, the only scheduling surface this project will
+have (it does not exist yet). This decision deliberately does not invent a purge path to give
+that row something to call: a floor is the half that can be enforced now, and it is the half a
+future job must be able to rely on.
+
+**Evidence.** `apps/api/test/integration/audit-retention.integration-spec.ts` (6 cases) drives a
+purpose-built `audit_retention_probe` role — `BYPASSRLS` with `DELETE` and `UPDATE` on the table,
+deliberately the strongest maintenance role this database could plausibly hold, so every refusal
+is attributable to the trigger alone — and asserts: a delete inside the window is refused with
+`P0001`/`AUDIT_RETENTION_FLOOR` and the row survives; a row one day inside the boundary is refused
+while one day outside it **is** removable, with the boundary computed by the database
+(`now() - interval '7 years'`) rather than by this machine's calendar; the table's own owner
+connection is refused too; a two-row purge rolls back as a whole; an update is refused with
+`AUDIT_APPEND_ONLY` and the row is byte-identical afterwards; and `authenticated` holds neither
+`UPDATE`/`DELETE` on the table nor `EXECUTE` on either trigger function, with no surviving
+`PUBLIC EXECUTE` entry in `pg_proc.proacl`.
+
+### D16 — Stage E2: a cascaded attachment is named by the entry that removed it
+
+**D12's finding is closed by the second of its five options, and the reason it needed a migration
+is the reason it is complete.** A draft's deletion removes its `attachments` rows inside the
+definer function (T071, ADR-0012 D6.5), and until this stage the log held those reservations'
+`attachment.created` entries and one `expense.deleted` that named none of them. Reading the rows
+first is not sufficient — a reservation committing between that read and the delete is removed by
+the cascade but absent from the read, so the log would be incomplete in exactly the case an
+auditor cares about. **`DELETE … RETURNING id` inside the function is the statement that removed
+the rows, so its result is complete by construction**, the same reasoning
+`AttachmentRepository.deleteById` records for taking its `before` snapshot from the `DELETE`
+itself. Migration #39 (`20261017120000_expense_draft_delete_removed_attachments.sql`) therefore
+widens the function's return from `void` to a `jsonb` array of the ids it removed, and the
+adapter puts that array in the single entry's `metadata.removedAttachments`.
+
+**Three details are decisions rather than conveniences.** It crosses as **`jsonb`, not
+`uuid[]`**: this driver parses `jsonb` and has no parser for a `uuid[]`, which would arrive as the
+literal text `{a,b}` for every caller to hand-parse — and `jsonb` is already how every other RPC
+response in this schema crosses. The value is **validated, not trusted**
+(`draftDeleteRemovedAttachmentsSchema` in `expense.rows.ts`), and a shape this schema cannot read
+is an `unexpected_shape` failure rather than an empty list, because quietly recording "nothing was
+cascaded" is a claim the adapter cannot support. And it is **one row, never a fan-out**: the
+entry is the draft's own removal, naming the rows it took with it, which is the shape D12 ranked
+above per-attachment entries for size and above a `DELETE` trigger for keeping the entry's
+construction in TypeScript, where the redaction rule, the action vocabulary and the writer's
+descriptor seam live. The attachment snapshot's own rule (D12) is unchanged and now asserted here
+as well: the **storage key** — the object's address, useful only to something already holding
+bucket access — is not in the payload.
+
+The migration `DROP`s and re-`CREATE`s the function because PostgreSQL refuses a return-type
+change in place ("cannot change return type of existing function"); the signature keeps the same
+identity, so the `COMMENT` and the three privilege statements address the same function they did
+before, and both statements run in the runner's one transaction, so no session observes the
+function absent. Every rule and refusal of `expense_draft_delete` is unchanged, character for
+character, and no table, column, index, policy, grant or row is touched. Nothing in the port
+(`ExpenseRepository.deleteDraft` still answers `Promise<void>`) or in the use case changed: the
+cascade's evidence is the _adapter_'s, because that is where the audit entry is built. The last
+of D12's options remains a product question rather than a logging one — refusing the draft delete
+while attachment rows exist would make every removal explicit and individually audited, and it
+would tell a user to delete the bill before the draft; it is not implemented, and D12 already
+names the trade.
+
+**This is the history's first return-type change, and the two Down-block rehearsals had to absorb
+it — measured, not anticipated.** `20261004120000_expense_draft_delete.sql` and
+`20261011120000_attachments.sql` both write `CREATE OR REPLACE FUNCTION
+public.expense_draft_delete(…) RETURNS void`, and two suites rehearse a forward-only history by
+replaying every file _after_ an older one **over HEAD**
+(`expense-schema.integration-spec.ts` for #19, `member-balances.integration-spec.ts` for #22).
+Replaying either of those files over the `jsonb` version fails with `42P13` "cannot change return
+type of existing function" — the same error the migration exists to work around, arriving this time
+from the rehearsal. Each therefore drops `public.expense_draft_delete(uuid, uuid)` first and lets
+the last file in its list (`20261017120000`) put it back, which is the pattern both suites already
+use for the objects of later migrations they have to take off (`attachments`, the comment stream's
+function and helpers) — **one line each, with no assertion changed, moved or skipped**, and the
+container still ends at HEAD because the later-file loop ends with this migration. A regular
+migration never replays a mid-history file over HEAD (the runner is forward-only and applies newer
+files only), so this is the rehearsal's own cost. The property the rehearsal protects is
+unchanged: apply → down → apply is still a cycle for every file, and the _only_ thing that changed
+is that a file whose function is superseded by a return-type change must be replayed after that
+superseding file is removed.
+
+**Evidence.** `apps/api/test/integration/audit-logs.integration-spec.ts`'s draft-deletion case is
+flipped from pinning the gap to pinning the fix: after a real reservation and a real draft
+delete, the attachment row is gone, the log holds exactly `attachment.created` and
+`expense.deleted` with **no** `attachment.deleted` row, and that one entry's
+`metadata.removedAttachments` equals exactly the reserved attachment's id — with the combined
+payload text containing the id and **not** the storage key. `delete-draft.use-case.ts` records
+why the pre-read it still performs for object cleanup is not what the trail rests on.
+
+### D17 — The audit history's screen and its export are not this row's, and are named rather than implied
+
+**T050 owns the log; a screen for it is a product surface with its own phase, and the export is a
+third task's machinery.** PRD §11.7 says "Admins can view and export; the log itself records who
+viewed it": the **view** is what D13's route and D14's record deliver, and this decision is about
+the other two words. The evidence is unambiguous. PRD §4.3's screen inventory lists **85 · Audit
+Log (Admin)**, and PRD §15's Future Roadmap places "audit log UI" in **Phase 2 — Retention &
+Depth (Months 4–7)** — not in the MVP — beside report export and the approval workflow. No task
+in the Roadmap owns that screen: T050 is the infrastructure row, and its acceptance list is about
+rows, transactions, revoked writes, redaction and retention, not about screens. The mobile client
+today has no audit service, hook or screen (`apps/mobile/src` contains no audit-log client at
+all). Exporting is likewise not this row's: the async export machinery is **T094** ("Report export
+to PDF and CSV": a job queue, a polled job status, PDF/CSV renderers), and PRD §16 puts
+"audit exports" in the **Enterprise** tier rather than in the shipped plans.
+
+**So Stage E2 builds neither, and says so instead of leaving them to be discovered.** What it
+leaves behind is the contract a screen consumes — `GET /v1/audit-logs` with the keyset cursor, the
+visibility narrowing applied inside the query and inside the policy, the allowlist response whose
+`requestId` is lifted out of `metadata`, and the reader-audit row that commits with the read —
+plus one acceptance note for whoever builds it: display names are deliberately **not** resolved
+(D13), so a screen renders `actorUserId` and joins the member list for a name rather than
+requiring the read path to become a PII surface. The residue is therefore a scope statement with
+an owner for each half, not a silent omission, and the Roadmap's T050 row carries it in the same
+words.
+
 ## Consequences
 
 - **Every later module writes audits through `UnitOfWork`'s seam.** A new mutation
@@ -661,9 +909,14 @@ is the write control and the one policy is the read control.
   un-integrated mutation fails the suite). D13 adds the read: `GET /v1/audit-logs`, the
   reader-audit row that commits inside its transaction, and a second manifest
   (`MANDATED_READ_AUDIT`) that makes a read route which stops recording fail the suite.
-  Still outstanding, and named as such in the Roadmap: refusal-class auditing (a
-  403/404-class record), the retention/archival job, the audit UI (Phase 4) and the
-  draft-cascade accountability D12 records as a finding.
+  **Stage E2 closes three of the four residues D12/D13 named**: refusal-class auditing (D14,
+  the two 403s `PermissionGuard` decides), the seven-year window (D15, enforced as a floor
+  for every role rather than as a purge job), and the draft-cascade accountability D12
+  recorded as a finding (D16, the cascaded ids named in the single `expense.deleted` entry).
+  What remains is named with an owner rather than left implicit: the retention/archival _job_
+  (Roadmap T167, which owns the only scheduling surface this project will have) and the audit
+  history's screen and export (D17 — PRD §4.3 screen 85 and PRD §15's Phase 2 for the UI;
+  T094's async export machinery, Enterprise tier per PRD §16, for the export).
 - **A read is audited, and the audit row is outside the half it might narrow.**
   `audit.viewed` is `other`, so the Treasurer whose `audit.view` narrows the log to
   `financial` cannot read the record of who read it — including their own. Any future
