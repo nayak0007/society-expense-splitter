@@ -1769,6 +1769,21 @@ describe("the documented Down block", () => {
       // this shared container at a schema no migration describes, and any spec that
       // ran after it would fail (measured: T067's own suite did, before this loop
       // existed).
+      // …and the one object a later file replaced **in place with a different return
+      // type**: `expense_draft_delete(uuid, uuid)` returns `jsonb` since
+      // `20261017120000` (ADR-0014 D16), so replaying either file that defines it —
+      // `20261004120000` and `20261011120000`, both `CREATE OR REPLACE … RETURNS
+      // void` — over HEAD dies on `42P13` "cannot change return type of existing
+      // function" (measured: this rehearsal, before the line below existed). It is
+      // dropped here and restored by the loop, exactly like the objects above: the
+      // later-file loop ends with `20261017120000`, which re-creates the `jsonb`
+      // version. A regular migration never replays a mid-history file over HEAD —
+      // the runner only ever applies newer ones — so this is the rehearsal's own
+      // cost of a return-type change and not a weakened assertion.
+      await tx.unsafe(
+        `drop function if exists public.expense_draft_delete(uuid, uuid)`,
+      );
+
       const laterFiles = readdirSync(resolveMigrationsDir())
         .filter((entry) => entry > filename && entry.endsWith(".sql"))
         .sort();
@@ -1842,6 +1857,14 @@ describe("the documented Down block", () => {
       // HEAD, and a spec that ran afterwards would see the narrowed insert policy and
       // refuse a Committee Member's `pending_approval` insert (measured:
       // `expense-draft.integration-spec.ts` did, in every full-suite run).
+      //
+      // The drop above is repeated for the same reason it exists: this loop starts at
+      // `20261004120000`, whose `RETURNS void` cannot land on the `jsonb` function
+      // `20261017120000` restored a moment ago, and `20261017120000` is the last file
+      // the loop applies, so the container still ends at HEAD.
+      await tx.unsafe(
+        `drop function if exists public.expense_draft_delete(uuid, uuid)`,
+      );
       for (const later of laterFiles) {
         await tx.unsafe(
           readFileSync(join(resolveMigrationsDir(), later), "utf8"),

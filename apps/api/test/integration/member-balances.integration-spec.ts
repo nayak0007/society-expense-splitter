@@ -1413,6 +1413,19 @@ describe("the documented Down block", () => {
       // and `…140000` (the function's two live-database fixes) and `…150000` (the
       // policy predicate that keeps T060's Down rehearsal executable). Re-applying
       // only `source` would leave the container with the first function version.
+      // The chain reaches every file from this one to HEAD, and one of them replaced an
+      // object **in place with a different return type**: `expense_draft_delete(uuid,
+      // uuid)` returns `jsonb` since `20261017120000` (ADR-0014 D16), while
+      // `20261004120000` and `20261011120000` — both inside this chain — write
+      // `CREATE OR REPLACE … RETURNS void`, which PostgreSQL refuses over the existing
+      // `jsonb` function with `42P13` (measured). It comes off first and
+      // `20261017120000`, the chain's last entry, puts it back. A regular migration
+      // never replays a mid-history file over HEAD, so this drop is the rehearsal's
+      // own cost of a return-type change and not a weakened assertion.
+      await tx.unsafe(
+        `drop function if exists public.expense_draft_delete(uuid, uuid)`,
+      );
+
       const chain = readdirSync(resolveMigrationsDir())
         .filter(
           (entry) => entry >= MIGRATION_FILENAME && entry.endsWith(".sql"),
