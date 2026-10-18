@@ -1,0 +1,83 @@
+# Journey 3 — draft an expense and publish it (Roadmap T077, PRD §3.4/§8.3).
+#
+# The journey a publish is about: sign in as an **Admin or Treasurer** (the two roles whose
+# `expense.publish` cell is granted — PRD §2.1), record a bill through the real form, open the
+# row it produced, confirm the publication, and read the summary the server measured.
+#
+# ## Why it is not written as "find a draft and publish it"
+#
+# Seeding a draft from outside the app would make the flow pass on an expense the form did
+# not create, and the form is where the strategy, the selector and the amount meet. Creating
+# the row here means a failure is attributable to the draft the flow just made, and it leaves
+# no fixture for a later run to collide with.
+#
+# ## What the assertions are, and are not
+#
+# The summary line ("Published N shares totalling …") is rendered from the publication's own
+# response, which is measured over the rows the API persisted — so its presence is a
+# statement about the server, not about local state. The conservation of the split, the dues
+# and the audit row are *not* assertable from the UI and are covered where they belong:
+# `apps/api/test/integration/expenses.integration-spec.ts`.
+#
+# ## Test data
+#
+# The journey writes one **published** expense into the seeded staging society and cannot
+# withdraw it (a published bill is voided, not deleted). `MAESTRO_TITLE` is suffixed with the
+# run id by `scripts/ci/maestro.sh`, so every run is identifiable in the ledger and two runs
+# never collide on a title; running the flow on a developer's device leaves the same kind of row
+# in whatever society that account belongs to. Clean up by voiding the run's own expense — see
+# `docs/guides/MOBILE_E2E.md` — never by deleting rows from a shared database.
+#
+#   env: MAESTRO_EMAIL, MAESTRO_PASSWORD, MAESTRO_AMOUNT, MAESTRO_TITLE, MAESTRO_CATEGORY
+appId: com.resident360.app
+name: Publish an expense
+tags:
+  - expenses
+---
+# `clearKeychain` as well as `clearState`: the session lives in the keychain (`expo-secure-store`),
+# which `clearState` does not wipe.
+- launchApp:
+    clearState: true
+    clearKeychain: true
+- runFlow: subflows/sign-in.yaml
+
+- tapOn: 'Expenses'
+- assertVisible: 'Filter expenses'
+- tapOn: 'New'
+- assertVisible: 'Save expense'
+
+# The amount is the sticky header, outside the scroll view, so it is reachable first.
+- tapOn: 'Amount'
+- inputText: ${MAESTRO_AMOUNT}
+- tapOn: 'Title'
+- inputText: ${MAESTRO_TITLE}
+# Categories are chips, addressed by name. The society's seeded nineteen are the vocabulary
+# a treasurer already knows, so a flow naming one is naming something a user would tap.
+- tapOn: ${MAESTRO_CATEGORY}
+
+- scrollUntilVisible:
+    element: 'Save expense'
+    direction: DOWN
+- tapOn: 'Save expense'
+
+# The form replaces itself with the row it saved; the title the detail screen renders is the
+# server's copy of what was typed, not the local form state.
+- extendedWaitUntil:
+    visible: ${MAESTRO_TITLE}
+    timeout: 15000
+# A draft is publishable; the publish card sits below the split and bill sections.
+- scrollUntilVisible:
+    element:
+      id: 'publish-expense'
+    direction: DOWN
+- tapOn:
+    id: 'publish-expense'
+
+# Native confirmation. Publishing writes a due per member and is irreversible, so the flow
+# goes through the dialog exactly as a user must.
+- assertVisible: 'Publish this expense?'
+- tapOn: 'Publish'
+
+- extendedWaitUntil:
+    visible: 'Published .* shares totalling .*'
+    timeout: 15000

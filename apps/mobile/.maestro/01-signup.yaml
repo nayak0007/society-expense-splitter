@@ -1,0 +1,63 @@
+# Journey 1 — sign up with email and password (PRD §3.1, Roadmap T035).
+#
+# The Roadmap's declared filename is `01-signup-otp.yaml`. That name assumes an in-app OTP
+# step, and the shipped auth has none: `register.tsx` calls Supabase's `signUp` with the
+# emailed confirmation link, so the honest journey ends on "Confirm your email" (when
+# confirmation is enabled) or on "Tell us your name" (when it is not). The file is therefore
+# named for what it does, and the divergence is recorded in the Roadmap rather than papered
+# over with a flow that would assert a screen the app does not have.
+#
+# Sign-up creates an account, so MAESTRO_EMAIL must be an address nothing has used yet —
+# a `+run` suffix on a catch-all inbox is the intended form (see `README.md`).
+#
+#   env: MAESTRO_NAME, MAESTRO_EMAIL, MAESTRO_PASSWORD
+appId: com.resident360.app
+name: Sign up with email and password
+tags:
+  - auth
+---
+# `clearState` wipes the app's data; `clearKeychain` (iOS) is what actually removes the
+# session, which `expo-secure-store` keeps in the keychain and `clearState` does not touch. Plain
+# `clearState: true` wipes the app's data directory, not the keychain, so on a simulator that has
+# run before the app would restore a session and the welcome screen below would never appear.
+- launchApp:
+    clearState: true
+    clearKeychain: true
+- assertVisible: 'Transparent society finances — set up in 20 minutes.'
+- tapOn: 'Create an account'
+
+- assertVisible: 'Create your account'
+- tapOn: 'Full name'
+- inputText: ${MAESTRO_NAME}
+- tapOn: 'Email'
+- inputText: ${MAESTRO_EMAIL}
+# Anchored (`^…$`) because a password field renders a reveal toggle beside it whose
+# accessibility label is "Show password" / "Show confirm password", and Maestro's text matching
+# is a *contains* regex — an unanchored `Password` matches the toggle as well as the field.
+- tapOn: '^Password$'
+- inputText: ${MAESTRO_PASSWORD}
+- tapOn: '^Confirm password$'
+- inputText: ${MAESTRO_PASSWORD}
+# The checkbox is a Pressable whose visible text is the whole consent sentence; Maestro
+# matches the string it renders, which is what a user taps.
+- tapOn: 'I accept the terms of service and the privacy policy, including that financial records are retained after account deletion.'
+# Relative address for the same reason as the login submit: the screen's header is
+# "Create account" and so is the button.
+- tapOn:
+    text: 'Create account'
+    below: '^Confirm password$'
+
+# Two honest endings, because whether Supabase requires confirmation is project
+# configuration and not a property of the client. Either way the account exists and the
+# client routed deliberately.
+- runFlow:
+    when:
+      visible: 'Confirm your email'
+    commands:
+      - assertVisible: ${MAESTRO_EMAIL}
+      - assertVisible: 'Resend verification email'
+- runFlow:
+    when:
+      visible: 'Tell us your name'
+    commands:
+      - assertVisible: 'Your details'

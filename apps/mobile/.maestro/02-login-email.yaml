@@ -1,0 +1,21 @@
+# Journey 2 — sign in with a seeded email and password (PRD §3.1, Roadmap T035).
+#
+# This is the sign-in every other journey starts from, kept as its own flow so a broken
+# login is reported as a login failure rather than as a publish failure three steps later.
+#
+#   env: MAESTRO_EMAIL, MAESTRO_PASSWORD
+appId: com.resident360.app
+name: Log in with email and password
+tags:
+  - auth
+---
+# `clearKeychain` as well as `clearState`: the session lives in the keychain (`expo-secure-store`),
+# which `clearState` does not wipe, so a leftover session would land this journey in `(app)` and the
+# welcome screen it starts from would never appear.
+- launchApp:
+    clearState: true
+    clearKeychain: true
+- runFlow: subflows/sign-in.yaml
+# The shell's tab bar, which only exists inside `(app)`.
+- assertVisible: 'Expenses'
+- assertVisible: 'Payments'

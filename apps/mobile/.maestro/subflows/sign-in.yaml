@@ -1,0 +1,26 @@
+# Signs a seeded account in and waits for the app shell.
+#
+# A fragment, not a flow: no `appId` header, because `runFlow` merges these commands into the
+# caller, which owns the app. The caller also owns `launchApp`/`clearState` — a fragment that
+# restarted the app would erase the state the caller's journey just set up.
+#
+# The submit button is addressed *relative to the password field*, not by its label: the login
+# screen's header title is "Log in" and so is its button, so a plain `tapOn: "Log in"` is two
+# matches on a screen that shows both.
+#
+# The password field is anchored (`^…$`) because the reveal toggle beside it carries the
+# accessibility label "Show password", and Maestro's text matching is a *contains* regex — an
+# unanchored `Password` matches both.
+#
+#   env: MAESTRO_EMAIL, MAESTRO_PASSWORD
+- tapOn: 'Log in'
+- tapOn: 'Email'
+- inputText: ${MAESTRO_EMAIL}
+- tapOn: '^Password$'
+- inputText: ${MAESTRO_PASSWORD}
+- tapOn:
+    text: 'Log in'
+    below: '^Password$'
+# The home tab's own description: the session resolved, the profile loaded, the memberships
+# loaded and the route resolver chose (app). Anything less stays on the splash.
+- assertVisible: 'Dues summary, notices and quick actions will live here.'

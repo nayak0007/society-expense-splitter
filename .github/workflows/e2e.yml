@@ -1,0 +1,221 @@
+# Mobile end-to-end pipeline — Roadmap T035 / T077 (SAD §16.2).
+#
+# ## What this job is for
+#
+# The Jest suites prove the app's logic against doubles, and the API suites prove the server
+# against real PostgreSQL. Neither proves that the two meet: that the form writes what the
+# detail screen reads, that Publish is offered to a Treasurer and not to a Resident, or that
+# a signed-in session survives the route resolver. The Maestro flows in
+# `apps/mobile/.maestro` are that proof, and this workflow is how they run without a
+# developer's device.
+#
+# ## Why it is dispatched, never triggered by a pull request
+#
+# A real run needs three things a PR does not carry: a Supabase project whose confirmation
+# setting the flows can rely on, a deployed API the device can reach, and an account seeded
+# with a society, a category and an Admin/Treasurer membership. Running it on every PR
+# without them would produce a red check whose meaning is "no environment" — worse than no
+# check. Dispatch it against staging when a release is cut, and read the artefact when it
+# fails.
+#
+# ## Secrets (repository or environment scope)
+#
+#   EXPO_PUBLIC_API_URL             public API base, e.g. https://staging-api.resident360.com/v1
+#   EXPO_PUBLIC_SUPABASE_URL        public project URL
+#   EXPO_PUBLIC_SUPABASE_ANON_KEY   public anon key (RLS is the boundary)
+#   MAESTRO_SIGNUP_EMAIL            a catch-all inbox journey 1 may create an address in
+#   MAESTRO_EMAIL                   the seeded account journeys 2 and 3 sign in as
+#   MAESTRO_PASSWORD                that account's password
+#   MAESTRO_NAME                    the name journey 1 types
+#   MAESTRO_CATEGORY                a seeded category name, e.g. "Sinking Fund"
+#   MAESTRO_TITLE                   the expense title journey 3 creates
+#   MAESTRO_AMOUNT                  the amount journey 3 types, in rupees
+#
+# Journey 1 creates an account, so its address is derived per run (`+run-<id>` on
+# MAESTRO_SIGNUP_EMAIL): a constant address would pass once and then fail with "already
+# registered" forever after. Journeys 2 and 3 use the seeded account and change nothing
+# about it except creating one expense.
+#
+# ## Environment, stated explicitly
+#
+# Android: a **debug** APK built from a generated native project, run on an **API 34
+# `google_apis` x86_64** emulator (GitHub's `ubuntu-latest` with KVM) — no physical device and
+# no release signing.
+# iOS: `expo run:ios --configuration Debug` on an **iPhone 15 simulator**, which is what
+# `macos-latest` provides.
+# Both target whichever API `EXPO_PUBLIC_API_URL` names and **refuse to run against
+# production** (a guard step fails the job), so the expected value is a reachable **staging**
+# API with a seeded society. Neither job starts an API or a database of its own.
+#
+# ## Verification status — read before trusting a green check
+#
+# **This workflow has not been executed.** It was authored without a runner, an emulator, an
+# iOS simulator or a reachable staging API, so its YAML is parse-validated only — the
+# production guard's logic was exercised locally as a shell snippet, but the job itself has never
+# run — and the flows it invokes have never been driven end to end. Treat the first dispatched
+# run as the real test of both, and fix what it reports rather than weakening the flows.
+name: e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "Which platform to run"
+        required: true
+        type: choice
+        default: android
+        options: [android, ios, both]
+
+permissions:
+  contents: read
+
+env:
+  TURBO_TELEMETRY_DISABLED: "1"
+  CI: "true"
+
+jobs:
+  android:
+    name: Maestro (Android)
+    if: ${{ inputs.platform == 'android' || inputs.platform == 'both' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: pnpm install --frozen-lockfile
+
+      # A dispatched run must never point a device at production — the flows create an account
+      # and publish a bill, and neither can be withdrawn from the ledger afterwards. The URL is a
+      # secret, so this is the only place it can be checked: refuse an empty value and refuse the
+      # production host, then print the host that will be baked into the bundle.
+      - name: Refuse to target production
+        env:
+          API_URL: ${{ secrets.EXPO_PUBLIC_API_URL }}
+        run: |
+          if [ -z "${API_URL}" ]; then
+            echo 'EXPO_PUBLIC_API_URL is not set — the journeys need a reachable API.' >&2
+            exit 2
+          fi
+          # The **host**, not the string: `staging-api.resident360.com` contains
+          # `api.resident360.com`, so a substring test would refuse staging as well as production.
+          host="${API_URL#*://}"
+          host="${host%%/*}"
+          if [ "${host}" = 'api.resident360.com' ]; then
+            echo "refusing to run E2E against production: ${API_URL}" >&2
+            exit 2
+          fi
+          echo "E2E target (staging): ${API_URL}"
+
+      # `EXPO_PUBLIC_*` is inlined by Metro at bundle time, so these must exist before the
+      # build — not merely before the first request.
+      - name: Configure the app's environment
+        run: |
+          cat > apps/mobile/.env <<EOF
+          EXPO_PUBLIC_API_URL=${{ secrets.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_SUPABASE_URL=${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+          EXPO_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+          EOF
+
+      - name: Generate the native project and build a debug APK
+        working-directory: apps/mobile
+        run: |
+          pnpm exec expo prebuild --platform android --no-install
+          cd android && ./gradlew assembleDebug --no-daemon
+
+      - name: Boot the emulator and run the flows
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          MAESTRO_EMAIL: ${{ secrets.MAESTRO_EMAIL }}
+          MAESTRO_PASSWORD: ${{ secrets.MAESTRO_PASSWORD }}
+          MAESTRO_NAME: ${{ secrets.MAESTRO_NAME }}
+          MAESTRO_CATEGORY: ${{ secrets.MAESTRO_CATEGORY }}
+          MAESTRO_TITLE: ${{ secrets.MAESTRO_TITLE }}
+          MAESTRO_AMOUNT: ${{ secrets.MAESTRO_AMOUNT }}
+          MAESTRO_SIGNUP_EMAIL: ${{ secrets.MAESTRO_SIGNUP_EMAIL }}
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: bash ./scripts/ci/maestro.sh
+
+      - name: Upload Maestro reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maestro-android
+          path: ~/.maestro/tests
+          retention-days: 7
+
+  ios:
+    name: Maestro (iOS)
+    if: ${{ inputs.platform == 'ios' || inputs.platform == 'both' }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Refuse to target production
+        env:
+          API_URL: ${{ secrets.EXPO_PUBLIC_API_URL }}
+        run: |
+          if [ -z "${API_URL}" ]; then
+            echo 'EXPO_PUBLIC_API_URL is not set — the journeys need a reachable API.' >&2
+            exit 2
+          fi
+          # The **host**, not the string: `staging-api.resident360.com` contains
+          # `api.resident360.com`, so a substring test would refuse staging as well as production.
+          host="${API_URL#*://}"
+          host="${host%%/*}"
+          if [ "${host}" = 'api.resident360.com' ]; then
+            echo "refusing to run E2E against production: ${API_URL}" >&2
+            exit 2
+          fi
+          echo "E2E target (staging): ${API_URL}"
+
+      - name: Configure the app's environment
+        run: |
+          cat > apps/mobile/.env <<EOF
+          EXPO_PUBLIC_API_URL=${{ secrets.EXPO_PUBLIC_API_URL }}
+          EXPO_PUBLIC_SUPABASE_URL=${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+          EXPO_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+          EOF
+
+      # `expo run:ios` builds the generated project and launches it on a simulator, which is
+      # also the only step that proves the native modules this app depends on link on this SDK.
+      - name: Build and launch on the simulator
+        working-directory: apps/mobile
+        run: pnpm exec expo run:ios --no-bundler --configuration Debug --device 'iPhone 15'
+
+      - name: Run the flows
+        env:
+          MAESTRO_EMAIL: ${{ secrets.MAESTRO_EMAIL }}
+          MAESTRO_PASSWORD: ${{ secrets.MAESTRO_PASSWORD }}
+          MAESTRO_NAME: ${{ secrets.MAESTRO_NAME }}
+          MAESTRO_CATEGORY: ${{ secrets.MAESTRO_CATEGORY }}
+          MAESTRO_TITLE: ${{ secrets.MAESTRO_TITLE }}
+          MAESTRO_AMOUNT: ${{ secrets.MAESTRO_AMOUNT }}
+          MAESTRO_SIGNUP_EMAIL: ${{ secrets.MAESTRO_SIGNUP_EMAIL }}
+        run: bash ./scripts/ci/maestro.sh
+
+      - name: Upload Maestro reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maestro-ios
+          path: ~/.maestro/tests
+          retention-days: 7
