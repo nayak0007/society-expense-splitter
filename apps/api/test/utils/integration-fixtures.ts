@@ -71,9 +71,21 @@ export async function seedSociety(
   // society, so it is cleared here rather than in each of the specs that assert an
   // exact action list — the owner connection is the same one those specs inspect
   // the log with. The creation itself is covered by its own case.
-  await harness.owner`
-    delete from public.audit_logs where society_id = ${society.id}::uuid
-  `;
+  //
+  // Since T050 Stage E2 the row is *protected*: `trg_audit_logs_retention_floor`
+  // (migration 20261016120000) refuses a delete of anything inside the seven-year
+  // window for **every** role, including this owner connection, on purpose. The
+  // fixture therefore borrows PostgreSQL's own mechanism for a maintenance window —
+  // `SET LOCAL session_replication_role = replica` disables row triggers for this
+  // one transaction — rather than the guard carrying an exemption for a role a
+  // privileged path also uses. Test-only and disposable-database-only: nothing in
+  // the application, the migrations or the canary sets this setting.
+  await harness.owner.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`
+      delete from public.audit_logs where society_id = ${society.id}::uuid
+    `;
+  });
 
   return {
     societyId: society.id,
