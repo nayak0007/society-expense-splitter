@@ -8,7 +8,8 @@
 # over with a flow that would assert a screen the app does not have.
 #
 # Sign-up creates an account, so MAESTRO_EMAIL must be an address nothing has used yet —
-# a `+run` suffix on a catch-all inbox is the intended form (see `README.md`).
+# a `+run` suffix on a catch-all inbox is the intended form (see `docs/guides/MOBILE_E2E.md`,
+# which also records why the email link itself cannot be followed here).
 #
 #   env: MAESTRO_NAME, MAESTRO_EMAIL, MAESTRO_PASSWORD
 appId: com.resident360.app
@@ -42,14 +43,34 @@ tags:
 - inputText: ${MAESTRO_PASSWORD}
 - tapOn: '^Confirm password$'
 - inputText: ${MAESTRO_PASSWORD}
-# The checkbox is a Pressable whose visible text is the whole consent sentence; Maestro
-# matches the string it renders, which is what a user taps.
-- tapOn: 'I accept the terms of service and the privacy policy, including that financial records are retained after account deletion.'
+# The keyboard is still up after typing and covers the consent row, which sits below the two
+# password fields — the first real run failed here with "Element not found" because the row was
+# behind the keyboard, not because the selector was wrong. Back with the keyboard open dismisses
+# it (it does not navigate); the field assertion proves we are still on the form.
+- pressKey: Back
+- assertVisible: 'Confirm password'
+# The consent row is a Pressable with `accessibilityLabel="Accept the terms and privacy policy"`,
+# which is the stable, short handle; its visible child text is the long sentence. Scroll to it
+# rather than assuming it is above the fold on a phone-sized screen.
+- scrollUntilVisible:
+    element: 'Accept the terms and privacy policy'
+    direction: DOWN
+- tapOn: 'Accept the terms and privacy policy'
 # Relative address for the same reason as the login submit: the screen's header is
-# "Create account" and so is the button.
+# "Create account" and so is the button. The consent row is the anchor because it is the
+# element immediately above the button once the keyboard is gone.
 - tapOn:
     text: 'Create account'
-    below: '^Confirm password$'
+    below: 'Accept the terms and privacy policy'
+
+# The submit is a network call, so wait for the form to be replaced instead of asserting the
+# next screen immediately. The consent row is the anchor because it is on screen when the
+# button is tapped and exists only while the register form is mounted. Bounded: a 4xx (an
+# invalid address, an exhausted mailer), a 5xx or a dead API leaves the row in place and fails
+# here with a screenshot, rather than passing because both `when` blocks below were skipped.
+- extendedWaitUntil:
+    notVisible: 'Accept the terms and privacy policy'
+    timeout: 30000
 
 # Two honest endings, because whether Supabase requires confirmation is project
 # configuration and not a property of the client. Either way the account exists and the

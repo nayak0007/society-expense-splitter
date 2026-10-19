@@ -47,17 +47,23 @@ if ! command -v maestro >/dev/null 2>&1; then
   export PATH="${HOME}/.maestro/bin:${PATH}"
 fi
 
+# One identifier per run: `GITHUB_RUN_ID` in CI, a local timestamp otherwise. It must be unique
+# on a developer's machine too — with a constant fallback the second local run of journey 1
+# would sign up an address the first one already created ("already registered"), and journey 3
+# would publish a second bill under a title the first one used.
+run_id="${GITHUB_RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
+
 # `+run-<id>` on the catch-all inbox: unique per run (so a re-run is a fresh sign-up) and
 # still delivered to an inbox the project controls (so a confirmation link can be followed).
 local_part="${MAESTRO_SIGNUP_EMAIL%@*}"
 domain="${MAESTRO_SIGNUP_EMAIL#*@}"
-signup_email="${local_part}+run-${GITHUB_RUN_ID:-local}@${domain}"
+signup_email="${local_part}+run-${run_id}@${domain}"
 
 # The expense journey publishes a bill the API will not let anyone delete, so the run id goes
 # into its title: the row a run created is identifiable in the ledger afterwards, and two runs
 # cannot collide on the same title. Cleanup is by voiding that run's expense, not by editing the
 # database (see docs/guides/MOBILE_E2E.md).
-run_title="${MAESTRO_TITLE} — e2e ${GITHUB_RUN_ID:-local}"
+run_title="${MAESTRO_TITLE} — e2e ${run_id}"
 
 common=(
   -e "MAESTRO_PASSWORD=${MAESTRO_PASSWORD}"

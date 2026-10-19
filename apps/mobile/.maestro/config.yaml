@@ -1,12 +1,13 @@
 # Maestro workspace — Resident 360 (Roadmap T035, T077).
 #
 # Only the numbered journeys are listed. Everything under `subflows/` is a fragment that a
-# journey calls with `runFlow`: it has no `appId` header of its own and is not a runnable
-# flow, so listing one here would be a failure rather than a fourth test.
+# journey calls with `runFlow`: it is not a runnable flow on its own, so listing one here would
+# be a failure rather than a fourth test. (It still declares `appId`/`---` because Maestro 2.x
+# refuses a file with no config section even when `runFlow` merges its commands.)
 #
-# The run is parameterised, not scripted: every value a journey types comes from `-e`
-# (see `README.md`). Nothing in these files names a real account, amount or category, so
-# the same flow is meaningful on a developer's device and in CI.
+# The run is parameterised, not scripted: every value a journey types comes from `-e` (see
+# `docs/guides/MOBILE_E2E.md`). Nothing in these files names a real account, amount or
+# category, so the same flow is meaningful on a developer's device and in CI.
 flows:
   - '01-signup.yaml'
   - '02-login-email.yaml'

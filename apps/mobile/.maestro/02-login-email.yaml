@@ -19,3 +19,14 @@ tags:
 # The shell's tab bar, which only exists inside `(app)`.
 - assertVisible: 'Expenses'
 - assertVisible: 'Payments'
+
+# Persistence, not just login: the session lives in SecureStore, so a cold relaunch without
+# `clearState`/`clearKeychain` must land back in the shell rather than on the welcome screen.
+# This is the assertion that would have caught the adapter returning the chunk count instead
+# of the token (fixed 2026-10-19). Bounded, so a splash that never resolves still fails.
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible: 'Dues summary, notices and quick actions will live here.'
+    timeout: 30000
+- assertVisible: 'Expenses'
