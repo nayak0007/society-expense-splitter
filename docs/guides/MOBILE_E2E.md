@@ -11,8 +11,8 @@ Legend for what has actually been run: ☐ not run · ✅ pass · ❌ fail.
 
 | Flow                      | Covers                                                                             |
 | ------------------------- | ---------------------------------------------------------------------------------- |
-| `01-signup.yaml`          | Welcome → create account → the form's validation surface → the post-sign-up route  |
-| `02-login-email.yaml`     | Signed out → email/password → the app shell (profile, memberships, resolver)       |
+| `01-signup.yaml`          | Welcome → create account → validation → submit → the post-sign-up route            |
+| `02-login-email.yaml`     | Signed out → email/password → the app shell → a relaunch that proves the session   |
 | `03-expense-publish.yaml` | Sign in → draft an expense through the real form → confirm → the published summary |
 
 `subflows/sign-in.yaml` is a fragment (`runFlow`), not a flow: it is not listed in `config.yaml`,
@@ -87,6 +87,13 @@ maestro test .maestro/01-signup.yaml \
 `maestro test .maestro` with no arguments runs `config.yaml`'s three flows in order, which is
 only correct when `MAESTRO_EMAIL` is an address that does not exist yet — that is why the CI
 script runs the two groups separately (`scripts/ci/maestro.sh`).
+
+**Run artefacts are sensitive.** Maestro writes `~/.maestro/tests/<run>/` on the machine driving
+the device: `commands.json` stores every `-e` value **in plaintext** — the seeded password
+included — and `maestro.log` echoes the evaluated commands. Screenshots and the screen hierarchy
+capture whatever was on screen, and on a personal phone that can include notification content.
+Never share or commit those directories. The CI workflow strips the credential-bearing files and
+uploads only the rest, but that says nothing about what stays on a developer's machine.
 
 ### Two values that are not free choices
 
@@ -189,25 +196,65 @@ Runtime, identified rather than implied:
 Neither job starts an API, a database or a Supabase project of its own: both are prerequisites,
 not something the workflow creates.
 
-**It cannot target production by accident.** The first step of both jobs reads
-`EXPO_PUBLIC_API_URL` and fails the run if it is empty or if its **host** is exactly
-`api.resident360.com`, printing the host it will use otherwise. The comparison is on the parsed
+**It cannot target production by accident.** The first step of both jobs refuses to start unless
+`EXPO_PUBLIC_API_URL`, `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_ANON_KEY` are all set
+— naming whichever one is missing, instead of letting the app fail to boot later — and refuses a
+`EXPO_PUBLIC_API_URL` whose **host** is exactly `api.resident360.com`, printing the host it will
+use otherwise. The comparison is on the parsed
 host rather than on the string, because `staging-api.resident360.com` _contains_
 `api.resident360.com` — a substring test would refuse the one environment the job is for. The
 refusal is deliberate rather than defensive: the journeys create an account and publish a bill,
 and a published bill is not deletable.
 
+**Static review 2026-10-19, and the four defects it found.** The workflow still has not been
+dispatched, but reading it against what the device run actually needed showed it would have
+failed on its first run: the debug APK was built and **never installed** on the emulator; a
+debug build loads its JS from **Metro**, which the job never started; the generated
+`apps/mobile/.env` omitted `EXPO_PUBLIC_RAZORPAY_KEY_ID`, which `src/constants/config.ts`
+requires at module load (so the app throws before its first frame); and the upload step shipped
+`~/.maestro/tests` whole. Each is fixed in the workflow — install, Metro, the environment
+variable, and a strip step before the upload.
+
+**The artefact leak was the serious one.** Maestro records every `-e` value in its run
+artefacts: `commands.json` holds `MAESTRO_EMAIL` and `MAESTRO_PASSWORD` in plaintext (79 files
+across the local run history, measured) and `maestro.log` echoes the evaluated commands. The
+uploaded archive would therefore have carried the seeded account's password to anyone who could
+download it. The workflow now deletes those files (and the `logs/` directories), then **verifies**
+that no credential-bearing file name and no known secret value survives, and the upload is
+**gated** on that step succeeding — a strip that fails uploads nothing rather than the raw
+directory. Measured locally on the real run history: 70 files contained the seeded password
+value before the step and 0 after (screenshot directories kept: 17); an injected marker control
+was refused, so the check is load-bearing rather than a no-op. The retained files were also
+scanned and hold no JWT, anon key, `access_token`/`refresh_token`, `Bearer` header or magic-link
+token. **Treat `~/.maestro/tests` as credential-bearing**: any new `-e` value lands in it.
+
+**What has not run, and is therefore not claimed:** neither job has been dispatched, so there is
+no Android-emulator and no iOS-simulator evidence; the nightly schedule does not exist (the
+workflow is manual-dispatch only, deliberately, until a dispatch passes once); and the
+six-minute runtime target is unmeasured — a cold runner downloads Gradle and boots an emulator
+before the flows start, so that budget is a number to re-measure, not one to assert.
+
+**What a first dispatch still needs**, none of which lives in the repository: the secrets
+`EXPO_PUBLIC_API_URL`, `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY` (optionally
+`EXPO_PUBLIC_RAZORPAY_KEY_ID`, otherwise a public placeholder is used), `MAESTRO_EMAIL`,
+`MAESTRO_PASSWORD`, `MAESTRO_NAME`, `MAESTRO_CATEGORY`, `MAESTRO_TITLE`, `MAESTRO_AMOUNT` and
+`MAESTRO_SIGNUP_EMAIL` — a **deliverable** catch-all inbox, because journey 1 creates an account
+and `example.com` is refused with `400 email_address_invalid`; a reachable staging API; and a
+Supabase project whose sign-up confirmation setting the flows can rely on. Dispatch it manually
+and read the artefact when it fails; do not add a pull-request trigger until it has passed once.
+
 ## Verification status
 
 Journeys **2 and 3 pass on real hardware** (Pixel 10, Android 17 / API 37, arm64 dev build,
-against the staging project); **journey 1 has still never been executed** and `e2e.yml` has
+against the staging project); **journey 1 was executed on 2026-10-19 and reached the API but
+could not complete** (the confirmation mail is rate-limited and unreadable), and `e2e.yml` has
 never run.
 
-| Flow                      | Status | Last run   | Notes                                |
-| ------------------------- | ------ | ---------- | ------------------------------------ |
-| `01-signup.yaml`          | ☐      | —          | not run — it creates an auth user    |
-| `02-login-email.yaml`     | ✅     | 2026-10-19 | signed in, reached the app shell     |
-| `03-expense-publish.yaml` | ✅     | 2026-10-19 | drafted, saved, confirmed, published |
+| Flow                      | Status | Last run   | Notes                                                                |
+| ------------------------- | ------ | ---------- | -------------------------------------------------------------------- |
+| `01-signup.yaml`          | ❌     | 2026-10-19 | form and submit executed; blocked by the staging mailer's rate limit |
+| `02-login-email.yaml`     | ✅     | 2026-10-19 | signed in, reached the shell, survived a relaunch                    |
+| `03-expense-publish.yaml` | ✅     | 2026-10-19 | drafted, saved, confirmed, published                                 |
 
 The run of 2026-10-19 was the first, and it did what a first run is for — every failure below is
 something the flows or the app changed because of it, not something that was known in advance:
@@ -261,10 +308,37 @@ expense of ₹4,000, four splits of ₹1,000, and both audit rows against `treas
 wider bounds are what makes the run repeatable — at 30 s the save plus the detail reads sat
 inside a single window's margin.
 
-Still unverified from the earlier review, and unchanged by the runs: `e2e.yml` itself has never
-executed, and journey 1 — the only flow that exercises sign-up, the password policy and the
-post-sign-up route — has not either. Journey 3 also covers only the add → publish → summary path:
-it does not attach a bill, configure a per-sqft split, or verify dues from a resident account.
+### Journey 1 — what was executed, and what remains
+
+Journey 1 was run for the first time on 2026-10-19, and its first two failures were **flow
+defects found by running it** (both fixed, neither by weakening an assertion):
+
+1. **The consent row was unreachable.** It sits below two password fields while the keyboard is
+   still up, so the tap failed with `Element not found` — Maestro cannot see an element behind
+   Gboard. The flow now sends Back (which dismisses the keyboard while a field has focus rather
+   than navigating), asserts it is still on the form, scrolls to the row by its short
+   `accessibilityLabel` (`Accept the terms and privacy policy`, not the long visible sentence),
+   and taps that.
+2. **The submit was asserted immediately.** Both `when` branches skipped while the request was in
+   flight, and the flow then failed on a secondary assertion. It now waits (bounded, 30 s) for
+   the consent row to disappear — the form is replaced only when the submit actually navigated —
+   so a 4xx, a 5xx or a dead API fails at the submit instead of being silently skipped.
+   (`example.com` is also not a usable address: the project refuses it with
+   `400 email_address_invalid`.)
+
+The run then stopped at the API, and this is the honest boundary: **submission is covered,
+completion is not.** The project has confirmation enabled and a shared built-in mailer; sign-up
+answered `429 over_email_send_rate_limit` once the quota was spent, so no account was created, no
+session was issued and the emailed link was never followed. The seeded identity is `…@ses.test`
+— a reserved domain with no inbox — and no catch-all inbox is configured, so no automation here
+can follow the link. Completing sign-up needs one of: a dedicated test project with **Confirm
+email** disabled for the E2E environment, a project whose SMTP is not shared and rate-limited, or
+a catch-all inbox the runner can read. Until then journey 1 proves the screen, the client-side
+policy, consent, the request and the route handling — not the email round trip.
+
+Still unverified: `e2e.yml` has never executed, journey 1 has never completed, and journey 3
+covers only the add → publish → summary path — it does not attach a bill, configure a per-sqft
+split, or verify dues from a resident account.
 
 ### Cleaning up after a device run
 
@@ -292,6 +366,9 @@ Reviewed and confirmed read-only (no testID, label or screen was invented):
   subflow asserts.
 - `'Amount'`, `'Title'`, `'Full name'`, `'Email'`, `'^Password$'` and `'Expense date'` are
   `TextInput` labels, and `TextInput` sets `accessibilityLabel={label}` on the input itself.
+- `'Accept the terms and privacy policy'` is the consent `Pressable`'s `accessibilityLabel`
+  (`register.tsx`), which is why the flow addresses the row by that and not by its long child
+  text.
 - `'Save expense'`, `'New'`, `'Filter expenses'`, `'Publish expense'`, `'Create account'`,
   `'Create an account'`, `'Log in'`, `'Resend verification email'`, `'Confirm your email'`,
   `'Tell us your name'` and `'Your details'` all exist as rendered text in the screens named.
