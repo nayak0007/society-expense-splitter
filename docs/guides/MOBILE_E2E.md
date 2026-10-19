@@ -15,8 +15,10 @@ Legend for what has actually been run: ☐ not run · ✅ pass · ❌ fail.
 | `02-login-email.yaml`     | Signed out → email/password → the app shell (profile, memberships, resolver)       |
 | `03-expense-publish.yaml` | Sign in → draft an expense through the real form → confirm → the published summary |
 
-`subflows/sign-in.yaml` is a fragment (`runFlow`), not a flow: it has no `appId` header and is
-not listed in `config.yaml`, so it is never run on its own.
+`subflows/sign-in.yaml` is a fragment (`runFlow`), not a flow: it is not listed in `config.yaml`,
+so Maestro never runs it on its own. It still declares the same `appId` and `---` header as its
+callers, because Maestro 2.x refuses a YAML file with no config section (`Config Section
+Required`) even when its commands are merged into the caller.
 
 ## Prerequisites
 
@@ -27,10 +29,34 @@ not listed in `config.yaml`, so it is never run on its own.
   Maestro launches.
 - `apps/mobile/.env` pointing at an API the device can reach. An emulator is not the host:
   `http://localhost:3000/v1` from inside an Android emulator is the emulator itself, and the
-  host is `http://10.0.2.2:3000/v1`.
+  host is `http://10.0.2.2:3000/v1`. On a **physical device over USB**, `localhost` works only
+  because of the tunnel — `adb reverse tcp:3000 tcp:3000` and `adb reverse tcp:8081 tcp:8081`
+  (Metro as well, since the dev build loads its bundle from it). Those mappings are
+  **not sticky**: they vanish whenever adb reconnects, and the symptom is an app that starts and
+  then shows _"Unable to load script"_ or an empty screen, not an obviously broken tunnel. Re-add
+  them immediately before a run. Over Wi-Fi, skip the tunnel entirely: point `.env` at the host's
+  LAN address (e.g. `http://192.168.0.238:3000/v1`) and start the API with `HOST=0.0.0.0`, since
+  the default binds loopback only.
+- **An unlocked device, kept awake.** A locked phone shows only the lock screen to the driver,
+  so every selector fails (and the charging screen saver counts as a locked screen). On Android,
+  unlock it and run `adb shell svc power stayon true` plus
+  `adb shell settings put secure screensaver_enabled 0` before the suite. If the first assertion
+  instead _hangs_ and `~/.maestro/tests/<run>/maestro.log` holds
+  `UNAVAILABLE: End of stream`, the driver's port forward is missing — add
+  `adb forward tcp:<port> tcp:7001` for the port that log names.
 - A seeded account, in a society with active expense categories, holding **Admin or
   Treasurer** — journey 3 publishes, and `expense.publish` is those two roles (PRD §2.1).
   Journeys 2 and 3 change nothing about that account except creating one expense.
+- **At least one billable flat, with somebody to charge.** Publish resolves the expense's
+  participant selector against `apartments` and `members` server-side, so a society with
+  categories but no structure cannot complete journey 3: the API answers `422` —
+  _"The participant selector matches no billable flats in this society."_ — and the flow stops
+  at its last assertion. A flat is billable when `is_billable` is true and, if it is `vacant`,
+  when the society's `bill_vacant_flats` allows it; a billable flat with no primary occupant is
+  refused instead, as `unassigned_participants` (T066's fail-closed rule). One building, one
+  wing and one owner-occupied flat whose primary member is the seeded account is enough — and
+  the seeded **staging** society is in that state as of 2026-10-19 (building `A`, flats
+  `A-101`–`A-104`, all four owner-occupied and billable).
 - A catch-all inbox for `MAESTRO_SIGNUP_EMAIL`: journey 1 creates an account, so its address
   is derived per run (`+run-<id>`) and must be deliverable if the project requires email
   confirmation.
@@ -48,8 +74,8 @@ maestro test .maestro/02-login-email.yaml .maestro/03-expense-publish.yaml \
   -e MAESTRO_PASSWORD="…" \
   -e MAESTRO_NAME="Asha Rao" \
   -e MAESTRO_CATEGORY="Sinking Fund" \
-  -e MAESTRO_TITLE="Lift AMC — October" \
-  -e MAESTRO_AMOUNT="6000"
+  -e MAESTRO_TITLE="Lift AMC - October" \
+  -e MAESTRO_AMOUNT="4000"
 
 # Journey 1 — a fresh address, because it creates the account.
 maestro test .maestro/01-signup.yaml \
@@ -61,6 +87,21 @@ maestro test .maestro/01-signup.yaml \
 `maestro test .maestro` with no arguments runs `config.yaml`'s three flows in order, which is
 only correct when `MAESTRO_EMAIL` is an address that does not exist yet — that is why the CI
 script runs the two groups separately (`scripts/ci/maestro.sh`).
+
+### Two values that are not free choices
+
+**`MAESTRO_AMOUNT` must be below the society's `approval_threshold_paise`.** An expense _at or
+above_ the threshold is created as `pending_approval`, not `draft` (PRD §2.2, ADR-0011 D3), and a
+pending expense has no publish to confirm — the journey would create a row and then find no card
+to tap. The seeded society's threshold is ₹5,000, which is why the example above types `4000`
+and not a round `6000`: the published summary the flow asserts is only reachable below the line.
+This is the _product's_ rule being respected by the test data, not a workaround.
+
+**Keep `MAESTRO_TITLE` ASCII on Windows.** Maestro passes `-e` values through the shell it was
+launched from, and a Git Bash / `cmd` console on Windows mangles non-ASCII — an em dash arrives
+at the app as `?` (or as the CLI's U+FFFD), and the flow then fails at
+`Assert that "${MAESTRO_TITLE}" is visible` on a title the app rendered perfectly. A hyphen is
+the same title to a reader and survives the trip; CI is Linux and unaffected.
 
 ## Selector conventions
 
@@ -108,6 +149,11 @@ for whoever sees the failure — not a coordinate, and not a weakened assertion.
   row a run created identifiable in the ledger, and keeps two runs from colliding on a title.
   Cleanup is by voiding that run's own expense through the app (the detail screen offers it to the
   roles that may void) or by leaving it in staging; **never** by editing rows in a shared database.
+- **A failed journey 3 leaves a draft behind**, not a published row: the form saves the draft
+  (`Save expense`) and `main`'s cleanup path voids what was published, but an interrupted run's
+  draft stays in the ledger and a later run would create a second row with the same title. Drafts
+  are deletable through the app (`DELETE /expenses/:expenseId` admits them and nothing else),
+  which is the tidy way to remove them between runs.
 - **Journeys 2 and 3 change nothing else.** They sign in and read; the only write is the one
   expense. They do not switch societies, edit members or touch settings.
 - **Device state is cleared first.** Every journey starts with `clearState: true` **and**
@@ -153,16 +199,90 @@ and a published bill is not deletable.
 
 ## Verification status
 
-☐ **None of the three journeys has been executed, and `e2e.yml` has never run.** They were
-authored in an environment with no emulator, no simulator, no device and no reachable API, so
-what has been verified is: YAML structure (parsed, Prettier-clean), `bash -n` on the runner
-script, that `config.yaml` lists exactly the three runnable journeys and no subflow, that every
-referenced subflow path exists, and — for the production guard — the guard's own logic
-exercised locally
-as a shell snippet (staging host allowed, production host refused, empty refused, emulator host
-allowed). The selector choices were checked against each screen's source, but **not** against a
-rendered accessibility tree; the expected first-run failures are ambiguous matches, which is why
-the anchoring and `testID` conventions above exist. The first run on hardware is the real test.
+Journeys **2 and 3 pass on real hardware** (Pixel 10, Android 17 / API 37, arm64 dev build,
+against the staging project); **journey 1 has still never been executed** and `e2e.yml` has
+never run.
+
+| Flow                      | Status | Last run   | Notes                                |
+| ------------------------- | ------ | ---------- | ------------------------------------ |
+| `01-signup.yaml`          | ☐      | —          | not run — it creates an auth user    |
+| `02-login-email.yaml`     | ✅     | 2026-10-19 | signed in, reached the app shell     |
+| `03-expense-publish.yaml` | ✅     | 2026-10-19 | drafted, saved, confirmed, published |
+
+The run of 2026-10-19 was the first, and it did what a first run is for — every failure below is
+something the flows or the app changed because of it, not something that was known in advance:
+
+1. **The category chips were unreachable by a plain tap.** The seeded vocabulary is nineteen
+   chips and `MAESTRO_CATEGORY` is seventeenth, so the flow now scrolls to it. It has to scroll
+   _after_ the keyboard is dismissed: the drags that dismiss it are the ones Maestro needs, and a
+   `scrollUntilVisible` that cannot scroll reports the chip missing while scrolling past it. The
+   ordering in `03-expense-publish.yaml` is load-bearing and says so.
+2. **The detail screen needed longer than 15 s.** It renders nothing until five reads (expense,
+   splits, revisions, comments, attachments) have all landed — 5–7 s each against the staging
+   API over Wi-Fi, ~13 s to first paint, measured. The save that precedes it is not free either:
+   `POST /v1/expenses` measured **10.0–10.3 s over three probes**, and one device run took **89 s**
+   before the row committed (the request was logged as aborted while the write still landed).
+   The wait after `Save expense` is therefore **60 s** and the publish wait **45 s** (a publish
+   measured 18.7 s). Both stay bounded: a screen that never renders still fails.
+3. **Every expense write answered `500` against staging.** Not the flow at all: the staging
+   database was three migrations behind the API build, so the write transaction's
+   `public.write_audit_logs(jsonb)` — added by `20261015120000_audit_logs.sql` — did not exist,
+   and `unit-of-work.ts` flushes audit rows inside the business transaction by design. Applying
+   the migrations fixed it. **Apply `pnpm db:migrate` before blaming the journey**: the API's
+   write path assumes HEAD, and a pending migration shows up as a generic `INTERNAL`, never as a
+   schema error.
+4. **Publish then refused with `422`** — _"The participant selector matches no billable flats in
+   this society."_ The seeded staging society had categories and members but no buildings or
+   flats, so nothing was billable. That is the prerequisite above, and the reason it is stated as
+   one.
+
+Three **app-level** defects also had to be fixed before any flow could pass, and they were found
+by the same run rather than known in advance: the global providers lived under `app/providers/`,
+which Expo Router treats as a route (the navigator rendered an empty screen), so they now live in
+`src/providers/` as a byte-identical move; `ThemeProvider`'s root `View` had no `flex: 1`, so
+every screen's `flex-1` resolved against a zero-height parent and the app was blank; and
+`SecureStoreAdapter.getItem` returned the chunk **count** that `setItem` writes instead of
+reassembling the parts, so no session ever restored.
+
+The `'Publish'` ambiguity called out above — the one genuinely ambiguous tap in the suite — **did
+not** bite in this run: the alert's action resolved unambiguously on Android 17. It remains the
+first thing to check if journey 3 starts failing at the confirmation.
+
+What the runs asserted beyond the screens, checkable afterwards on the seeded society: the
+publication wrote **four splits of ₹1,000 summing to ₹4,000** (the flow's amount), and
+`public.audit_logs` holds **`expense.created` and `expense.published`** for that expense,
+recorded against `actor_role = treasurer` — the same trail the integration suite asserts, seen
+there for real. (The conservation, the dues and the audit row remain integration-test
+assertions; this was a read of what real runs left behind, not a substitute for them.)
+
+After the waits above were widened, journey 3 was run again end to end and passed
+(`exit=0`, every step `COMPLETED`), leaving the same shape in staging: one `published`
+expense of ₹4,000, four splits of ₹1,000, and both audit rows against `treasurer`. The
+wider bounds are what makes the run repeatable — at 30 s the save plus the detail reads sat
+inside a single window's margin.
+
+Still unverified from the earlier review, and unchanged by the runs: `e2e.yml` itself has never
+executed, and journey 1 — the only flow that exercises sign-up, the password policy and the
+post-sign-up route — has not either. Journey 3 also covers only the add → publish → summary path:
+it does not attach a bill, configure a per-sqft split, or verify dues from a resident account.
+
+### Cleaning up after a device run
+
+The USB tunnel and the wake settings outlive the suite while the device stays attached. Put the
+phone back with:
+
+```bash
+adb shell svc power stayon false
+adb shell settings put secure screensaver_enabled 1
+adb reverse --remove tcp:3000
+adb reverse --remove tcp:8081
+adb forward --remove tcp:<port>   # the port maestro.log named
+```
+
+`adb reverse --remove-all` / `adb forward --remove-all` are the blunt alternatives. They also drop
+rules another active session may be using, so prefer the targeted removals unless nothing else is
+attached. The forwards and reverses belong to the device: disconnecting it removes them, and
+`adb forward --list` / `adb reverse --list` show only what the currently attached device has.
 
 Reviewed and confirmed read-only (no testID, label or screen was invented):
 
