@@ -23,7 +23,11 @@ tags:
 - launchApp:
     clearState: true
     clearKeychain: true
-- assertVisible: 'Transparent society finances — set up in 20 minutes.'
+# The cold-start bundle is why this waits rather than asserting immediately (see
+# subflows/sign-in.yaml); the screen is the same one a user sees.
+- extendedWaitUntil:
+    visible: 'Transparent society finances — set up in 20 minutes.'
+    timeout: 60000
 - tapOn: 'Create an account'
 
 - assertVisible: 'Create your account'

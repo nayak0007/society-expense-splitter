@@ -43,17 +43,46 @@ tags:
 
 - tapOn: 'Expenses'
 - assertVisible: 'Filter expenses'
+# The form opens at its top: the amount is pinned, but the Save button sits below the fold on
+# a phone-sized screen, so asserting it here would be asserting the viewport, not the form.
+# `Category` is the section that proves the form opened *and* that the society's categories
+# came back from the API — which is a precondition for the tap below.
 - tapOn: 'New'
-- assertVisible: 'Save expense'
+- assertVisible: 'Category'
 
 # The amount is the sticky header, outside the scroll view, so it is reachable first.
 - tapOn: 'Amount'
 - inputText: ${MAESTRO_AMOUNT}
 - tapOn: 'Title'
 - inputText: ${MAESTRO_TITLE}
+# The keyboard is still up after typing the title, and it covers the bottom of the form, so a
+# scroll gesture from there is delivered to Gboard instead of to the form (measured: the scroll
+# opened the keyboard's own settings sheet and found nothing; `hideKeyboard` is not supported
+# for Gboard either). The form's `ScrollView` dismisses the keyboard on drag, so the first drag
+# is aimed at the upper half — above the keyboard — and the rest of the journey runs on a
+# keyboard-free screen. `Amount` is the sticky header: it is visible whether or not the drag
+# moved the scroll content, which is what makes it the assertion that proves we are still on
+# the form rather than a screen the drag navigated away from.
+- swipe:
+    start: '50%,45%'
+    end: '50%,20%'
+    duration: 400
+- assertVisible: 'Amount'
+
 # Categories are chips, addressed by name. The society's seeded nineteen are the vocabulary
 # a treasurer already knows, so a flow naming one is naming something a user would tap.
-- tapOn: ${MAESTRO_CATEGORY}
+#
+# The chips wrap onto several rows *below the title*, and the seeded vocabulary is nineteen
+# long — so a category near the end ("Sinking Fund" is seventeenth) is off-screen until the
+# form is scrolled to it. This runs *after* the keyboard is dismissed, for the same reason the
+# drag above is aimed high: a scroll gesture delivered to Gboard moves nothing, and a
+# `scrollUntilVisible` that cannot scroll scrolls past nothing and reports the category missing.
+# A flow that only worked for the first row of chips would be quietly testing the alphabet, not
+# the form.
+- scrollUntilVisible:
+    element: '${MAESTRO_CATEGORY}'
+    direction: DOWN
+- tapOn: '${MAESTRO_CATEGORY}'
 
 - scrollUntilVisible:
     element: 'Save expense'
@@ -62,9 +91,19 @@ tags:
 
 # The form replaces itself with the row it saved; the title the detail screen renders is the
 # server's copy of what was typed, not the local form state.
+#
+# The wait is 60 s because the screen is not one request: it reads the expense, its splits,
+# revisions, comments and attachments, and renders nothing until all five have landed. Each is
+# milliseconds against a local API but seconds against a remote one over a phone's Wi-Fi —
+# measured at 5–7 s per read on the seeded staging project (2026-10-19), which put the first
+# render at ~13 s. The save that precedes it is not free either: `POST /v1/expenses` measured
+# 10.0–10.3 s over three probes against the staging database, and one run took 89 s before the
+# row committed (the device's connection stalled; the API logged the request as aborted).
+# The budget therefore covers the save *and* the reads with headroom, and stayed bounded so a
+# screen that never renders still fails rather than hanging the suite.
 - extendedWaitUntil:
     visible: ${MAESTRO_TITLE}
-    timeout: 15000
+    timeout: 60000
 # A draft is publishable; the publish card sits below the split and bill sections.
 - scrollUntilVisible:
     element:
@@ -78,6 +117,9 @@ tags:
 - assertVisible: 'Publish this expense?'
 - tapOn: 'Publish'
 
+# Publishing resolves the roster, writes a due per participant and reads the publication back:
+# the slowest call in the journey (measured 18.7 s end-to-end against the staging project,
+# 2026-10-19), so it gets a bounded wait with room for the reads that follow it.
 - extendedWaitUntil:
     visible: 'Published .* shares totalling .*'
-    timeout: 15000
+    timeout: 45000

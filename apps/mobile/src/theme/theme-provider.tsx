@@ -32,5 +32,12 @@ const darkVars = vars(schemeToVars(darkColors));
  */
 export const ThemeProvider = memo(function ThemeProvider({ children }: { children: ReactNode }) {
   const { colorScheme } = useColorScheme();
-  return <View style={colorScheme === 'dark' ? darkVars : lightVars}>{children}</View>;
+  // `flex: 1` is load-bearing, not decoration: this wrapper is the app's root
+  // layout box. Without it the wrapper sizes to its content, every screen's
+  // `flex-1` inside it resolves against a zero-height parent, and the app
+  // renders as a blank white surface with a correctly mounted React tree —
+  // which is exactly what the first Android run showed (2026-10-18).
+  return (
+    <View style={[{ flex: 1 }, colorScheme === 'dark' ? darkVars : lightVars]}>{children}</View>
+  );
 });

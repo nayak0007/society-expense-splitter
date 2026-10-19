@@ -18,8 +18,25 @@ import { config } from '@/constants/config';
  * so the documented chunking pattern stores larger session blobs in parts.
  */
 class SecureStoreAdapter {
-  getItem(key: string): Promise<string | null> {
-    return SecureStore.getItemAsync(key);
+  /** Reassembles what `setItem` wrote: the count at `key`, the parts at `key-0…n`. */
+  async getItem(key: string): Promise<string | null> {
+    const partsRaw = await SecureStore.getItemAsync(key);
+    if (partsRaw === null) return null;
+
+    const parts = Number.parseInt(partsRaw, 10);
+    // Not a count: a value written by an older build (or another writer) directly
+    // under `key`. Returning it is the only non-destructive answer.
+    if (Number.isNaN(parts)) return partsRaw;
+
+    let value = '';
+    for (let i = 0; i < parts; i += 1) {
+      const chunk = await SecureStore.getItemAsync(`${key}-${i}`);
+      // A half-written value is not a session: report absence rather than a
+      // truncated token the SDK would fail to parse.
+      if (chunk === null) return null;
+      value += chunk;
+    }
+    return value;
   }
 
   async setItem(key: string, value: string): Promise<void> {

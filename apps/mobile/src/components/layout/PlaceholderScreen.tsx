@@ -1,4 +1,4 @@
-import { Link, Stack } from 'expo-router';
+import { Link, Stack, type Href } from 'expo-router';
 import { View } from 'react-native';
 
 import { Button } from '@/components/ui/Button';
@@ -14,8 +14,14 @@ export interface PlaceholderScreenProps {
   readonly title: string;
   /** Optional one-line description under the title. */
   readonly description?: string;
-  /** (label, href) pairs rendered as tonal buttons. */
-  readonly links?: ReadonlyArray<readonly [string, string]>;
+  /**
+   * (label, href) pairs rendered as tonal buttons.
+   *
+   * `Href`, not `string`: typed routes are enabled (`app.config.ts`'s
+   * `experiments.typedRoutes`), so a bare string is not assignable to `Link`'s
+   * `href`. The literal routes the screens pass are exactly what `Href` is for.
+   */
+  readonly links?: ReadonlyArray<readonly [string, Href]>;
 }
 
 export function PlaceholderScreen({ title, description, links = [] }: PlaceholderScreenProps) {
@@ -36,7 +42,7 @@ export function PlaceholderScreen({ title, description, links = [] }: Placeholde
         {links.length > 0 ? (
           <View className="mt-4 gap-3">
             {links.map(([label, href]) => (
-              <Link key={href} href={href} asChild>
+              <Link key={label} href={href} asChild>
                 <Button variant="tonal">{label}</Button>
               </Link>
             ))}

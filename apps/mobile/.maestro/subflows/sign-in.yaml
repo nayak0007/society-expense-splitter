@@ -1,8 +1,13 @@
 # Signs a seeded account in and waits for the app shell.
 #
-# A fragment, not a flow: no `appId` header, because `runFlow` merges these commands into the
-# caller, which owns the app. The caller also owns `launchApp`/`clearState` — a fragment that
-# restarted the app would erase the state the caller's journey just set up.
+# A fragment, not a flow: its commands are merged into the caller, which owns the app. The
+# caller also owns `launchApp`/`clearState` — a fragment that restarted the app would erase the
+# state the caller's journey just set up.
+#
+# It still declares the same `appId` and `---` header as its callers. That is not a second app
+# and not a runnable journey (it stays out of `config.yaml`): Maestro 2.x's `runFlow` refuses a
+# YAML file with no config section at all — "Config Section Required" — even though the command
+# would otherwise be merged into the caller. Found on the first real run, 2026-10-18.
 #
 # The submit button is addressed *relative to the password field*, not by its label: the login
 # screen's header title is "Log in" and so is its button, so a plain `tapOn: "Log in"` is two
@@ -13,6 +18,17 @@
 # unanchored `Password` matches both.
 #
 #   env: MAESTRO_EMAIL, MAESTRO_PASSWORD
+appId: com.resident360.app
+---
+# The caller has just cold-started the app with `clearState`, so the debug build
+# fetches and evaluates the JS bundle before the welcome screen exists. Maestro's
+# default tap window is shorter than that on an emulator — measured at ~25 s for
+# the first 2,499-module bundle, 2026-10-18 — so wait for the screen the journey
+# is about instead of tapping into a splash. Bounded, so a real regression still
+# fails rather than hanging.
+- extendedWaitUntil:
+    visible: 'Log in'
+    timeout: 60000
 - tapOn: 'Log in'
 - tapOn: 'Email'
 - inputText: ${MAESTRO_EMAIL}
@@ -23,4 +39,9 @@
     below: '^Password$'
 # The home tab's own description: the session resolved, the profile loaded, the memberships
 # loaded and the route resolver chose (app). Anything less stays on the splash.
-- assertVisible: 'Dues summary, notices and quick actions will live here.'
+# Cold start downloads the bundle and restores the session before the profile and
+# memberships land, so the shell can take longer than a default assert window on an
+# emulator. A bounded wait is the difference between "slow" and "broken" here.
+- extendedWaitUntil:
+    visible: 'Dues summary, notices and quick actions will live here.'
+    timeout: 30000
