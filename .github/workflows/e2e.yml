@@ -23,6 +23,9 @@
 #   EXPO_PUBLIC_API_URL             public API base, e.g. https://staging-api.resident360.com/v1
 #   EXPO_PUBLIC_SUPABASE_URL        public project URL
 #   EXPO_PUBLIC_SUPABASE_ANON_KEY   public anon key (RLS is the boundary)
+#   EXPO_PUBLIC_RAZORPAY_KEY_ID     public key id (rzp_test_…); `src/constants/config.ts`
+#                                   refuses to load without it, and these journeys never
+#                                   open a payment — a placeholder is used when unset
 #   MAESTRO_SIGNUP_EMAIL            a catch-all inbox journey 1 may create an address in
 #   MAESTRO_EMAIL                   the seeded account journeys 2 and 3 sign in as
 #   MAESTRO_PASSWORD                that account's password
@@ -54,6 +57,23 @@
 # production guard's logic was exercised locally as a shell snippet, but the job itself has never
 # run — and the flows it invokes have never been driven end to end. Treat the first dispatched
 # run as the real test of both, and fix what it reports rather than weakening the flows.
+#
+# **Review 2026-10-19 (still not dispatched).** The flows were driven on a physical Pixel 10,
+# and reviewing the job against what that run needed found four defects that would have failed
+# the first dispatch — all fixed here, none of them a weakened flow or a bypass:
+#
+#   1. the debug APK was built and **never installed** on the emulator, so Maestro's `launchApp`
+#      would have failed on a missing package (`adb install -r` added to the emulator step);
+#   2. a debug build loads its JS from **Metro**, which the job never started (Metro and
+#      `adb reverse tcp:8081` are now part of the emulator step; the iOS job starts Metro too,
+#      which is why it launches with `--no-bundler`);
+#   3. the generated `apps/mobile/.env` carried no `EXPO_PUBLIC_RAZORPAY_KEY_ID`, which
+#      `src/constants/config.ts` requires at module load — the app would have thrown before its
+#      first frame (a public placeholder is used unless the secret is set);
+#   4. the upload step shipped `~/.maestro/tests` as-is, and `commands.json` records every `-e`
+#      value **in plaintext** (verified locally: `MAESTRO_EMAIL` and `MAESTRO_PASSWORD` are both
+#      in it, and `maestro.log` echoes the evaluated commands). Artefacts are now stripped of
+#      those files before upload — a password must not travel in a build artefact.
 name: e2e
 
 on:
@@ -96,14 +116,20 @@ jobs:
       # and publish a bill, and neither can be withdrawn from the ledger afterwards. The URL is a
       # secret, so this is the only place it can be checked: refuse an empty value and refuse the
       # production host, then print the host that will be baked into the bundle.
-      - name: Refuse to target production
+      # Two jobs, one check: every secret the run needs is reported by name (rather than
+      # surfacing later as an app that cannot boot), and a production API host is refused.
+      - name: Check the E2E environment (secrets present, not production)
         env:
           API_URL: ${{ secrets.EXPO_PUBLIC_API_URL }}
+          SUPABASE_URL: ${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
         run: |
-          if [ -z "${API_URL}" ]; then
-            echo 'EXPO_PUBLIC_API_URL is not set — the journeys need a reachable API.' >&2
-            exit 2
-          fi
+          for name in API_URL SUPABASE_URL SUPABASE_ANON_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "${name} is not set — the journeys need it (see the header)." >&2
+              exit 2
+            fi
+          done
           # The **host**, not the string: `staging-api.resident360.com` contains
           # `api.resident360.com`, so a substring test would refuse staging as well as production.
           host="${API_URL#*://}"
@@ -122,6 +148,7 @@ jobs:
           EXPO_PUBLIC_API_URL=${{ secrets.EXPO_PUBLIC_API_URL }}
           EXPO_PUBLIC_SUPABASE_URL=${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
           EXPO_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+          EXPO_PUBLIC_RAZORPAY_KEY_ID=${{ secrets.EXPO_PUBLIC_RAZORPAY_KEY_ID || 'rzp_test_e2eunused000000' }}
           EOF
 
       - name: Generate the native project and build a debug APK
@@ -145,14 +172,57 @@ jobs:
           target: google_apis
           arch: x86_64
           disable-animations: true
-          script: bash ./scripts/ci/maestro.sh
+          script: |
+            set -eu
+            # The debug APK is built by the step above and is not installed by it: Maestro's
+            # `launchApp` fails against a package the device does not have.
+            adb install -r apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+            # A debug build loads its JS from Metro on the runner; the emulator reaches that
+            # only through a reverse tunnel, and the app shows "Unable to load script" without it.
+            adb reverse tcp:8081 tcp:8081
+            ( cd apps/mobile && pnpm exec expo start --port 8081 > /tmp/metro.log 2>&1 & )
+            timeout 180 bash -c 'until curl -sf http://127.0.0.1:8081/status >/dev/null; do sleep 2; done'
+            bash ./scripts/ci/maestro.sh
+
+      # `~/.maestro/tests` cannot be uploaded as-is: `commands.json` records every `-e` value in
+      # plaintext — including `MAESTRO_PASSWORD` — and `maestro.log` echoes the evaluated
+      # commands. Screenshots and the screen hierarchy are the diagnostic value; the credential-
+      # bearing files are removed, and the step then *proves* that neither the file names nor a
+      # known secret value survives. The upload is gated on this step's success, so a strip that
+      # fails uploads nothing rather than the raw directory.
+      - name: Strip credentials out of the Maestro reports
+        id: strip-reports
+        if: always()
+        env:
+          MAESTRO_PASSWORD: ${{ secrets.MAESTRO_PASSWORD }}
+          EXPO_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          rm -rf e2e-artifacts
+          mkdir -p e2e-artifacts
+          if [ -d "${HOME}/.maestro/tests" ]; then
+            cp -r "${HOME}/.maestro/tests/." e2e-artifacts/
+          fi
+          find e2e-artifacts -type f -name 'commands.json' -delete
+          find e2e-artifacts -type f -name 'maestro.log' -delete
+          find e2e-artifacts -type d -name logs -prune -exec rm -rf {} +
+          if find e2e-artifacts \( -name 'commands.json' -o -name 'maestro.log' \) | grep -q .; then
+            echo 'refusing to upload: credential-bearing files remain' >&2
+            exit 1
+          fi
+          for secret in "${MAESTRO_PASSWORD:-}" "${EXPO_PUBLIC_SUPABASE_ANON_KEY:-}"; do
+            if [ -n "${secret}" ] && grep -rqF -- "${secret}" e2e-artifacts; then
+              echo 'refusing to upload: a secret value is still present in the reports' >&2
+              exit 1
+            fi
+          done
 
       - name: Upload Maestro reports
-        if: always()
+        if: always() && steps.strip-reports.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: maestro-android
-          path: ~/.maestro/tests
+          path: e2e-artifacts
+          if-no-files-found: ignore
           retention-days: 7
 
   ios:
@@ -169,14 +239,20 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
-      - name: Refuse to target production
+      # Two jobs, one check: every secret the run needs is reported by name (rather than
+      # surfacing later as an app that cannot boot), and a production API host is refused.
+      - name: Check the E2E environment (secrets present, not production)
         env:
           API_URL: ${{ secrets.EXPO_PUBLIC_API_URL }}
+          SUPABASE_URL: ${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
         run: |
-          if [ -z "${API_URL}" ]; then
-            echo 'EXPO_PUBLIC_API_URL is not set — the journeys need a reachable API.' >&2
-            exit 2
-          fi
+          for name in API_URL SUPABASE_URL SUPABASE_ANON_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "${name} is not set — the journeys need it (see the header)." >&2
+              exit 2
+            fi
+          done
           # The **host**, not the string: `staging-api.resident360.com` contains
           # `api.resident360.com`, so a substring test would refuse staging as well as production.
           host="${API_URL#*://}"
@@ -193,7 +269,16 @@ jobs:
           EXPO_PUBLIC_API_URL=${{ secrets.EXPO_PUBLIC_API_URL }}
           EXPO_PUBLIC_SUPABASE_URL=${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
           EXPO_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+          EXPO_PUBLIC_RAZORPAY_KEY_ID=${{ secrets.EXPO_PUBLIC_RAZORPAY_KEY_ID || 'rzp_test_e2eunused000000' }}
           EOF
+
+      # The Debug build loads its JS from Metro, and `--no-bundler` explicitly promises Metro
+      # is already running — so it is started here, detached, and the step waits for it to answer.
+      - name: Start Metro for the debug build
+        working-directory: apps/mobile
+        run: |
+          nohup pnpm exec expo start --port 8081 > /tmp/metro.log 2>&1 &
+          timeout 180 bash -c 'until curl -sf http://127.0.0.1:8081/status >/dev/null; do sleep 2; done'
 
       # `expo run:ios` builds the generated project and launches it on a simulator, which is
       # also the only step that proves the native modules this app depends on link on this SDK.
@@ -212,10 +297,40 @@ jobs:
           MAESTRO_SIGNUP_EMAIL: ${{ secrets.MAESTRO_SIGNUP_EMAIL }}
         run: bash ./scripts/ci/maestro.sh
 
-      - name: Upload Maestro reports
+      # Same reason as the Android job: the raw tests directory carries the `-e` values in
+      # `commands.json` and `maestro.log`, so only diagnostic files are uploaded — and only when
+      # the strip step proved they are gone.
+      - name: Strip credentials out of the Maestro reports
+        id: strip-reports
         if: always()
+        env:
+          MAESTRO_PASSWORD: ${{ secrets.MAESTRO_PASSWORD }}
+          EXPO_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          rm -rf e2e-artifacts
+          mkdir -p e2e-artifacts
+          if [ -d "${HOME}/.maestro/tests" ]; then
+            cp -r "${HOME}/.maestro/tests/." e2e-artifacts/
+          fi
+          find e2e-artifacts -type f -name 'commands.json' -delete
+          find e2e-artifacts -type f -name 'maestro.log' -delete
+          find e2e-artifacts -type d -name logs -prune -exec rm -rf {} +
+          if find e2e-artifacts \( -name 'commands.json' -o -name 'maestro.log' \) | grep -q .; then
+            echo 'refusing to upload: credential-bearing files remain' >&2
+            exit 1
+          fi
+          for secret in "${MAESTRO_PASSWORD:-}" "${EXPO_PUBLIC_SUPABASE_ANON_KEY:-}"; do
+            if [ -n "${secret}" ] && grep -rqF -- "${secret}" e2e-artifacts; then
+              echo 'refusing to upload: a secret value is still present in the reports' >&2
+              exit 1
+            fi
+          done
+
+      - name: Upload Maestro reports
+        if: always() && steps.strip-reports.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: maestro-ios
-          path: ~/.maestro/tests
+          path: e2e-artifacts
+          if-no-files-found: ignore
           retention-days: 7
